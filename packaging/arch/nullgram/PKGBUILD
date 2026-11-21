@@ -5,7 +5,7 @@
 # downloads them at their own wish in the app (Ko'rinish › Emoji; emoji_get.py, also usable by hand).
 pkgname=nullgram
 pkgver=0.9.1
-pkgrel=1
+pkgrel=2
 pkgdesc="Telegram client for ztOS phones (unofficial), Qt Quick + TDLib"
 arch=('any')
 url="https://github.com/urinbayevoff/nullgram"
