@@ -1,0 +1,6 @@
+__pycache__/
+app/emoji/
+app/api.json
+*.pkg.tar.*
+src/
+pkg/

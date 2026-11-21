@@ -1,0 +1,5 @@
+singleton Theme 1.0 Theme.qml
+singleton Prefs 1.0 Prefs.qml
+singleton Emo 1.0 Emo.qml
+singleton Tr 1.0 Tr.qml
+singleton Tick 1.0 Tick.qml

@@ -1,0 +1,44 @@
+# Builds Nullgram's pacman packages for aarch64 in Arch Linux ARM and publishes them, with the repository
+# database, as the assets of the `repo` release: pacman's Server is .../releases/download/repo (README).
+# nullgram-tdlib is built only when its version is not on the release yet (it takes long).
+name: build
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: What the repo release has
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p out
+          gh release view repo >/dev/null 2>&1 || gh release create repo --title "pacman repository" \
+            --notes "Nullgram's pacman repository (see README: Install). Built by CI; do not download by hand."
+          gh release download repo --dir out --pattern 'nullgram-tdlib-*.pkg.tar.*' || true
+      - name: Arch Linux ARM
+        run: |
+          curl -fsSL -o alarm.tar.gz http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          docker import alarm.tar.gz alarm
+      - name: Build
+        env:
+          NULLGRAM_API_ID: ${{ secrets.NULLGRAM_API_ID }}
+          NULLGRAM_API_HASH: ${{ secrets.NULLGRAM_API_HASH }}
+        run: |
+          docker run --rm -e NULLGRAM_API_ID -e NULLGRAM_API_HASH -v "$PWD:/w" -w /w alarm /bin/sh ci/build-in-arch.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out
+          old=$(gh release view repo --json assets -q '.assets[].name' | grep -E '^nullgram-[0-9].*\.pkg\.tar\.' || true)
+          gh release upload repo --clobber nullgram.db nullgram.db.tar.gz nullgram.files nullgram.files.tar.gz \
+            nullgram-*.pkg.tar.*
+          for a in $old; do [ -e "$a" ] || gh release delete-asset repo "$a" --yes; done

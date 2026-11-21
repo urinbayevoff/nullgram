@@ -1,0 +1,7 @@
+#!/bin/sh
+# Nullgram from a package (/usr/share/nullgram). One at a time: a second start brings the running one
+# back (SIGUSR1 shows a hidden window). Its words go to $XDG_RUNTIME_DIR/nullgram.log.
+pid=$(pgrep -f '^python3 /usr/share/nullgram/nullgram.py') && { kill -USR1 $pid; exit 0; }
+export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-wayland} QT_FORCE_STDERR_LOGGING=1
+log=${XDG_RUNTIME_DIR:-/tmp}/nullgram.log
+setsid -f python3 /usr/share/nullgram/nullgram.py "$@" > "$log" 2>&1 < /dev/null

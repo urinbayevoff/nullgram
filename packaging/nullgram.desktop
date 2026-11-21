@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Nullgram
+Comment=Telegram client for ztOS phones (unofficial)
+Exec=nullgram
+Icon=nullgram
+Terminal=false
+StartupWMClass=ztos.uz.omonullos.nullgram
+Categories=Network;InstantMessaging;
+X-ZtOS-Id=uz.omonullos.nullgram

@@ -1,0 +1,31 @@
+# Nullgram: a Telegram client for ztOS phones (Qt Quick + TDLib). Unofficial: not made by Telegram.
+# Built from this repository's checkout (NULLGRAM_SRC, default: three folders up). The Telegram API key goes
+# in only at build time, from NULLGRAM_API_ID / NULLGRAM_API_HASH (CI's secrets); without them the app asks
+# its user for one (Settings › Ma'lumotlar va xotira › API kaliti). Apple emoji are not in it (Apple's).
+pkgname=nullgram
+pkgver=0.9.0
+pkgrel=1
+pkgdesc="Telegram client for ztOS phones (unofficial), Qt Quick + TDLib"
+arch=('any')
+url="https://github.com/urinbayevoff/nullgram"
+license=('GPL-2.0-or-later')
+depends=('nullgram-tdlib' 'python' 'pyside6' 'qt6-declarative' 'qt6-multimedia' 'qt6-svg' 'qt6-wayland'
+         'python-qrcode' 'ffmpeg' 'glib2')
+_src=${NULLGRAM_SRC:-$startdir/../../..}
+
+package() {
+	local d="$pkgdir/usr/share/nullgram"
+	install -d "$d"
+	cp -r "$_src/app/qml" "$d/"
+	install -m644 "$_src/app/nullgram.py" "$d/"
+	find "$d" -name __pycache__ -prune -exec rm -rf {} +
+	rm -rf "$d/qml/emoji" "$d/emoji"
+	install -Dm755 "$_src/packaging/nullgram" "$pkgdir/usr/bin/nullgram"
+	install -Dm644 "$_src/packaging/nullgram.desktop" "$pkgdir/usr/share/applications/nullgram.desktop"
+	install -Dm644 "$_src/icon.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/nullgram.svg"
+	install -Dm644 "$_src/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	if [ -n "${NULLGRAM_API_ID:-}" ] && [ -n "${NULLGRAM_API_HASH:-}" ]; then
+		printf '{"id": %s, "hash": "%s"}\n' "$NULLGRAM_API_ID" "$NULLGRAM_API_HASH" > "$d/api.json"
+		chmod 644 "$d/api.json"
+	fi
+}

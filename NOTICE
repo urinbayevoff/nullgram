@@ -1,0 +1,23 @@
+Nullgram
+Copyright (C) 2026 Omonulloh and contributors
+Licensed under the GNU General Public License, version 2 or (at your option) any later version (LICENSE).
+
+Nullgram is an unofficial Telegram client. It is not made, endorsed or supported by Telegram.
+
+Third-party material
+--------------------
+
+Telegram-iOS (https://github.com/TelegramMessenger/Telegram-iOS), GNU GPL version 2:
+  - app/qml/intro/*.tgs and app/qml/animations/*.tgs: Telegram-iOS's animations.
+  - app/qml/settings-icons/*.png: Telegram-iOS's settings icons (Images.xcassets), drawn as its
+    renderSettingsIcon does.
+  - Some glyphs in app/qml/Icons.js (marked in the file).
+  The look of many pages follows Telegram-iOS's; the code is Nullgram's own (QML and Python).
+
+TDLib (https://github.com/tdlib/td), Boost Software License 1.0: the nullgram-tdlib package.
+OpenSSL (https://www.openssl.org), Apache License 2.0: linked into the nullgram-tdlib package.
+
+Apple emoji are NOT part of Nullgram or its packages (they are Apple's). A user may download them
+separately; without them Nullgram uses the system's emoji font.
+
+Made for ztOS (https://github.com/Zerone-Laboratories/ztOS, Ometh Abeyrathne) and omonullOS.
