@@ -63,6 +63,7 @@ Rectangle {
         property bool tapNext: true
         property bool storyHint: false
         property bool largeEmoji: true
+        property string emojiSet: ""
         property string autoDl: ""
         property string saveMedia: ""
         property string keepMedia: ""
@@ -105,6 +106,7 @@ Rectangle {
         Prefs.tapNext = prefs.tapNext
         Prefs.storyHint = prefs.storyHint
         Prefs.largeEmoji = prefs.largeEmoji
+        Prefs.emojiSet = prefs.emojiSet
         Prefs.autoDl = prefs.autoDl
         Prefs.saveMedia = prefs.saveMedia
         Prefs.keepMedia = prefs.keepMedia
@@ -141,6 +143,7 @@ Rectangle {
         function onTapNextChanged() { prefs.tapNext = Prefs.tapNext }
         function onStoryHintChanged() { prefs.storyHint = Prefs.storyHint }
         function onLargeEmojiChanged() { prefs.largeEmoji = Prefs.largeEmoji }
+        function onEmojiSetChanged() { prefs.emojiSet = Prefs.emojiSet }
         function onAutoDlChanged() { prefs.autoDl = Prefs.autoDl }
         function onSaveMediaChanged() { prefs.saveMedia = Prefs.saveMedia }
         function onKeepMediaChanged() { prefs.keepMedia = Prefs.keepMedia }

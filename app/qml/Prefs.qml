@@ -79,6 +79,7 @@ QtObject {
     property bool pauseMusic: true      // «Yozayotganda musiqani to'xtatish» (iOS's Pause Music While Recording)
     property bool storyHint: false      // the stories' gestures told once (the viewer's first opening)
     property bool tapNext: true         // Ko'rinish's «Bosilganda keyingi media» (iOS's Show Next Media on Tap; on there too)
+    property string emojiSet: ""        // Ko'rinish › Emoji: "apple" (the downloaded set), "system" (the font), "" as omonullOS Settings say
     property bool largeEmoji: true      // Stikerlar va emoji's «Katta emoji» (iOS's Large Emoji): one to three alone big
     property bool nightSun: false
     property int nightFrom: 22 * 60

@@ -1,8 +1,10 @@
 // Apple emoji as images, Telegram's way (Modified for OmonullOS, 2026-11). One source for both the
 // message text (Store.rich) and the picker (StickerPanel): the code-point->file map lives in
 // app/emoji/emoji-map.json and the PNGs in app/emoji/apple (both local, gitignored). If the set is
-// absent the map does not load (ready stays false) and callers keep the system font. They are used only
-// when omonullOS Settings > theme > Emoji is Apple (td.appleEmoji); with Google's, the font (Noto) draws.
+// absent the map does not load (ready stays false) and callers keep the system font. They are used when
+// chosen: Ko'rinish › Emoji (Prefs.emojiSet "apple"), or left to omonullOS Settings > theme > Emoji (td.appleEmoji);
+// else the font (Noto) draws. The set is the user's own download (emoji_get.py); when it comes, goes or the
+// choice changes, the map is read again (ready flips, so the bindings that ask fileUrl follow).
 pragma Singleton
 import QtQuick
 
@@ -14,6 +16,16 @@ QtObject {
     property int px: 20                  // inline size in message text
     property var map: null
     property bool ready: false
+    readonly property bool use: Prefs.emojiSet === "apple" || (Prefs.emojiSet === "" && typeof td !== "undefined" && !!td && td.appleEmoji)
+    onDirChanged: reload()
+    onUseChanged: reload()
+    function reload() {
+        if (map === null)
+            return              // (not read yet: the first load() will)
+        map = null
+        ready = false
+        load()
+    }
     // a cheap pre-test: does the text hold a char that could begin an emoji (so plain text skips the walk)
     readonly property var hint: /[©®‼⁉™ℹ←-⯿⤴⤵〰〽㊗㊙⃣️\ud83c-\udbff]/
 
@@ -21,8 +33,8 @@ QtObject {
         if (map !== null)
             return
         map = ({})
-        if (typeof td !== "undefined" && td && !td.appleEmoji) {
-            console.log("nullgram: emoji pictures off (omonullOS Settings: Google)")
+        if (!use) {
+            console.log("nullgram: emoji pictures off (the system's chosen)")
             return
         }
         try {

@@ -41,9 +41,20 @@ ever blocks it, or a build comes without one, enter your own from [my.telegram.o
 
 ## Apple emoji
 
-The set is [iamcal/emoji-data](https://github.com/iamcal/emoji-data)'s `img-apple-160` pictures with an
-`emoji-map.json`, in `~/.cache/nullgram-emoji/` (`apple/` and the map). A download script is planned; until
-then Nullgram uses the system's emoji font.
+Apple's emoji pictures are Apple's, so they are not in the package. If you want them, download them
+yourself, at your own wish: in the app, **Settings → Ko'rinish (Appearance) → Emoji → Apple emojisini yuklab
+olish**. It shows how far it is (share, megabytes, speed, time left) and goes on in the background even when
+Nullgram is closed; stopped, it goes on where it was. Or from a terminal:
+
+```sh
+python3 /usr/share/nullgram/emoji_get.py            # download (or go on)
+python3 /usr/share/nullgram/emoji_get.py --remove   # delete the set
+```
+
+The set (~85 MB, 3,783 pictures) is [iamcal/emoji-data](https://github.com/iamcal/emoji-data)'s
+`img-apple-160` (tag v16.0.0, through the jsDelivr CDN) with an `emoji-map.json`, in `~/.cache/nullgram-emoji/`.
+Without it Nullgram uses the system's emoji font. **Apple emojisi:** Sozlamalar → Ko'rinish → Emoji →
+«Apple emojisini yuklab olish» (o'z xohishingiz bilan; fonda yuklanadi, qancha qolgani ko'rinib turadi).
 
 ## Build
 

@@ -69,6 +69,17 @@ SubPage {
         SettingsRow { text: Tr.t("Xabar burchaklari"); onClicked: page.open("MessageCornersPage.qml") }
         // (iOS: «Animations» opens the Power Saving page itself, EnergySavingSettingsScreen)
         SettingsRow { text: Tr.t("Animatsiyalar"); onClicked: page.open("PowerPage.qml") }
+        // (ours) which emoji are drawn, and the Apple set's download: its share here while it comes down
+        SettingsRow {
+            id: emojiRow
+            property var st: ({})
+            text: Tr.t("Emoji")
+            value: st.state === "download" && st.total > 0 ? Math.floor(st.done / st.total * 100) + "%"
+                 : Emo.use && st.have ? "Apple" : Tr.t("Tizim")
+            onClicked: page.open("EmojiPage.qml")
+            Component.onCompleted: st = td.emojiStatus()
+            Timer { interval: 1000; repeat: true; running: page.visible; onTriggered: emojiRow.st = td.emojiStatus() }
+        }
         SettingsRow { text: Tr.t("Stikerlar va emoji"); last: true; onClicked: page.open("StickersPage.qml") }
     }
     SettingsGroup {

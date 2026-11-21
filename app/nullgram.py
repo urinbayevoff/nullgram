@@ -52,7 +52,11 @@ LIBS = [os.path.expanduser("~/.local/td/lib/libtdjson.so"), "/usr/lib/nullgram/l
 # the Apple emoji set (not in the package: Apple's pictures; downloaded by the user, OMMA-UCHUN.md): beside
 # the app in a checkout (install.sh links it), else the user's cache
 EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram-emoji")]
-VERSION = "0.9"
+# its download (Ko'rinish › Emoji): emoji_get.py beside this file, in its own process, says how far it is here
+EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
+EMOJI_GET = os.path.join(HERE, "emoji_get.py")
+EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
+VERSION = "0.9.1"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -428,9 +432,52 @@ class Td(QObject):
 	testDc = Property(bool, lambda self: TEST, constant=True)
 	# NULLGRAM_FPS: QML counts what it does into the late frames' lines (only then: td.fps first)
 	fps = Property(bool, lambda self: FPS, constant=True)
-	# Apple's emoji drawn as pictures (Emo.qml) only when omonullOS Settings chose Apple; Google's: the font
-	appleEmoji = Property(bool, lambda self: apple_emoji(), constant=True)
-	emojiDir = Property(str, lambda self: emoji_dir(), constant=True)
+	# Apple's emoji drawn as pictures (Emo.qml) when the set is downloaded (Ko'rinish › Emoji, emoji_get.py) and
+	# chosen: Nullgram's own choice (Prefs.emoji), else omonullOS Settings'; without the set, the font draws them.
+	# Both change when a download ends or the set is deleted (emojiChanged; the page asks emojiStatus).
+	emojiChanged = Signal()
+	appleEmoji = Property(bool, lambda self: apple_emoji(), notify=emojiChanged)
+	emojiDir = Property(str, lambda self: emoji_dir(), notify=emojiChanged)
+
+	@Slot(result="QVariantMap")
+	def emojiStatus(self) -> dict:
+		"""How the Apple set's download goes (emoji_get.py's status file): state none|start|download|stopped|
+		error|done, done/total pictures, bytes, est (all the bytes, guessed), speed (bytes/s), left (s);
+		`have`: the set is in place. A download whose process is gone is "stopped"."""
+		try:
+			with open(EMOJI_STATUS) as f:
+				st = json.load(f)
+		except (OSError, ValueError):
+			st = {}
+		if st.get("state") in ("start", "download") and not emoji_alive(st.get("pid")):
+			st["state"] = "stopped"
+		st.setdefault("state", "none")
+		st["have"] = emoji_dir() != ""
+		st["part"] = os.path.isdir(EMOJI_DEST + ".part")	# a stopped one waits to go on
+		if st["have"] != getattr(self, "_had_emoji", None):
+			if hasattr(self, "_had_emoji"):
+				self.emojiChanged.emit()
+			self._had_emoji = st["have"]
+		return st
+
+	@Slot()
+	def emojiStart(self):
+		"""The download, in its own session: it goes on when the app is closed."""
+		if self.emojiStatus()["state"] in ("start", "download"):
+			return
+		subprocess.Popen([sys.executable, EMOJI_GET], start_new_session=True, stdin=subprocess.DEVNULL,
+		                 stdout=subprocess.DEVNULL, stderr=open(EMOJI_STATUS + ".log", "w"))
+
+	@Slot()
+	def emojiStop(self):
+		subprocess.Popen([sys.executable, EMOJI_GET, "--stop"], start_new_session=True,
+		                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+	@Slot()
+	def emojiRemove(self):
+		subprocess.run([sys.executable, EMOJI_GET, "--remove"], stdout=subprocess.DEVNULL,
+		               stderr=subprocess.DEVNULL, timeout=30)
+		self.emojiStatus()
 	# omonullOS Settings' language ("uz" or "en"): Nullgram speaks it unless its own Til page chose one
 	systemLang = Property(str, lambda self: system_lang(), constant=True)
 
@@ -1507,6 +1554,15 @@ def omonullos() -> bool:
 		with open("/etc/os-release") as f:
 			return "omonullos" in f.read().lower()
 	except OSError:
+		return False
+
+
+def emoji_alive(pid) -> bool:
+	"""The emoji download (emoji_get.py) of this pid still runs."""
+	try:
+		with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+			return b"emoji_get" in f.read()
+	except (OSError, ValueError, TypeError):
 		return False
 
 

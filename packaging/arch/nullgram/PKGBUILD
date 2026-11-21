@@ -1,9 +1,10 @@
 # Nullgram: a Telegram client for ztOS phones (Qt Quick + TDLib). Unofficial: not made by Telegram.
 # Built from this repository's checkout (NULLGRAM_SRC, default: three folders up). The Telegram API key goes
 # in only at build time, from NULLGRAM_API_ID / NULLGRAM_API_HASH (CI's secrets); without them the app asks
-# its user for one (Settings › Ma'lumotlar va xotira › API kaliti). Apple emoji are not in it (Apple's).
+# its user for one (Settings › Ma'lumotlar va xotira › API kaliti). Apple emoji are not in it (Apple's): the user
+# downloads them at their own wish in the app (Ko'rinish › Emoji; emoji_get.py, also usable by hand).
 pkgname=nullgram
-pkgver=0.9.0
+pkgver=0.9.1
 pkgrel=1
 pkgdesc="Telegram client for ztOS phones (unofficial), Qt Quick + TDLib"
 arch=('any')
@@ -18,6 +19,7 @@ package() {
 	install -d "$d"
 	cp -r "$_src/app/qml" "$d/"
 	install -m644 "$_src/app/nullgram.py" "$d/"
+	install -m644 "$_src/app/emoji_get.py" "$d/"
 	find "$d" -name __pycache__ -prune -exec rm -rf {} +
 	rm -rf "$d/qml/emoji" "$d/emoji"
 	install -Dm755 "$_src/packaging/nullgram" "$pkgdir/usr/bin/nullgram"
