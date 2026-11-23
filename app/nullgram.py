@@ -58,7 +58,7 @@ EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram
 EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
 EMOJI_GET = os.path.join(HERE, "emoji_get.py")
 EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -328,8 +328,10 @@ class _VideoStream:
 
 	def wait_range(self, fid: int, pos: int, total: int):
 		"""Ensure bytes starting at `pos` are on disk, returning (path, avail_bytes, is_completed)."""
-		deadline = time.monotonic() + 12.0
-		kicked = False
+		# a slow network or a big video: wait long, and ask again every few seconds (another reader of the
+		# same file — the player opens several connections — may have moved TDLib's offset elsewhere)
+		deadline = time.monotonic() + 45.0
+		next_kick = 0.0
 		while time.monotonic() < deadline:
 			with self.lock:
 				f = self.files.get(fid)
@@ -340,13 +342,16 @@ class _VideoStream:
 			if path and os.path.exists(path):
 				r = self.call({"@type": "getFileDownloadedPrefixSize", "file_id": fid, "offset": pos}, 1.5)
 				if r and r.get("@type") == "fileDownloadedPrefixSize":
-					n = int(r.get("count") or 0)
+					# TDLib 1.8.x answers `size` (older ones `count`): reading only `count` saw 0 always, so a
+					# story played only once the whole file was down within the wait
+					n = int(r.get("size", r.get("count")) or 0)
 					if n > 0:
 						return path, n, False
-			if not kicked:
+			now = time.monotonic()
+			if now >= next_kick:
 				lim = min(524288, max(65536, total - pos))
 				self.kick(fid, pos, lim)
-				kicked = True
+				next_kick = now + 3.0
 			with self.cond:
 				self.cond.wait(0.2)
 		return "", 0, False

@@ -783,6 +783,8 @@ SubPage {
             const p = pictures[k]
             if (p && !picturePaths[k])
                 store.fetch(p.file, k === i ? 16 : 4, (path) => {
+                    if (!page)          // the page was closed before the picture came
+                        return
                     const m = Object.assign({}, page.picturePaths)
                     m[k] = path
                     page.picturePaths = m
@@ -1315,7 +1317,7 @@ SubPage {
                     Component.onCompleted: {
                         const f = page.cellFile(modelData)
                         if (f)
-                            store.fetch(f, 4, (p) => cell.path = p)
+                            store.fetch(f, 4, (p) => { if (cell) cell.path = p })    // cell gone if scrolled away / page closed
                     }
                     Rectangle { anchors.fill: parent; color: Theme.highlight }
                     Image {

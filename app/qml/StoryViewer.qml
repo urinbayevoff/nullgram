@@ -487,6 +487,28 @@ Item {
         videoOutput: video
         onPositionChanged: (position) => { if (player.duration > 0) sv.progress = position / player.duration }
         onMediaStatusChanged: (status) => { if (status === MediaPlayer.EndOfMedia) sv.next() }
+        onErrorOccurred: (error, errorString) => sv.streamFailed()
+    }
+    // the stream broke (network too slow for the server's wait, TDLib error): fetch the whole file as before
+    // and play it from disk, instead of a spinner for ever
+    function streamFailed() {
+        if (!open || !streaming || !story)
+            return
+        const s = story, vf = videoFile(s)
+        if (!vf)
+            return
+        streaming = false
+        media = ""
+        player.stop()
+        waitFileId = vf.id
+        dlProgress = Math.max(0, store.progress(vf))
+        store.fetch(vf, 32, (p) => {
+            if (story === s) {
+                waitFileId = 0; dlProgress = -1
+                media = p
+                start()
+            }
+        })
     }
     // only while open: after close() story/media stay set, and coming back to the app (paused → false) played the
     // closed story's sound again
