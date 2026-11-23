@@ -10,14 +10,14 @@ SubPage {
     property var stats: null
     property int tab: 0                 // 0 all, 1 mobile, 2 Wi-Fi
     readonly property var kinds: [
-        { k: "msg", t: Tr.t("Xabarlar"), c: "#5856d6", art: "data", types: ["", "fileTypeNone", "fileTypeUnknown", "fileTypeThumbnail", "fileTypeProfilePhoto", "fileTypeWallpaper", "fileTypeSecretThumbnail"] },
-        { k: "video", t: Tr.t("Videolar"), c: "#3478f6", art: "videos", types: ["fileTypeVideo", "fileTypeAnimation", "fileTypeVideoStory", "fileTypeVideoNote"] },
-        { k: "file", t: Tr.t("Fayllar"), c: "#34c759", art: "files", types: ["fileTypeDocument", "fileTypeSecure", "fileTypeSecret"] },
-        { k: "call", t: Tr.t("Qo'ng'iroqlar"), c: "#30b0c7", art: "calls", types: [] },
-        { k: "music", t: Tr.t("Musiqa"), c: "#ff3b30", art: "reactions", types: ["fileTypeAudio", "fileTypeNotificationSound"] },
-        { k: "photo", t: Tr.t("Rasmlar"), c: "#5ac8fa", art: "photos", types: ["fileTypePhoto", "fileTypePhotoStory"] },
-        { k: "sticker", t: Tr.t("Stikerlar"), c: "#ff9500", art: "stickers", types: ["fileTypeSticker"] },
-        { k: "voice", t: Tr.t("Ovozli xabarlar"), c: "#af52de", art: "private", types: ["fileTypeVoiceNote"] }]
+        { k: "msg", t: Tr.t("Xabarlar"), c: "#5856d6", icon: "chats", types: ["", "fileTypeNone", "fileTypeUnknown", "fileTypeThumbnail", "fileTypeProfilePhoto", "fileTypeWallpaper", "fileTypeSecretThumbnail"] },
+        { k: "video", t: Tr.t("Videolar"), c: "#3478f6", icon: "playround", types: ["fileTypeVideo", "fileTypeAnimation", "fileTypeVideoStory", "fileTypeVideoNote"] },
+        { k: "file", t: Tr.t("Fayllar"), c: "#34c759", icon: "folder", types: ["fileTypeDocument", "fileTypeSecure", "fileTypeSecret"] },
+        { k: "call", t: Tr.t("Qo'ng'iroqlar"), c: "#30b0c7", icon: "phone", types: [] },
+        { k: "music", t: Tr.t("Musiqa"), c: "#ff3b30", icon: "savemusic", types: ["fileTypeAudio", "fileTypeNotificationSound"] },
+        { k: "photo", t: Tr.t("Rasmlar"), c: "#5ac8fa", icon: "camera", types: ["fileTypePhoto", "fileTypePhotoStory"] },
+        { k: "sticker", t: Tr.t("Stikerlar"), c: "#ff9500", icon: "sparkle", types: ["fileTypeSticker"] },
+        { k: "voice", t: Tr.t("Ovozli xabarlar"), c: "#af52de", icon: "mic", types: ["fileTypeVoiceNote"] }]
     function inTab(n) {
         const t = n ? n["@type"] : ""
         return tab === 0 || (tab === 1 && (t === "networkTypeMobile" || t === "networkTypeMobileRoaming")) || (tab === 2 && t === "networkTypeWiFi")
@@ -103,7 +103,7 @@ SubPage {
                 required property var modelData
                 required property int index
                 readonly property real v: page.sums[modelData.k].sent + page.sums[modelData.k].got
-                art: modelData.art
+                icon: modelData.icon; tint: modelData.c
                 text: modelData.t + (v > 0 && page.total > 0 ? "  " + (v / page.total * 100).toFixed(1) + "%" : "")
                 value: v > 0 ? store.size(v) : "0 B"
                 chevron: false

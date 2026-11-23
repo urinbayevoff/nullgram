@@ -28,11 +28,23 @@ SubPage {
         const p = nav.push(Qt.createComponent("InviteLinkEditPage.qml"), { chatId: chatId, link: link })
     }
     TextEdit { id: clip; visible: false }
+    property string sharedUrl: ""
     function copy(text) {
         clip.text = text
         clip.selectAll()
         clip.copy()
         nav.say(Tr.t("Havola nusxalandi"))
+    }
+    function share(text) {
+        sharedUrl = text
+        forward.show()
+    }
+    function dismiss() {
+        if (forward.open) {
+            forward.close()
+            return true
+        }
+        return false
     }
     function revoke(l) {
         store.send({ "@type": "revokeChatInviteLink", chat_id: chatId, invite_link: l.invite_link }, (r) => {
@@ -53,7 +65,8 @@ SubPage {
             return ask(l.name || l.invite_link, [{ t: Tr.t("O'chirish"), red: true, run: () => store.send(
                 { "@type": "deleteRevokedChatInviteLink", chat_id: chatId, invite_link: l.invite_link }, () => page.load()) },
                                                  { t: Tr.t("Bekor qilish") }])
-        const out = [{ t: Tr.t("Nusxa olish"), run: () => page.copy(l.invite_link) }]
+        const out = [{ t: Tr.t("Nusxa olish"), run: () => page.copy(l.invite_link) },
+                     { t: Tr.t("Ulashish"), run: () => page.share(l.invite_link) }]
         if (!l.is_primary)
             out.push({ t: Tr.t("Tahrirlash"), run: () => page.edit(l) })
         out.push({ t: Tr.t("Havolani bekor qilish"), red: true, run: () => l.is_primary
@@ -130,7 +143,7 @@ SubPage {
                 x: 16; y: 66; spacing: 10
                 Repeater {
                     model: [{ t: Tr.t("Nusxa olish"), run: () => page.primary && page.copy(page.primary.invite_link) },
-                            { t: Tr.t("Yangilash"), run: () => page.primary && page.tap(page.primary) }]
+                            { t: Tr.t("Ulashish"), run: () => page.primary && page.share(page.primary.invite_link) }]
                     Rectangle {
                         required property var modelData
                         width: (page.width - 32 - 32 - 10) / 2; height: 40; radius: 10
@@ -175,5 +188,15 @@ SubPage {
         }
     }
     Item { width: 1; height: 30 + safe.bottom }
+    ForwardSheet {
+        id: forward
+        parent: page.nav || page
+        z: 100
+        store: page.store
+        onPicked: (to, title) => {
+            store.sendText(to, page.sharedUrl, 0)
+            page.nav.say(store.isSaved(store.chats[to]) ? Tr.t("Havola Saqlangan xabarlarga yuborildi") : Tr.f("Havola %1ga yuborildi", title))
+        }
+    }
     Alert { id: alert; parent: page; anchors.fill: parent }
 }

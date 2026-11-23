@@ -42,6 +42,9 @@ QtObject {
     property int storiesSeen: 0
     property var _storyCache: ({})      // "chat:id" -> TDLib's story, once got (updateStory keeps it fresh)
     signal storyChanged(var chatId, var id)
+    // Kanal DM (monoforum): chat id -> { topicId -> directMessagesChatTopic }
+    property var directTopics: ({})
+    property int directTopicsSeen: 0
 
     readonly property ListModel chatList: ListModel {}     // the main list in Telegram's order
     property var folderLists: ({})      // folder id -> its ListModel, made when first shown, kept up after
@@ -136,6 +139,18 @@ QtObject {
         },
         updateBasicGroup: (u) => { store.groups["b" + u.basic_group.id] = u.basic_group; store.seen++ },
         updateSupergroup: (u) => { store.groups["s" + u.supergroup.id] = u.supergroup; store.seen++ },
+        updateDirectMessagesChatTopic: (u) => {
+            const t = u.topic
+            if (!t)
+                return
+            const map = store.directTopics[t.chat_id] || {}
+            if (String(t.order) === "0" && !t.last_message)
+                delete map[t.id]
+            else
+                map[t.id] = t
+            store.directTopics[t.chat_id] = map
+            store.directTopicsSeen++
+        },
         updateChatAction: (u) => {
             const acts = store.actions[u.chat_id] || {}
             const key = JSON.stringify(u.sender_id)
@@ -598,7 +613,7 @@ QtObject {
         }
         const muted = c.notification_settings && c.notification_settings.mute_for > 0
         return {
-            chatId: c.id, title: title(c), saved: isSaved(c), who: who, draft: drafted, preview: text.replace(/\s+/g, " "),
+            chatId: c.id, title: title(c), saved: isSaved(c), direct: isDirect(c), who: who, draft: drafted, preview: text.replace(/\s+/g, " "),
             // a song: Telegram-iOS's round ▶ before its name (a draft has its own text)
             glyph: !drafted && said === null && m && m.content["@type"] === "messageAudio" ? "playround" : "",
             time: m ? stamp(m.date) : "", unread: c.unread_count || 0, muted: muted, pinned: !!(at && at.is_pinned),
@@ -610,6 +625,54 @@ QtObject {
     // one's own chat is Saved Messages, as Telegram calls it
     function isSaved(c) {
         return !!(c && me && c.type["@type"] === "chatTypePrivate" && c.type.user_id === me.id)
+    }
+    // channel direct messages group (monoforum) — either as a subscriber or as an admin
+    function isDirect(c) {
+        if (!c || c.type["@type"] !== "chatTypeSupergroup")
+            return false
+        const g = groups["s" + c.type.supergroup_id]
+        return !!(g && g.is_direct_messages_group)
+    }
+    function isDirectAdmin(c) {
+        if (!c || c.type["@type"] !== "chatTypeSupergroup")
+            return false
+        const g = groups["s" + c.type.supergroup_id]
+        return !!(g && g.is_administered_direct_messages_group)
+    }
+    function directTopicList(chatId) {
+        const map = directTopics[chatId]
+        if (!map)
+            return []
+        return Object.keys(map).map((k) => map[k]).sort((a, b) => before(a.order, b.order) ? -1 : 1)
+    }
+    function dropDirectTopic(chatId, topicId) {
+        const map = directTopics[chatId]
+        if (!map)
+            return
+        delete map[topicId]
+        directTopicsSeen++
+    }
+    // open a channel's direct messages chat: inbox (DirectTopicsPage) for admins, 1-on-1 ChatPage for subscribers
+    function openDirectMessages(directChatId, nav, channelChatId) {
+        if (!directChatId || !nav)
+            return
+        const go = (c) => {
+            if (!c || c["@type"] === "error")
+                return nav.say(Tr.t("Kanal xabarlarini ochib bo'lmadi"))
+            if (!chats[c.id])
+                chats[c.id] = c
+            const file = isDirectAdmin(c) ? "DirectTopicsPage.qml" : "ChatPage.qml"
+            const comp = Qt.createComponent(file)
+            if (comp.status === Component.Error)
+                return console.warn("nullgram:", comp.errorString())
+            nav.push(comp, file === "DirectTopicsPage.qml"
+                     ? { chatId: c.id, channelChatId: channelChatId || 0 }
+                     : { chatId: c.id })
+        }
+        if (chats[directChatId] && groupOf(chats[directChatId]))
+            go(chats[directChatId])
+        else
+            send({ "@type": "getChat", chat_id: directChatId }, go)
     }
     function title(c) {
         return isSaved(c) ? Tr.t("Saqlangan xabarlar") : c ? c.title : ""
@@ -732,6 +795,8 @@ QtObject {
         }
         if (t === "chatTypeSupergroup") {
             const g = groups["s" + c.type.supergroup_id]
+            if (g && g.is_direct_messages_group)
+                return Tr.t("kanalga xabarlar")
             return g && g.member_count ? Tr.n(c.type.is_channel ? "%1 obunachi" : "%1 a'zo", g.member_count, count(g.member_count))
                  : Tr.t(c.type.is_channel ? "kanal" : "guruh")
         }
@@ -839,6 +904,9 @@ QtObject {
         messageSuggestProfilePhoto: "Profil rasmi taklifi", messageCustomServiceAction: "Xizmat xabari",
         messageBotWriteAccessAllowed: "botga ruxsat berildi", messageWebAppDataSent: "ilova ma'lumot yubordi",
         messageUsersShared: "Kontakt ulashildi", messageChatShared: "Chat ulashildi", messageChecklist: "Ro'yxat",
+        messagePaidMessagePriceChanged: "pullik xabar narxi o'zgardi",
+        messageDirectMessagePriceChanged: "kanalga xabar narxi o'zgardi",
+        messagePaidMessagesRefunded: "yulduzlar qaytarildi",
         messageUnsupported: "Bu Telegram versiyasida ochilmaydi", messageManagedBotCreated: "bot yaratildi"
     })
 
@@ -1043,6 +1111,17 @@ QtObject {
         case "messageBotWriteAccessAllowed": return Tr.t("Botga yozishga ruxsat berildi")
         case "messageGiveawayCreated": return Tr.t("Konkurs boshlandi")
         case "messageGiveawayCompleted": return Tr.t("Konkurs yakunlandi")
+        case "messagePaidMessagePriceChanged":
+            return c.paid_message_star_count > 0
+                ? Tr.f("%1 har bir xabar narxini ⭐ %2 qilib belgiladi", me_, count(c.paid_message_star_count))
+                : Tr.f("%1 pullik xabarlarni o'chirdi", me_)
+        case "messageDirectMessagePriceChanged":
+            return !c.is_enabled ? Tr.t("Kanalga xabarlar o'chirildi")
+                 : c.paid_message_star_count > 0
+                   ? Tr.f("Kanalga har bir xabar narxi ⭐ %1 qilib belgilandi", count(c.paid_message_star_count))
+                   : Tr.t("Kanalga bepul xabar yozish yoqildi")
+        case "messagePaidMessagesRefunded":
+            return Tr.f("%1 ta xabar uchun ⭐ %2 qaytarildi", count(c.message_count), count(c.star_count))
         }
         return null
     }
@@ -1607,12 +1686,18 @@ QtObject {
     // from its database at once and may give fewer: ask again until there are enough.
     // `failed`: TDLib said no (offline, too many asks) -- that is not the beginning of the chat.
     // `thread`: only a post's comments (its thread in the discussion group)
-    function history(chatId, from, limit, done, got, thread) {
+    // `directTopic`: a subscriber's thread in an administered channel direct messages chat
+    function history(chatId, from, limit, done, got, thread, directTopic) {
         got = got || []
-        send(thread ? { "@type": "getMessageThreadHistory", chat_id: chatId, message_id: thread, from_message_id: from,
-                        offset: 0, limit: limit - got.length }
-                    : { "@type": "getChatHistory", chat_id: chatId, from_message_id: from, offset: 0,
-                        limit: limit - got.length, only_local: false }, (r) => {
+        const req = directTopic
+            ? { "@type": "getDirectMessagesChatTopicHistory", chat_id: chatId, topic_id: directTopic,
+                from_message_id: from, offset: 0, limit: limit - got.length }
+            : thread
+            ? { "@type": "getMessageThreadHistory", chat_id: chatId, message_id: thread, from_message_id: from,
+                offset: 0, limit: limit - got.length }
+            : { "@type": "getChatHistory", chat_id: chatId, from_message_id: from, offset: 0,
+                limit: limit - got.length, only_local: false }
+        send(req, (r) => {
             if (r["@type"] === "error") {
                 console.warn("nullgram: getChatHistory", chatId, from, r.code, r.message)
                 done(got, true)
@@ -1623,20 +1708,30 @@ QtObject {
             if (msgs.length === 0 || got.length >= limit)
                 done(got, false)
             else
-                store.history(chatId, msgs[msgs.length - 1].id, limit, done, got, thread)
+                store.history(chatId, msgs[msgs.length - 1].id, limit, done, got, thread, directTopic)
         })
     }
 
-    // a message in a post's comments goes to its thread
-    function topic(thread) {
+    // a message in a post's comments goes to its thread; in a channel DM inbox to its directMessages topic
+    function topic(thread, directTopic) {
+        if (directTopic)
+            return { "@type": "messageTopicDirectMessages", direct_messages_chat_topic_id: directTopic }
         return thread ? { "@type": "messageTopicThread", message_thread_id: thread } : null
+    }
+    function sendOpts(silent, paidStars) {
+        if (!silent && !(paidStars > 0))
+            return null
+        const o = { "@type": "messageSendOptions", disable_notification: !!silent }
+        if (paidStars > 0)
+            o.paid_message_star_count = paidStars
+        return o
     }
 
     // silent: the subscribers get it without a sound (a channel's 🔔 off)
     // marks: the formatting given in the field (textEntity's), [] for none
-    function sendText(chatId, text, replyTo, thread, silent, marks) {
-        const req = { "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread),
-                      options: silent ? { "@type": "messageSendOptions", disable_notification: true } : null,
+    function sendText(chatId, text, replyTo, thread, silent, marks, directTopic, paidStars) {
+        const req = { "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+                      options: sendOpts(silent, paidStars),
                       input_message_content: { "@type": "inputMessageText",
                                                text: { "@type": "formattedText", text: text, entities: marks || [] } } }
         if (replyTo)
@@ -1647,8 +1742,8 @@ QtObject {
     // files from the phone (td.recent's): pictures and videos together as an album when there are
     // several (unless `apart`), the rest one by one; the field's words ({ text, marks }) go under the
     // first. asFiles: all as documents; a picture or video with `spoiler` goes hidden under one
-    function sendFiles(chatId, files, caption, replyTo, asFiles, thread, silent, apart) {
-        const options = silent ? { "@type": "messageSendOptions", disable_notification: true } : null
+    function sendFiles(chatId, files, caption, replyTo, asFiles, thread, silent, apart, directTopic, paidStars) {
+        const options = sendOpts(silent, paidStars)
         const text = { "@type": "formattedText", text: caption ? caption.text : "", entities: caption ? caption.marks : [] }
         // (TDLib 1.8.68: the file and its sizes go in an inputPhoto, inputVideo... of their own)
         const contents = files.map((f, k) => {
@@ -1683,19 +1778,19 @@ QtObject {
         const rest = contents.filter((c) => album.indexOf(c) < 0)
         if (album.length > 1 && !apart) {
             for (let k = 0; k < album.length; k += 10)
-                send({ "@type": "sendMessageAlbum", chat_id: chatId, topic_id: topic(thread), reply_to: k ? null : reply, options: options,
+                send({ "@type": "sendMessageAlbum", chat_id: chatId, topic_id: topic(thread, directTopic), reply_to: k ? null : reply, options: options,
                        input_message_contents: album.slice(k, k + 10) }, check)
         } else {
             rest.unshift(...album)
         }
         for (const c of rest)
-            send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread), reply_to: reply, options: options,
+            send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic), reply_to: reply, options: options,
                    input_message_content: c }, check)
     }
 
-    function sendVoice(chatId, path, duration, waveform, replyTo, thread, silent) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread),
-               options: silent ? { "@type": "messageSendOptions", disable_notification: true } : null,
+    function sendVoice(chatId, path, duration, waveform, replyTo, thread, silent, directTopic, paidStars) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+               options: sendOpts(silent, paidStars),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageVoiceNote",
                                         voice_note: { "@type": "inputVoiceNote", voice_note: { "@type": "inputFileLocal", path: path },
@@ -1703,26 +1798,26 @@ QtObject {
     }
 
     // a round video (384×384 square MP4, as Telegram's apps send them)
-    function sendRound(chatId, path, duration, replyTo, thread, silent) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread),
-               options: silent ? { "@type": "messageSendOptions", disable_notification: true } : null,
+    function sendRound(chatId, path, duration, replyTo, thread, silent, directTopic, paidStars) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+               options: sendOpts(silent, paidStars),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageVideoNote", self_destruct_type: null,
                                         video_note: { "@type": "inputVideoNote", video_note: { "@type": "inputFileLocal", path: path },
                                                       thumbnail: null, duration: duration, length: 384 } } }, check)
     }
     // a sticker or a GIF from the panel (TDLib has them already: sent by their file's id, nothing uploaded)
-    function sendSticker(chatId, st, replyTo, thread, silent) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread),
-               options: silent ? { "@type": "messageSendOptions", disable_notification: true } : null,
+    function sendSticker(chatId, st, replyTo, thread, silent, directTopic, paidStars) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+               options: sendOpts(silent, paidStars),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageSticker", emoji: st.emoji || "",
                                         sticker: { "@type": "inputSticker", sticker: { "@type": "inputFileId", id: st.sticker.id },
                                                    width: st.width, height: st.height } } }, check)
     }
-    function sendGif(chatId, a, replyTo, thread, silent) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread),
-               options: silent ? { "@type": "messageSendOptions", disable_notification: true } : null,
+    function sendGif(chatId, a, replyTo, thread, silent, directTopic, paidStars) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+               options: sendOpts(silent, paidStars),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageAnimation",
                                         animation: { "@type": "inputAnimation", animation: { "@type": "inputFileId", id: a.animation.id },
@@ -1822,13 +1917,18 @@ QtObject {
     // every reaction on it: it does when they are few), ours first; none in a channel, nor in Saved Messages
     function reactions(info, chat) {
         const list = info && info.reactions ? info.reactions.reactions : []
+        const paidReactors = info && info.reactions && info.reactions.paid_reactors ? info.reactions.paid_reactors : []
         const t = chat ? chat.type : null
         const priv = !!t && t["@type"] === "chatTypePrivate" && !(me && t.user_id === me.id)
         const faces = priv || (!!t && t["@type"] !== "chatTypePrivate" && !(t["@type"] === "chatTypeSupergroup" && t.is_channel)
                                && list.every((r) => (r.recent_sender_ids || []).length === r.total_count))
         return list.map((r) => {
+            const isPaid = r.type["@type"] === "reactionTypePaid"
             let who = []
-            if (faces && priv) {
+            if (isPaid) {
+                who = paidReactors.filter((p) => !p.is_anonymous && p.sender_id).slice(0, 3)
+                                  .map((p) => p.sender_id.user_id ? { user_id: p.sender_id.user_id } : { chat_id: p.sender_id.chat_id })
+            } else if (faces && priv) {
                 if (r.is_chosen && me)
                     who.push({ user_id: me.id })
                 if (!r.is_chosen || r.total_count >= 2)
@@ -1839,7 +1939,12 @@ QtObject {
                 if (k > 0)
                     who.unshift(who.splice(k, 1)[0])
             }
-            return { e: r.type["@type"] === "reactionTypeEmoji" ? r.type.emoji : "⭐", n: r.total_count, mine: r.is_chosen, who: who }
+            const out = { e: r.type["@type"] === "reactionTypeEmoji" ? r.type.emoji : "⭐", n: r.total_count, mine: r.is_chosen, who: who }
+            if (isPaid) {
+                out.paid = true
+                out.reactors = paidReactors
+            }
+            return out
         })
     }
     // a sender's face on an Avatar: its letters and tint, the ghost for a deleted account, its picture when it is here
@@ -2003,6 +2108,7 @@ QtObject {
         row.sort((a, b) => (unseen(b.chat_id) - unseen(a.chat_id)) || (b.order - a.order))
         storyRow = row.map((a) => a.chat_id)
         storiesSeen++
+        warmStories()
     }
     // where a chat's stories start when opened: its first unseen one, else the first
     function storyStart(chatId) {
@@ -2012,17 +2118,60 @@ QtObject {
         const i = a.stories.findIndex((s) => s.story_id > a.max_read_story_id)
         return Math.max(0, i)
     }
+    function putStories(list) {
+        for (const s of list || [])
+            if (s && s.poster_chat_id && s.id)
+                _storyCache[s.poster_chat_id + ":" + s.id] = s
+    }
     function story(chatId, id, done) {
         const k = chatId + ":" + id
         if (_storyCache[k]) {
             done(_storyCache[k])
             return
         }
-        send({ "@type": "getStory", story_poster_chat_id: chatId, story_id: id, only_local: false }, (r) => {
-            if (r["@type"] === "story")
+        send({ "@type": "getStory", story_poster_chat_id: chatId, story_id: id, only_local: true }, (r) => {
+            if (r["@type"] === "story") {
                 _storyCache[k] = r
-            done(r["@type"] === "story" ? r : null)
+                done(r)
+                return
+            }
+            send({ "@type": "getStory", story_poster_chat_id: chatId, story_id: id, only_local: false }, (r2) => {
+                if (r2["@type"] === "story")
+                    _storyCache[k] = r2
+                done(r2["@type"] === "story" ? r2 : null)
+            })
         })
+    }
+    // warm up the first unseen story of the top active chats (metadata + preview) so tapping opens fast
+    property var _storyWarmed: ({})
+    function warmStories() {
+        for (const cid of storyRow.slice(0, 3)) {
+            const a = stories[cid]
+            if (!a || !a.stories.length)
+                continue
+            const id = a.stories[storyStart(cid)].story_id
+            const k = cid + ":" + id
+            if (_storyWarmed[k])
+                continue
+            _storyWarmed[k] = true
+            story(cid, id, (s) => {
+                if (!s || !s.content)
+                    return
+                if (s.content["@type"] === "storyContentVideo") {
+                    const th = s.content.video && s.content.video.thumbnail ? s.content.video.thumbnail.file : null
+                    if (th)
+                        fetch(th, 4, () => {})
+                } else if (s.content["@type"] === "storyContentPhoto") {
+                    const sizes = s.content.photo ? s.content.photo.sizes || [] : []
+                    let f = null
+                    for (const z of sizes)
+                        if (!f || (z.width >= 720 && z.width < f.w) || f.w < 720)
+                            f = { file: z.photo, w: z.width }
+                    if (f)
+                        fetch(f.file, 4, () => {})
+                }
+            })
+        }
     }
     // seen: TDLib then moves max_read_story_id on (updateChatActiveStories)
     function openStory(chatId, id, on) {
@@ -2041,6 +2190,93 @@ QtObject {
                story_poster_chat_id: chatId, story_id: id },
                input_message_content: { "@type": "inputMessageText", text: { "@type": "formattedText", text: text, entities: [] },
                                         link_preview_options: null, clear_draft: false } })
+    }
+    function storyHidden(chatId) {
+        const a = stories[chatId]
+        return !!a && !!a.list && a.list["@type"] === "storyListArchive"
+    }
+    function storyArchive(chatId, id, posted, done) {
+        send({ "@type": "toggleStoryIsPostedToChatPage", story_poster_chat_id: chatId, story_id: id,
+               is_posted_to_chat_page: !!posted }, (r) => {
+            if (r["@type"] === "ok") {
+                const s = _storyCache[chatId + ":" + id]
+                if (s)
+                    s.is_posted_to_chat_page = !!posted
+                storyChanged(chatId, id)
+            }
+            if (done)
+                done(r)
+        })
+    }
+    function storyPin(chatId, ids, done) {
+        send({ "@type": "setChatPinnedStories", chat_id: chatId, story_ids: ids }, (r) => {
+            if (done)
+                done(r)
+        })
+    }
+    function storyDelete(chatId, id, done) {
+        send({ "@type": "deleteStory", story_poster_chat_id: chatId, story_id: id }, (r) => {
+            if (r["@type"] === "ok") {
+                delete _storyCache[chatId + ":" + id]
+                const a = stories[chatId]
+                if (a) {
+                    a.stories = a.stories.filter((x) => x.story_id !== id)
+                    if (!a.stories.length)
+                        delete stories[chatId]
+                    sortStories()
+                }
+                storyChanged(chatId, id)
+            }
+            if (done)
+                done(r)
+        })
+    }
+    function storyHide(chatId, hide, done) {
+        const list = { "@type": hide ? "storyListArchive" : "storyListMain" }
+        send({ "@type": "setChatActiveStoriesList", chat_id: chatId, story_list: list }, (r) => {
+            if (r["@type"] === "ok") {
+                const a = stories[chatId]
+                if (a) {
+                    a.list = list
+                    sortStories()
+                }
+            }
+            if (done)
+                done(r)
+        })
+    }
+    function fetchPrefix(f, priority, limit) {
+        if (!f || (f.local && f.local.is_downloading_completed))
+            return
+        send({ "@type": "downloadFile", file_id: f.id, priority: priority || 12,
+               offset: 0, limit: limit || 524288, synchronous: false })
+    }
+    function storyViewers(chatId, storyId, isMine, opts, done) {
+        const o = opts || {}
+        const req = isMine
+            ? { "@type": "getStoryInteractions", story_id: storyId, query: o.query || "",
+                only_contacts: !!o.onlyContacts, prefer_forwards: !!o.preferForwards,
+                prefer_with_reaction: !!o.preferWithReaction, offset: o.offset || "", limit: 50 }
+            : { "@type": "getChatStoryInteractions", story_poster_chat_id: chatId, story_id: storyId,
+                reaction_type: null, prefer_forwards: !!o.preferForwards, offset: o.offset || "", limit: 50 }
+        send(req, (r) => {
+            if (r["@type"] === "error")
+                console.warn("nullgram: storyViewers", req["@type"], chatId, storyId, r.code, r.message)
+            if (done)
+                done(r)
+        })
+    }
+    function storyBlockViewer(userId, hide, done) {
+        send({ "@type": "setMessageSenderBlockList",
+               sender_id: { "@type": "messageSenderUser", user_id: userId },
+               block_list: hide ? { "@type": "blockListStories" } : null }, (r) => {
+            if (done)
+                done(r)
+        })
+    }
+    function storyReport(chatId, id, optionId, text, done) {
+        send({ "@type": "reportStory", story_poster_chat_id: chatId, story_id: id,
+               option_id: optionId || "", text: text || "" }, done)
     }
 
 }

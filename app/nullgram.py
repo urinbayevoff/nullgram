@@ -12,6 +12,7 @@ reach QML as queued signals, which QML takes without Python.
 import base64
 import ctypes
 import gzip
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import hashlib
 import math
@@ -19,6 +20,7 @@ import os
 import queue
 import random
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -26,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import parse_qs, unquote, urlparse
 
 # letters over 64 px are drawn from outlines every time, uncached; at the S10's 4x that is all of them
 os.environ.setdefault("QT_MAX_CACHED_GLYPH_SIZE", "256")
@@ -38,7 +41,6 @@ from PySide6.QtQuick import QQuickImageProvider, QQuickView
 # (what the picture providers use, here and not in their requestImage: two of Qt's threads ask them at once — an
 # Image and an asynchronous one — and PySide loading a class for both at the same moment crashed on the phone)
 from PySide6.QtSvg import QSvgRenderer
-from urllib.parse import unquote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST = "--test-dc" in sys.argv
@@ -56,7 +58,7 @@ EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram
 EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
 EMOJI_GET = os.path.join(HERE, "emoji_get.py")
 EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -146,6 +148,210 @@ def round_note_file(src, start, dur, mirrored, audio, out):
 	return out if ok and os.path.isfile(out) else ""
 
 
+class _VideoStream:
+	"""Loopback HTTP Range server over TDLib files so Qt MediaPlayer (FFmpeg) streams story videos
+	immediately from partial byte ranges instead of waiting for a full 10-20 MB download."""
+
+	def __init__(self, td):
+		self.td = td
+		self.lock = threading.Lock()
+		self.cond = threading.Condition(self.lock)
+		self.files = {}			# file_id -> latest TDLib file dict, only for files handed out by url()
+		self.wanted = set()		# file ids url() was asked for: the only ones the server serves or remembers
+		# a secret in every URL: without it any other program on the phone (or a web page in a browser)
+		# could ask 127.0.0.1:<port> for any TDLib file by its small numeric id
+		self.token = secrets.token_urlsafe(18)
+		self._seq = 0
+		self._wait = {}			# extra -> (Event, [result])
+		stream = self
+
+		class Handler(BaseHTTPRequestHandler):
+			protocol_version = "HTTP/1.1"
+
+			def log_message(self, fmt, *args):
+				pass
+
+			def _parse_id(self):
+				u = urlparse(self.path)
+				m = re.match(r"^/([A-Za-z0-9_-]+)/file/(\d+)(?:\.[a-z0-9]+)?$", u.path)
+				if not m or not secrets.compare_digest(m.group(1), stream.token):
+					return 0, 0
+				fid = int(m.group(2))
+				with stream.lock:
+					if fid not in stream.wanted:
+						return 0, 0
+				qs = parse_qs(u.query)
+				try:
+					hint = int(qs.get("size", ["0"])[0] or 0)
+				except ValueError:
+					hint = 0
+				return fid, hint
+
+			def _file_info(self, fid, hint):
+				with stream.lock:
+					f = stream.files.get(fid)
+				if not f or not (f.get("size") or f.get("expected_size")):
+					r = stream.call({"@type": "getFile", "file_id": fid}, 3.0)
+					if r and r.get("@type") == "file":
+						stream.on_file(r)
+						f = r
+				total = 0
+				if f:
+					total = int(f.get("size") or f.get("expected_size") or 0)
+				if not total:
+					total = hint
+				return f, total
+
+			def do_HEAD(self):
+				fid, hint = self._parse_id()
+				if not fid:
+					self.send_error(404)
+					return
+				_, total = self._file_info(fid, hint)
+				if total <= 0:
+					self.send_error(404)
+					return
+				self.send_response(200)
+				self.send_header("Content-Type", "video/mp4")
+				self.send_header("Accept-Ranges", "bytes")
+				self.send_header("Content-Length", str(total))
+				self.send_header("Cache-Control", "no-store")
+				self.end_headers()
+
+			def do_GET(self):
+				fid, hint = self._parse_id()
+				if not fid:
+					self.send_error(404)
+					return
+				f, total = self._file_info(fid, hint)
+				if total <= 0:
+					self.send_error(404)
+					return
+				rng = self.headers.get("Range", "")
+				start, end = 0, total - 1
+				partial = False
+				if rng.startswith("bytes="):
+					partial = True
+					spec = rng[6:].split(",")[0].strip()
+					a, _, b = spec.partition("-")
+					if a == "":
+						n = int(b or 0)
+						start = max(0, total - n)
+					else:
+						start = int(a)
+						if b:
+							end = min(total - 1, int(b))
+				if start >= total or start > end:
+					self.send_response(416)
+					self.send_header("Content-Range", f"bytes */{total}")
+					self.end_headers()
+					return
+				length = end - start + 1
+				self.send_response(206 if partial else 200)
+				self.send_header("Content-Type", "video/mp4")
+				self.send_header("Accept-Ranges", "bytes")
+				if partial:
+					self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+				self.send_header("Content-Length", str(length))
+				self.send_header("Cache-Control", "no-store")
+				self.end_headers()
+				try:
+					pos = start
+					prefetched = -1
+					while pos <= end:
+						path, avail, done = stream.wait_range(fid, pos, total)
+						if not path or avail <= 0:
+							break
+						want = min(avail, end - pos + 1, 262144)
+						if not done and pos + avail <= end and (pos + avail) - (pos + want) < 262144 and prefetched < pos + avail:
+							prefetched = pos + avail
+							lim = min(524288, total - prefetched)
+							if lim > 0:
+								stream.kick(fid, prefetched, lim)
+						with open(path, "rb") as fp:
+							fp.seek(pos)
+							buf = fp.read(want)
+						if not buf:
+							break
+						self.wfile.write(buf)
+						pos += len(buf)
+				except (BrokenPipeError, ConnectionResetError, OSError):
+					pass
+
+		self.srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+		self.srv.daemon_threads = True
+		self.port = self.srv.server_address[1]
+		threading.Thread(target=self.srv.serve_forever, name="stream", daemon=True).start()
+
+	def url(self, fid: int, size: int) -> str:
+		with self.lock:
+			self.wanted.add(int(fid))
+		return f"http://127.0.0.1:{self.port}/{self.token}/file/{fid}.mp4?size={max(0, int(size))}"
+
+	def on_file(self, f: dict):
+		fid = f.get("id")
+		if not fid:
+			return
+		with self.cond:
+			if fid not in self.wanted:		# every other file's updates: not ours to keep
+				return
+			self.files[fid] = f
+			self.cond.notify_all()
+
+	def on_extra(self, extra: str, obj: dict):
+		with self.lock:
+			w = self._wait.pop(extra, None)
+		if w:
+			w[1].append(obj)
+			w[0].set()
+
+	def call(self, req: dict, timeout: float = 2.0):
+		with self.lock:
+			self._seq += 1
+			ex = f"_st:{self._seq}"
+			ev = threading.Event()
+			box = []
+			self._wait[ex] = (ev, box)
+		req = dict(req)
+		req["@extra"] = ex
+		self.td.send(json.dumps(req))
+		if ev.wait(timeout) and box:
+			return box[0]
+		with self.lock:
+			self._wait.pop(ex, None)
+		return None
+
+	def kick(self, fid: int, offset: int, limit: int):
+		self.td.send(json.dumps({"@type": "downloadFile", "file_id": fid, "priority": 32,
+		                         "offset": int(offset), "limit": int(limit), "synchronous": False,
+		                         "@extra": "_st:0"}))
+
+	def wait_range(self, fid: int, pos: int, total: int):
+		"""Ensure bytes starting at `pos` are on disk, returning (path, avail_bytes, is_completed)."""
+		deadline = time.monotonic() + 12.0
+		kicked = False
+		while time.monotonic() < deadline:
+			with self.lock:
+				f = self.files.get(fid)
+			loc = f.get("local") if f else None
+			path = loc.get("path", "") if loc else ""
+			if loc and loc.get("is_downloading_completed") and path and os.path.exists(path):
+				return path, max(0, total - pos), True
+			if path and os.path.exists(path):
+				r = self.call({"@type": "getFileDownloadedPrefixSize", "file_id": fid, "offset": pos}, 1.5)
+				if r and r.get("@type") == "fileDownloadedPrefixSize":
+					n = int(r.get("count") or 0)
+					if n > 0:
+						return path, n, False
+			if not kicked:
+				lim = min(524288, max(65536, total - pos))
+				self.kick(fid, pos, lim)
+				kicked = True
+			with self.cond:
+				self.cond.wait(0.2)
+		return "", 0, False
+
+
 class Td(QObject):
 	"""One TDLib client. `received` carries each update or answer as TDLib's JSON text."""
 	received = Signal(str)
@@ -159,6 +365,7 @@ class Td(QObject):
 		self._device, self._system = device_names()
 		os.makedirs(DATA, exist_ok=True)
 		self.closed = threading.Event()
+		self._stream = None
 
 	def start(self):
 		"""Once QML listens: a signal sent before anyone is connected is lost, and with it
@@ -182,9 +389,33 @@ class Td(QObject):
 				# unused here, and big (2-3 MB of JSON, twice at the start): parsing it held the UI thread 0.15 s
 				if '"updateTrendingStickerSets"' in r[:64]:
 					continue
+				st = self._stream
+				if st is not None:
+					if '"_st:' in r:
+						obj = json.loads(r)
+						ex = obj.get("@extra", "")
+						if isinstance(ex, str) and ex.startswith("_st:"):
+							if obj.get("@type") == "file":
+								st.on_file(obj)
+							if ex != "_st:0":
+								st.on_extra(ex, obj)
+							continue
+					elif '"updateFile"' in r[:48]:
+						obj = json.loads(r)
+						if obj.get("@type") == "updateFile":
+							st.on_file(obj["file"])
 				if FPS:
 					mark("td")
 				self.received.emit(r)
+
+	@Slot(int, int, result=str)
+	def streamUrl(self, file_id: int, size: int = 0) -> str:
+		"""Local HTTP Range URL for progressive video streaming via TDLib downloadFile."""
+		if file_id <= 0:
+			return ""
+		if self._stream is None:
+			self._stream = _VideoStream(self)
+		return self._stream.url(file_id, size)
 
 	def close(self, wait: float):
 		"""TDLib asked to close (its database written out), waiting for it at most `wait` seconds."""

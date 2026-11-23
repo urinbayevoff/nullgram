@@ -32,7 +32,8 @@ SubPage {
         })
     }
     onMissedChanged: { rows = []; seen = {}; next = ""; loaded = false; loading = false; load(false) }
-    Component.onCompleted: load(false)
+    Component.onCompleted: if (visible) load(false)
+    onVisibleChanged: if (visible && !loaded && !loading) load(false)
     Connections {
         target: page.flick
         function onContentYChanged() {
@@ -108,8 +109,23 @@ SubPage {
         onPicked: (i) => page.missed = i === 1
     }
     SettingsGroup {
-        visible: page.rows.length > 0
-        note: page.next ? "" : Tr.t("Nullgram'dan qo'ng'iroq qilish hali yo'q — qator bosilsa chat ochiladi.")
+        visible: page.backable
+        note: Tr.t("Yoqilsa, pastki panelda «Qo'ng'iroqlar» yorlig'i paydo bo'ladi.")
+        SettingsRow {
+            text: Tr.t("Qo'ng'iroqlar yorlig'ini ko'rsatish")
+            toggle: true; chevron: false; last: true
+            on: Prefs.callsTab
+            onClicked: Prefs.callsTab = !Prefs.callsTab
+        }
+    }
+    SettingsGroup {
+        note: page.rows.length > 0 && !page.next ? Tr.t("Nullgram'dan qo'ng'iroq qilish hali yo'q — qator bosilsa chat ochiladi.") : ""
+        SettingsRow {
+            icon: "phone"; tint: Theme.accent; accent: true; bare: true; chevron: false
+            last: page.rows.length === 0
+            text: Tr.t("Yangi qo'ng'iroq")
+            onClicked: page.nav.say(Tr.t("Nullgram'da ovozli va video qo'ng'iroqlar hali yo'q"))
+        }
         Repeater {
             model: page.rows
             Item {
@@ -188,11 +204,12 @@ SubPage {
     Text {
         visible: page.loaded && !page.rows.length
         x: 32; width: parent.width - 64
-        topPadding: 60
+        topPadding: 40
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap
         text: page.missed ? Tr.t("O'tkazib yuborilgan qo'ng'iroqlar yo'q") : Tr.t("Hali qo'ng'iroqlar yo'q")
         color: Theme.grey
         font.family: Theme.font; font.pixelSize: 15
     }
+    Item { width: 1; height: page.backable ? 0 : 72 }
 }

@@ -7,6 +7,7 @@ SubPage {
     id: page
     property var chatId: 0
     property var allowed: null          // chat.available_reactions
+    property bool canPaid: false        // supergroupFullInfo.can_enable_paid_reaction
     readonly property var chat: store.chats[chatId]
     readonly property bool channel: !!chat && chat.type["@type"] === "chatTypeSupergroup" && chat.type.is_channel
     signal changed(var r)
@@ -17,25 +18,49 @@ SubPage {
         "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡",
         "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"]
     property int kind: 0                // 0 all, 1 some, 2 none
+    property bool paid: false           // reactionTypePaid enabled (channels only)
     property var chosen: ({})           // emoji -> true
     Component.onCompleted: {
         const r = allowed
-        if (!r || r["@type"] === "chatAvailableReactionsAll")
+        if (!r || r["@type"] === "chatAvailableReactionsAll") {
             kind = 0
-        else {
+            paid = false
+        } else {
             const c = {}
-            for (const x of r.reactions)
+            let hasPaid = false
+            for (const x of r.reactions || []) {
                 if (x["@type"] === "reactionTypeEmoji")
                     c[x.emoji] = true
+                else if (x["@type"] === "reactionTypePaid")
+                    hasPaid = true
+            }
+            paid = hasPaid
             chosen = c
-            kind = r.reactions.length ? 1 : 2
+            const count = Object.keys(c).length
+            // (TDLib encodes «All + Paid» in a channel as chatAvailableReactionsSome containing all active emojis + reactionTypePaid)
+            kind = count === 0 ? 2 : (hasPaid && count >= all.length - 5) ? 0 : 1
         }
+        if (channel && !canPaid && chat)
+            store.send({ "@type": "getSupergroupFullInfo", supergroup_id: chat.type.supergroup_id }, (f) => {
+                if (page && f["@type"] === "supergroupFullInfo" && f.can_enable_paid_reaction)
+                    page.canPaid = true
+            })
     }
     function made() {
-        if (kind === 0)
-            return { "@type": "chatAvailableReactionsAll", max_reaction_count: 11 }
-        const list = kind === 2 ? [] : all.filter((e) => chosen[e]).map((e) => ({ "@type": "reactionTypeEmoji", emoji: e }))
+        if (!paid) {
+            if (kind === 0)
+                return { "@type": "chatAvailableReactionsAll", max_reaction_count: 11 }
+            const list = kind === 2 ? [] : all.filter((e) => chosen[e]).map((e) => ({ "@type": "reactionTypeEmoji", emoji: e }))
+            return { "@type": "chatAvailableReactionsSome", reactions: list, max_reaction_count: 11 }
+        }
+        // paid reactions enabled: TDLib ChatReactions requires chatAvailableReactionsSome with reactionTypePaid
+        const emojis = kind === 0 ? all : kind === 1 ? all.filter((e) => chosen[e]) : []
+        const list = [{ "@type": "reactionTypePaid" }].concat(emojis.map((e) => ({ "@type": "reactionTypeEmoji", emoji: e })))
         return { "@type": "chatAvailableReactionsSome", reactions: list, max_reaction_count: 11 }
+    }
+    function flipPaid() {
+        paid = !paid
+        later.restart()
     }
     function pickKind(k) {
         if (k === 1 && !Object.keys(chosen).length) {
@@ -70,6 +95,17 @@ SubPage {
     }
     Component.onDestruction: if (later.running) { later.stop(); later.triggered() }
 
+    SettingsGroup {
+        visible: page.channel && (page.canPaid || page.paid)
+        note: Tr.t("Obunachilar kanal postlariga Telegram Yulduzlari bilan reaksiya bildira oladi.")
+        SettingsRow {
+            icon: "star"; tint: "#ffb10a"
+            text: Tr.t("Yulduzli reaksiyalar")
+            toggle: true; chevron: false; last: true
+            on: page.paid
+            onClicked: page.flipPaid()
+        }
+    }
     SettingsGroup {
         title: Tr.t("Ruxsat etilgan reaksiyalar")
         note: Tr.t(page.kind === 0 ? (page.channel ? "Obunachilar istalgan reaksiyani qo'ya oladi." : "A'zolar istalgan reaksiyani qo'ya oladi.")

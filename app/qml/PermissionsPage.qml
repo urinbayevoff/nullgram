@@ -38,6 +38,13 @@ SubPage {
     property var exceptions: []
     property int slow: 0
     readonly property var slowSteps: [0, 5, 10, 30, 60, 300, 900, 3600]
+    readonly property var starSteps: [1, 5, 10, 50, 100, 500, 1000, 10000]
+    readonly property int starsNow: (store.seen, page.group ? page.group.paid_message_star_count || 0 : 0)
+    property int starIdx: 2
+    onStarsNowChanged: if (starsNow > 0 && starSteps.indexOf(starsNow) >= 0) starIdx = starSteps.indexOf(starsNow)
+    property int lasts: 0
+    readonly property var times: [{ t: Tr.t("1 kun"), v: 86400 }, { t: Tr.t("1 hafta"), v: 604800 },
+                                  { t: Tr.t("1 oy"), v: 2592000 }, { t: Tr.t("Cheklanmagan"), v: 0 }]
     readonly property int mediaOn: (on, media.filter((k) => on[k]).length)
     title: one ? Tr.t(member ? "Istisno" : "Yangi istisno") : Tr.t("Ruxsatlar")
     action: one ? Tr.t("Saqlash") : ""
@@ -50,6 +57,8 @@ SubPage {
         for (const k of ["can_send_basic_messages"].concat(media, rest))
             o[k] = !!from[k] && (!one || !!groupPerms[k])
         on = o
+        if (one && member && member.status.restricted_until_date > 0)
+            lasts = -1
         if (one && !u)
             store.send({ "@type": "getUser", user_id: userId }, () => {})
         load()
@@ -120,18 +129,24 @@ SubPage {
             }))
         }
     }
-    function paid(want) {
+    function paid(count) {
         if (!full || !full.can_enable_paid_messages)
             return nav.say(Tr.t("Guruh yetarlicha katta emas — bu imkoniyat hali yopiq."))
-        store.send({ "@type": "setChatPaidMessageStarCount", chat_id: chatId, paid_message_star_count: want ? 10 : 0 }, (r) => {
+        store.send({ "@type": "setChatPaidMessageStarCount", chat_id: chatId, paid_message_star_count: count }, (r) => {
             if (r["@type"] === "error")
                 return page.nav.say(Tr.f("Bo'lmadi: %1", r.message))
         })
     }
+    Timer {
+        id: starSoon
+        interval: 600
+        onTriggered: page.paid(page.starSteps[page.starIdx])
+    }
     function saveOne() {
+        const until = lasts > 0 ? Math.floor(Date.now() / 1000) + lasts : lasts < 0 && member ? member.status.restricted_until_date : 0
         store.upgrade(chatId, nav, (id) => store.send({ "@type": "setChatMemberStatus", chat_id: id,
                 member_id: { "@type": "messageSenderUser", user_id: page.userId },
-                status: { "@type": "chatMemberStatusRestricted", is_member: true, restricted_until_date: 0, permissions: page.perms() } }, (r) => {
+                status: { "@type": "chatMemberStatusRestricted", is_member: true, restricted_until_date: until, permissions: page.perms() } }, (r) => {
             if (r["@type"] === "error")
                 return page.nav.say(Tr.f("Bo'lmadi: %1", r.message))
             page.nav.say(Tr.t("Istisno saqlandi"))
@@ -157,11 +172,11 @@ SubPage {
     function taken(m) {
         const p = m.status.permissions || {}
         const no = ["can_send_basic_messages"].concat(media, rest).filter((k) => groupPerms[k] && !p[k])
-        if (!no.length)
-            return Tr.t("hamma narsa mumkin")
-        if (no.length === 1)
-            return Tr.f("mumkin emas: %1", Tr.t(names[no[0]]).toLowerCase())
-        return Tr.n("%1 ta cheklov", no.length)
+        const s = !no.length ? Tr.t("hamma narsa mumkin")
+                : no.length === 1 ? Tr.f("mumkin emas: %1", Tr.t(names[no[0]]).toLowerCase())
+                : Tr.n("%1 ta cheklov", no.length)
+        return m.status.restricted_until_date > 0
+            ? s + " · " + Tr.f("%1 gacha", Qt.formatDateTime(new Date(m.status.restricted_until_date * 1000), "dd.MM.yyyy hh:mm")) : s
     }
 
     // ---- one member: who ----
@@ -275,10 +290,17 @@ SubPage {
         note: Tr.t("Yoqilsa, oddiy a'zolar guruhga xabar yuborish uchun yulduz to'laydi.")
         SettingsRow {
             text: Tr.t("Xabarlar uchun yulduz")
-            toggle: true; chevron: false; last: true
+            value: page.starsNow > 0 ? "⭐ " + store.count(page.starsNow) : ""
+            toggle: true; chevron: false; last: page.starsNow <= 0
             dim: !page.full || !page.full.can_enable_paid_messages
-            on: (store.seen, !!page.group && page.group.paid_message_star_count > 0)
-            onClicked: page.paid(!on)
+            on: page.starsNow > 0
+            onClicked: page.paid(page.starsNow <= 0 ? page.starSteps[page.starIdx] : 0)
+        }
+        StepSlider {
+            visible: page.starsNow > 0
+            labels: ["1", "5", "10", "50", "100", "500", "1K", "10K"]
+            value: page.starIdx
+            onMoved: (v) => { page.starIdx = v; starSoon.restart() }
         }
     }
     SettingsGroup {
@@ -350,6 +372,35 @@ SubPage {
         }
     }
 
+    SettingsGroup {
+        visible: page.one
+        title: Tr.t("Amal qilish muddati")
+        note: Tr.t("Shu muddat tugagach, a'zo guruhning umumiy ruxsatlariga qaytadi.")
+        Flow {
+            x: 12; width: parent.width - 24
+            topPadding: 12; bottomPadding: 12
+            spacing: 8
+            Repeater {
+                model: (page.member && page.member.status.restricted_until_date > 0
+                        ? [{ t: Tr.f("%1 gacha", Qt.formatDateTime(new Date(page.member.status.restricted_until_date * 1000), "dd.MM.yyyy hh:mm")), v: -1 }] : [])
+                       .concat(page.times)
+                Rectangle {
+                    required property var modelData
+                    readonly property bool on: page.lasts === modelData.v
+                    width: chipText.width + 24; height: 32; radius: 16
+                    color: on ? Theme.accent : Theme.dark ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(0, 0, 0, 0.06)
+                    Text {
+                        id: chipText
+                        anchors.centerIn: parent
+                        text: parent.modelData.t
+                        color: parent.on ? "white" : Theme.text
+                        font.family: Theme.font; font.pixelSize: 15
+                    }
+                    MouseArea { anchors.fill: parent; onClicked: page.lasts = parent.modelData.v }
+                }
+            }
+        }
+    }
     SettingsGroup {
         visible: page.one && !!page.member
         SettingsRow { text: Tr.t("Istisnoni olib tashlash"); danger: true; chevron: false; last: true; onClicked: page.dropOne() }

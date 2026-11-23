@@ -323,12 +323,22 @@ Item {
                                 Rectangle {
                                     anchors.centerIn: parent
                                     width: 38; height: 38; radius: 19
-                                    color: Theme.accent
-                                    opacity: 0.18
-                                    visible: menu.chosen.indexOf(cell.modelData) >= 0
+                                    color: cell.modelData === "⭐" ? "#ffb10a" : Theme.accent
+                                    opacity: cell.modelData === "⭐" ? (menu.chosen.indexOf("⭐") >= 0 ? 0.35 : 0.18) : 0.18
+                                    visible: cell.modelData === "⭐" || menu.chosen.indexOf(cell.modelData) >= 0
+                                }
+                                Icon {
+                                    anchors.centerIn: parent
+                                    visible: cell.modelData === "⭐"
+                                    width: 26; height: 26
+                                    name: "star"
+                                    color: "#ffb10a"
+                                    scale: tapEmoji.pressed || menu.hotEmoji === cell.modelData ? 1.25 : 1
+                                    Behavior on scale { NumberAnimation { duration: 120 } }
                                 }
                                 Text {
                                     anchors.centerIn: parent
+                                    visible: cell.modelData !== "⭐"
                                     text: cell.modelData
                                     font.pixelSize: 27
                                     scale: tapEmoji.pressed || menu.hotEmoji === cell.modelData ? 1.25 : 1

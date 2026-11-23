@@ -96,6 +96,13 @@ SubPage {
         clip.copy()
         nav.say(Tr.t("Havola nusxalandi"))
     }
+    function dismiss() {
+        if (forward.open) {
+            forward.close()
+            return true
+        }
+        return false
+    }
     function askRevoke() {
         alert.title = ""
         alert.text = Tr.t("Havolani bekor qilasizmi? Eski havola ishlamay qoladi, yangisi yaratiladi.")
@@ -169,6 +176,7 @@ SubPage {
             onClicked: page.nav.push(Qt.createComponent("InviteLinksPage.qml"), { chatId: page.chatId })
         }
         SettingsRow { text: Tr.t("Havolani nusxalash"); accent: true; chevron: false; onClicked: if (page.link) page.copy(page.link) }
+        SettingsRow { text: Tr.t("Havolani ulashish"); accent: true; chevron: false; onClicked: if (page.link) forward.show() }
         SettingsRow { text: Tr.t("Havolani bekor qilish"); danger: true; chevron: false; last: true; onClicked: page.askRevoke() }
     }
     SettingsGroup {
@@ -212,5 +220,15 @@ SubPage {
         }
     }
     Item { width: 1; height: 30 + safe.bottom }
+    ForwardSheet {
+        id: forward
+        parent: page.nav || page
+        z: 100
+        store: page.store
+        onPicked: (to, title) => {
+            store.sendText(to, page.link, 0)
+            page.nav.say(store.isSaved(store.chats[to]) ? Tr.t("Havola Saqlangan xabarlarga yuborildi") : Tr.f("Havola %1ga yuborildi", title))
+        }
+    }
     Alert { id: alert; parent: page; anchors.fill: parent }
 }

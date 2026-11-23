@@ -68,14 +68,15 @@ Item {
                     font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
                 }
                 Rectangle {          // what is new on that tab
-                    visible: bar.badges[index] > 0
+                    readonly property int b: bar.badges[index] || 0
+                    visible: b > 0
                     x: parent.width / 2 + 6; y: 2
                     width: Math.max(18, n.implicitWidth + 8); height: 18; radius: 9
                     color: Theme.danger
                     Text {
                         id: n
                         anchors.centerIn: parent
-                        text: bar.badges[index] > 999 ? Math.floor(bar.badges[index] / 1000) + "K" : bar.badges[index]
+                        text: parent.b > 999 ? Math.floor(parent.b / 1000) + "K" : String(parent.b)
                         color: "white"
                         font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
                     }

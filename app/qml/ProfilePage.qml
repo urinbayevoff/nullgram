@@ -26,6 +26,13 @@ SubPage {
 
     Component.onCompleted: load()
     onVisibleChanged: if (visible && full) load()       // (back from editing: what was changed)
+    Connections {
+        target: storyView
+        function onMutated(chatId) {
+            if (page.me && chatId === page.me.id)
+                page.load()
+        }
+    }
     function load() {
         if (!me)
             return
@@ -35,11 +42,15 @@ SubPage {
                 page.full = r
         })
         store.send({ "@type": "getChatPostedToChatPageStories", chat_id: me.id, from_story_id: 0, limit: 60 }, (r) => {
-            page.posts = r["@type"] === "stories" ? r.stories : []
+            const list = r["@type"] === "stories" ? r.stories : []
+            store.putStories(list)
+            page.posts = list
             page.pinned = r["@type"] === "stories" ? r.pinned_story_ids || [] : []
         })
         store.send({ "@type": "getChatArchivedStories", chat_id: me.id, from_story_id: 0, limit: 60 }, (r) => {
-            page.archived = r["@type"] === "stories" ? r.stories : []
+            const list = r["@type"] === "stories" ? r.stories : []
+            store.putStories(list)
+            page.archived = list
         })
     }
     function clock(s) {
@@ -60,12 +71,42 @@ SubPage {
     // ---- the picture, the name, online ----
     Item {
         width: parent.width; height: 186
-        Avatar {
+        readonly property bool hasStory: !!page.me && (store.storiesSeen, store.hasStories(page.me.id))
+        readonly property bool freshStory: hasStory && (store.storiesSeen, store.unseen(page.me.id))
+        Item {
             anchors.horizontalCenter: parent.horizontalCenter
             width: 100; height: 100
-            source: page.photo
-            letters: page.me ? store.letters(page.me.first_name + " " + page.me.last_name) : ""
-            tint: page.me ? store.tints[Math.abs(page.me.id) % store.tints.length] : Theme.accent
+            Rectangle {
+                visible: parent.parent.hasStory && !parent.parent.freshStory
+                anchors.fill: parent; anchors.margins: -5
+                radius: width / 2; color: "transparent"
+                border.color: Theme.dark ? "#48484a" : "#c7c7cc"; border.width: 2
+            }
+            Rectangle {
+                visible: parent.parent.freshStory
+                anchors.fill: parent; anchors.margins: -5
+                radius: width / 2; rotation: 45
+                gradient: Gradient {
+                    GradientStop { position: 0; color: "#34c76f" }
+                    GradientStop { position: 1; color: "#3da1fd" }
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.width - 5.6; height: width; radius: width / 2
+                    color: Theme.bg
+                }
+            }
+            Avatar {
+                anchors.fill: parent
+                source: page.photo
+                letters: page.me ? store.letters(page.me.first_name + " " + page.me.last_name) : ""
+                tint: page.me ? store.tints[Math.abs(page.me.id) % store.tints.length] : Theme.accent
+            }
+            MouseArea {
+                anchors.fill: parent
+                enabled: parent.parent.hasStory
+                onClicked: storyView.show([page.me.id], 0)
+            }
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -249,7 +290,7 @@ SubPage {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: storyView.showOne(page.me.id, page.shown.map((s) => s.id), tile.index)
+                    onClicked: storyView.showOne(page.me.id, page.shown.map((s) => s.id), tile.index, page.pinned)
                 }
             }
         }

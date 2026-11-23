@@ -6,10 +6,16 @@ import QtQuick
 Page {
     id: home
     property int tab: 1
+    readonly property var order: Prefs.callsTab ? [0, 3, 1, 2] : [0, 1, 2]
 
     ContactsPage { id: contacts; store: home.store; nav: home.nav; visible: home.tab === 0 }
+    CallsPage { id: calls; store: home.store; nav: home.nav; backable: false; visible: home.tab === 3 }
     ChatListPage { id: chats; store: home.store; nav: home.nav; player: home.player; visible: home.tab === 1 }
     SettingsPage { id: settings; store: home.store; nav: home.nav; visible: home.tab === 2 }
+    Connections {
+        target: Prefs
+        function onCallsTabChanged() { if (!Prefs.callsTab && home.tab === 3) home.tab = 1 }
+    }
 
     readonly property real toastFloor: tabs.visible ? tabs.height + tabs.gap : 0    // (Main's Toast stands over it)
 
@@ -20,12 +26,18 @@ Page {
         readonly property real gap: safe.bottom > 0 ? safe.bottom + 4 : 10
         y: parent.height - height - gap
         visible: !(home.tab === 1 && chats.searching)
-        current: home.tab
-        badges: [0, chats.unreadChats, 0]
+        tabs: Prefs.callsTab
+            ? [{ icon: "person", text: Tr.t("Kontaktlar") }, { icon: "phone", text: Tr.t("Qo'ng'iroqlar") },
+               { icon: "chats", text: Tr.t("Chatlar") }, { icon: "settings", text: Tr.t("Sozlamalar") }]
+            : [{ icon: "person", text: Tr.t("Kontaktlar") }, { icon: "chats", text: Tr.t("Chatlar") },
+               { icon: "settings", text: Tr.t("Sozlamalar") }]
+        current: Math.max(0, home.order.indexOf(home.tab))
+        badges: Prefs.callsTab ? [0, 0, chats.unreadChats, 0] : [0, chats.unreadChats, 0]
         onPicked: (i) => {
-            if (i === home.tab && i === 1)
+            const t = home.order[i]
+            if (t === home.tab && t === 1)
                 chats.toTop()
-            home.tab = i
+            home.tab = t
         }
     }
 

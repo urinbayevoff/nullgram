@@ -129,8 +129,8 @@ SubPage {
                     Icon { anchors.centerIn: parent; width: 16; height: 16; visible: page.chosen === plan.index; name: "check"; color: "white" }
                 }
                 Column {
-                    x: 56; anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - x - price.width - 28
+                    x: 52; anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - x - price.width - 20
                     Row {
                         spacing: 6
                         Text {
@@ -166,9 +166,9 @@ SubPage {
                     anchors.verticalCenter: parent.verticalCenter
                     text: page.perMonth(plan.modelData) + Tr.t("/oy")
                     color: Theme.grey
-                    font.family: Theme.font; font.pixelSize: 17
+                    font.family: Theme.font; font.pixelSize: 15
                 }
-                Rectangle { visible: plan.index < page.plans.length - 1; x: 56; anchors.bottom: parent.bottom; width: parent.width - x; height: 0.5; color: Theme.separator }
+                Rectangle { visible: plan.index < page.plans.length - 1; x: 52; anchors.bottom: parent.bottom; width: parent.width - x; height: 0.5; color: Theme.separator }
                 MouseArea { id: planHit; anchors.fill: parent; onClicked: page.chosen = plan.index }
             }
         }

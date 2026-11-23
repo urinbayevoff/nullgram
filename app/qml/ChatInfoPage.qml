@@ -5,6 +5,7 @@
 // voice notes (a tap goes back to the chat, at it).
 import QtQuick
 import QtQuick.Effects
+import QtQuick.Window
 
 SubPage {
     id: page
@@ -23,7 +24,15 @@ SubPage {
     property real now: Date.now() / 1000
     readonly property bool saved: store.isSaved(chat)
     readonly property bool isGroup: kind === "chatTypeBasicGroup" || (kind === "chatTypeSupergroup" && !chat.type.is_channel)
+    readonly property bool isChannel: kind === "chatTypeSupergroup" && !!chat.type.is_channel
     readonly property bool muted: (changed, !!chat && chat.notification_settings.mute_for > 0)
+    readonly property var directChatId: full && full.direct_messages_chat_id ? full.direct_messages_chat_id : 0
+    readonly property bool canManageGifts: isChannel && runs && (myStatus["@type"] === "chatMemberStatusCreator"
+                                                                  || (!!myStatus.rights && !!myStatus.rights.can_post_messages))
+    readonly property bool canDirectAdmin: isChannel && runs && (myStatus["@type"] === "chatMemberStatusCreator"
+                                                                 || (!!myStatus.rights && !!myStatus.rights.can_manage_direct_messages))
+    readonly property var giftOwnerId: isChannel ? { "@type": "messageSenderChat", chat_id: chatId }
+                                       : user ? { "@type": "messageSenderUser", user_id: user.id } : null
     Connections {
         target: store
         function onChatChanged(id) { if (id === page.chatId) page.changed++ }
@@ -49,7 +58,12 @@ SubPage {
             : kind === "chatTypeSupergroup" ? { "@type": "getSupergroupFullInfo", supergroup_id: chat.type.supergroup_id }
             : kind === "chatTypeBasicGroup" ? { "@type": "getBasicGroupFullInfo", basic_group_id: chat.type.basic_group_id } : null
         if (want)
-            store.send(want, (r) => { if (page && r["@type"] !== "error") page.full = r })
+            store.send(want, (r) => {
+                if (!page || r["@type"] === "error")
+                    return
+                page.full = r
+                page.countGifts()
+            })
     }
     onVisibleChanged: if (visible && full && user) loadFull()     // (back from the contact's page: its notes)
     readonly property bool follows: !user       // (a basic group made a supergroup on a page over this: now that)
@@ -253,20 +267,92 @@ SubPage {
         })
     }
 
-    // ---- a group's members, then what was sent there by kind ----
+    // ---- a group's members, then what was sent there by kind, and received gifts ----
     readonly property var tabs: (isGroup ? [{ key: "members", name: Tr.t("A'zolar") }] : []).concat([
         { key: "media", name: Tr.t("Media"), filter: "searchMessagesFilterPhotoAndVideo" },
         { key: "files", name: Tr.t("Fayllar"), filter: "searchMessagesFilterDocument" },
         { key: "links", name: Tr.t("Havolalar"), filter: "searchMessagesFilterUrl" },
         { key: "voice", name: Tr.t("Ovozli"), filter: "searchMessagesFilterVoiceNote" },
         { key: "music", name: Tr.t("Musiqa"), filter: "searchMessagesFilterAudio" }
-    ])
+    ]).concat(isChannel || (other && !bot && !deleted) ? [{ key: "gifts", name: Tr.t("Hadyalar") }] : [])
     property var counts: ({})           // tab key -> how many
     property string tab: "media"
-    property var found: []              // the shown tab's messages, newest first (members: the online first)
+    property var found: []              // the shown tab's messages, newest first (members: online first; gifts: receivedGift[])
     property bool more: false           // older ones not yet asked
     property bool loading: false
+    property string giftOffset: ""
+    property var giftPaths: ({})        // sticker file id -> local path
+    property int giftGot: 0
     readonly property var shownTabs: tabs.filter((t) => counts[t.key] > 0)
+
+    function hexColor(c) { return "#" + ((c >>> 0) & 0xffffff).toString(16).padStart(6, "0") }
+    function giftSticker(g) {
+        if (!g || !g.gift || !g.gift.gift)
+            return null
+        return g.gift["@type"] === "sentGiftUpgraded"
+            ? (g.gift.gift.model ? g.gift.gift.model.sticker : null)
+            : g.gift.gift.sticker
+    }
+    function wantGift(f) {
+        if (!f || giftPaths[f.id] !== undefined)
+            return
+        giftPaths[f.id] = ""
+        store.fetch(f, 2, (path) => {
+            if (!page)
+                return
+            page.giftPaths[f.id] = path
+            page.giftGot++
+        })
+    }
+    function countGifts() {
+        if (!giftOwnerId || (!isChannel && !(other && !bot && !deleted)))
+            return
+        if (!canManageGifts && full && full.gift_count === 0) {
+            counted("gifts", 0)
+            return
+        }
+        store.send({ "@type": "getReceivedGifts", business_connection_id: "", owner_id: giftOwnerId,
+                     collection_id: 0, exclude_unsaved: !canManageGifts, exclude_saved: false,
+                     exclude_unlimited: false, exclude_upgradable: false, exclude_non_upgradable: false,
+                     exclude_upgraded: false, exclude_without_colors: false, exclude_hosted: false,
+                     sort_by_price: false, offset: "", limit: 1 }, (r) => {
+            if (page && r["@type"] === "receivedGifts")
+                page.counted("gifts", r.total_count)
+        })
+    }
+    function reloadGifts() {
+        countGifts()
+        if (tab === "gifts") {
+            const t = tabs.find((x) => x.key === "gifts")
+            if (t)
+                load(t)
+        }
+    }
+    function moreGifts() {
+        if (!giftOwnerId) {
+            loading = false
+            more = false
+            return
+        }
+        store.send({ "@type": "getReceivedGifts", business_connection_id: "", owner_id: giftOwnerId,
+                     collection_id: 0, exclude_unsaved: !canManageGifts, exclude_saved: false,
+                     exclude_unlimited: false, exclude_upgradable: false, exclude_non_upgradable: false,
+                     exclude_upgraded: false, exclude_without_colors: false, exclude_hosted: false,
+                     sort_by_price: false, offset: giftOffset, limit: 30 }, (r) => {
+            if (!page || page.tab !== "gifts")
+                return
+            page.loading = false
+            if (r["@type"] !== "receivedGifts") {
+                page.more = false
+                return
+            }
+            const got = r.gifts || []
+            page.found = page.found.concat(got)
+            page.giftOffset = r.next_offset || ""
+            page.more = page.giftOffset !== "" && got.length > 0
+            page.counted("gifts", r.total_count)
+        })
+    }
 
     function count(t) {
         store.send({ "@type": "getChatMessageCount", chat_id: chatId, filter: { "@type": t.filter },
@@ -288,6 +374,7 @@ SubPage {
     function load(t) {
         tab = t.key
         found = []
+        giftOffset = ""
         more = true
         loading = false
         older()
@@ -298,6 +385,10 @@ SubPage {
         loading = true
         if (tab === "members") {
             moreMembers()
+            return
+        }
+        if (tab === "gifts") {
+            moreGifts()
             return
         }
         const t = tabs.find((x) => x.key === tab)
@@ -453,6 +544,10 @@ SubPage {
             qr.hide()
             return true
         }
+        if (overlay && overlay.giftView.open) {
+            overlay.giftView.backOne()
+            return true
+        }
         if (overlay && overlay.gift.open) {
             overlay.gift.backOne()
             return true
@@ -491,6 +586,7 @@ SubPage {
             readonly property alias sheet: sheet
             readonly property alias forward: forward
             readonly property alias gift: gift
+            readonly property alias giftView: giftView
             ForwardSheet {
                 id: forward
                 z: 26
@@ -503,6 +599,22 @@ SubPage {
                 store: page.store
                 chatId: page.chatId
                 onSay: (text) => parent.say(text)
+            }
+            GiftViewSheet {
+                id: giftView
+                z: 28
+                store: page.store
+                onSay: (text) => parent.say(text)
+                onChanged: page.reloadGifts()
+                onOpenSender: (s) => {
+                    if (s["@type"] === "messageSenderUser")
+                        page.chatWith(s.user_id)
+                    else if (s["@type"] === "messageSenderChat") {
+                        if (!page.chatPageMaker)
+                            page.chatPageMaker = Qt.createComponent("ChatPage.qml")
+                        page.nav.push(page.chatPageMaker, { chatId: s.chat_id })
+                    }
+                }
             }
             Item {
                 id: sheet
@@ -523,7 +635,7 @@ SubPage {
                 Column {
                     id: cards
                     x: 8; width: parent.width - 16
-                    y: sheet.open ? parent.height - height - 8 : parent.height + 8
+                    y: sheet.open ? parent.height - height - 8 - safe.bottom : parent.height + 8
                     Behavior on y { NumberAnimation { duration: 350; easing.type: Easing.BezierSpline
                         easing.bezierCurve: [0.0744, 0.0298, 0.1307, 0.7931, 0.3680, 0.9301, 0.4409, 0.9722, 0.4273, 0.9999, 1.0, 1.0] } }
                     spacing: 8
@@ -729,12 +841,34 @@ SubPage {
         readonly property var song: page.user && page.full && page.full.first_profile_audio ? page.full.first_profile_audio : null
         readonly property real songH: song ? 40 : 0
 
-        Item {          // the picture: round, or across the top
+        Item {          // the picture: round (with story ring when active), or across the top
             id: bigPic
             x: page.lerp((head.width - 100) / 2, 0, page.ex)
             y: page.lerp(0, -head.top0 - head.pull, page.ex)
             width: page.lerp(100, head.width, page.ex)
             height: page.lerp(100, head.bigH + head.pull, page.ex)
+            readonly property bool hasStory: !page.saved && (store.storiesSeen, store.hasStories(page.chatId))
+            readonly property bool freshStory: hasStory && (store.storiesSeen, store.unseen(page.chatId))
+            Rectangle {     // seen story ring
+                visible: page.ex === 0 && bigPic.hasStory && !bigPic.freshStory
+                anchors.fill: parent; anchors.margins: -5
+                radius: width / 2; color: "transparent"
+                border.color: Theme.dark ? "#48484a" : "#c7c7cc"; border.width: 2
+            }
+            Rectangle {     // unseen story ring (green to blue)
+                visible: page.ex === 0 && bigPic.freshStory
+                anchors.fill: parent; anchors.margins: -5
+                radius: width / 2; rotation: 45
+                gradient: Gradient {
+                    GradientStop { position: 0; color: "#34c76f" }
+                    GradientStop { position: 1; color: "#3da1fd" }
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.width - 5.6; height: width; radius: width / 2
+                    color: Theme.bg
+                }
+            }
             Avatar {
                 anchors.fill: parent
                 visible: page.ex === 0
@@ -816,9 +950,12 @@ SubPage {
             MouseArea {
                 anchors.fill: parent
                 function tap(m) {
-                    if (!page.expanded)
-                        page.expand()
-                    else
+                    if (!page.expanded) {
+                        if (bigPic.hasStory)
+                            root.storyView.show([page.chatId], 0)
+                        else
+                            page.expand()
+                    } else
                         page.step(m.x < width / 5)
                 }
                 onClicked: (m) => tap(m)
@@ -858,7 +995,11 @@ SubPage {
             spacing: 8
             Repeater {
                 id: buttons
-                model: (page.saved ? [] : [{ icon: "bell", name: Tr.t(page.muted ? "ovozni yoqish" : "ovozsiz"), act: "mute" }])
+                readonly property bool callBtns: page.other && !page.bot && !page.deleted
+                model: (callBtns ? [{ icon: "phone", name: Tr.t("qo'ng'iroq"), act: "call" },
+                                    { icon: "camera", name: Tr.t("video"), act: "video" }] : [])
+                       .concat(page.isChannel && page.directChatId !== 0 ? [{ icon: "direct", name: Tr.t("xabar"), act: "direct" }] : [])
+                       .concat(page.saved ? [] : [{ icon: "bell", name: Tr.t(page.muted ? "ovozni yoqish" : "ovozsiz"), act: "mute" }])
                        .concat([{ icon: "search", name: Tr.t("qidiruv"), act: "search" }])
                        .concat(page.other ? [{ icon: "more", name: Tr.t("yana"), act: "more" }] : [])
                 Rectangle {
@@ -871,16 +1012,28 @@ SubPage {
                     Icon { anchors.horizontalCenter: parent.horizontalCenter; y: 8; name: parent.modelData.icon; color: parent.ink }
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter; y: 35
+                        width: parent.width - 4
+                        horizontalAlignment: Text.AlignHCenter
+                        elide: Text.ElideRight
                         text: parent.modelData.name
                         color: parent.ink
-                        font.family: Theme.font; font.pixelSize: 12
+                        font.family: Theme.font; font.pixelSize: buttons.count > 4 ? 11 : 12
                     }
                     MouseArea {
                         id: hit
                         anchors.fill: parent
                         onClicked: {
                             const a = parent.modelData.act
-                            a === "mute" ? page.mute() : a === "more" ? page.moreMenu() : page.search()
+                            if (a === "call" || a === "video")
+                                page.overlay.say(Tr.t("Nullgram'da ovozli va video qo'ng'iroqlar hali yo'q"))
+                            else if (a === "direct")
+                                store.openDirectMessages(page.directChatId, page.nav, page.chatId)
+                            else if (a === "mute")
+                                page.mute()
+                            else if (a === "more")
+                                page.moreMenu()
+                            else
+                                page.search()
                         }
                     }
                 }
@@ -1075,6 +1228,14 @@ SubPage {
             text: Tr.t("Qo'shilish so'rovlari")
             value: visible ? String(page.chat.pending_join_requests.total_count) : ""
             onClicked: page.openPage("JoinRequestsPage.qml", {})
+        }
+        SettingsRow {
+            icon: "direct"; tint: "#007aff"
+            visible: adminRows.chan && page.directChatId !== 0 && page.canDirectAdmin
+            text: Tr.t("Kanalga xabarlar")
+            value: (store.seen, page.directChatId && store.chats[page.directChatId] && store.chats[page.directChatId].unread_count > 0
+                    ? String(store.chats[page.directChatId].unread_count) : "")
+            onClicked: store.openDirectMessages(page.directChatId, page.nav, page.chatId)
         }
         SettingsRow {
             art: "stars"
@@ -1288,11 +1449,127 @@ SubPage {
             }
         }
 
+        Grid {              // received gifts, three across (Telegram-iOS PeerInfoGifts)
+            id: giftGrid
+            visible: page.tab === "gifts" && page.found.length > 0
+            x: 16; width: parent.width - 32
+            columns: 3
+            spacing: 8
+            readonly property real side: (width - 16) / 3
+            Repeater {
+                model: giftGrid.visible ? page.found : []
+                Rectangle {
+                    id: gCell
+                    required property var modelData
+                    readonly property var sent: modelData.gift
+                    readonly property bool upgraded: !!sent && sent["@type"] === "sentGiftUpgraded"
+                    readonly property var inner: sent ? sent.gift : null
+                    readonly property var backdrop: upgraded && inner && inner.backdrop ? inner.backdrop.colors : null
+                    readonly property var st: page.giftSticker(modelData)
+                    readonly property bool tgs: !!st && st.format["@type"] === "stickerFormatTgs"
+                    readonly property var f: !st ? null : tgs || st.format["@type"] === "stickerFormatWebp" ? st.sticker
+                                             : st.thumbnail ? st.thumbnail.file : null
+                    readonly property string path: f ? (page.giftGot, page.giftPaths[f.id] || "") : ""
+                    onFChanged: page.wantGift(f)
+                    Component.onCompleted: page.wantGift(f)
+
+                    width: giftGrid.side; height: giftGrid.side + 16
+                    radius: 14
+                    clip: true
+                    gradient: Gradient {
+                        GradientStop { position: 0; color: gCell.backdrop ? page.hexColor(gCell.backdrop.center_color) : Theme.card }
+                        GradientStop { position: 1; color: gCell.backdrop ? page.hexColor(gCell.backdrop.edge_color) : Theme.card }
+                    }
+                    scale: gHit.pressed ? 0.94 : 1
+                    Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+
+                    // gift sticker (first frame for TGS, or thumbnail)
+                    Image {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: 18
+                        width: gCell.width - 28; height: width
+                        source: gCell.path === "" ? "" : gCell.tgs ? "image://lottie/0/-/" + gCell.path : "image://thumb/" + gCell.path
+                        sourceSize: Qt.size(Math.ceil(width * Screen.devicePixelRatio), Math.ceil(height * Screen.devicePixelRatio))
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                        smooth: true
+                    }
+                    // top-left: pinned badge OR sender mini avatar
+                    Rectangle {
+                        visible: !!gCell.modelData.is_pinned
+                        x: 6; y: 6; width: 20; height: 20; radius: 10
+                        color: Qt.rgba(0, 0, 0, 0.35)
+                        Icon { anchors.centerIn: parent; width: 11; height: 11; name: "pin"; color: "white" }
+                    }
+                    Avatar {
+                        id: gFrom
+                        visible: !gCell.modelData.is_pinned && !gCell.modelData.is_private && !!gCell.modelData.sender_id
+                        x: 6; y: 6; width: 20; height: 20
+                        Component.onCompleted: {
+                            const s = gCell.modelData.sender_id
+                            if (s)
+                                store.faceOn(gFrom, s.user_id ? { user_id: s.user_id } : { chat_id: s.chat_id })
+                        }
+                    }
+                    // top-right: hidden badge (admin) OR upgraded #number OR limited ribbon
+                    Rectangle {
+                        visible: !gCell.modelData.is_saved
+                        anchors.right: parent.right; anchors.rightMargin: 6; y: 6
+                        width: 22; height: 20; radius: 10
+                        color: Qt.rgba(0, 0, 0, 0.45)
+                        Icon { anchors.centerIn: parent; width: 13; height: 13; name: "eyeoff"; color: "white" }
+                    }
+                    Rectangle {
+                        visible: gCell.modelData.is_saved && (gCell.upgraded || (!!gCell.inner && !!gCell.inner.overall_limits))
+                        anchors.right: parent.right; anchors.rightMargin: 6; y: 6
+                        width: rBadge.implicitWidth + 10; height: 18; radius: 9
+                        color: gCell.upgraded ? Qt.rgba(0, 0, 0, 0.28) : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                        Text {
+                            id: rBadge
+                            anchors.centerIn: parent
+                            text: gCell.upgraded && gCell.inner ? "#" + gCell.inner.number
+                                : gCell.inner && gCell.inner.overall_limits ? "1/" + store.short(gCell.inner.overall_limits.total_count) : ""
+                            color: gCell.upgraded ? "white" : Theme.accent
+                            font.family: Theme.font; font.pixelSize: 10; font.weight: Font.Bold
+                        }
+                    }
+                    // bottom: price pill (regular) or upgraded title
+                    Row {
+                        visible: !gCell.upgraded && !!gCell.inner
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: 7
+                        spacing: 2
+                        Icon { anchors.verticalCenter: parent.verticalCenter; width: 12; height: 12; name: "star"; color: "#ffb10a" }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: gCell.inner ? store.count(gCell.inner.star_count) : ""
+                            color: Theme.dark ? "#ffc337" : "#d3720a"
+                            font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
+                        }
+                    }
+                    Text {
+                        visible: gCell.upgraded && !!gCell.inner
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: 6
+                        width: parent.width - 12; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
+                        text: gCell.inner && gCell.inner.title ? gCell.inner.title : ""
+                        color: "white"
+                        font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
+                    }
+                    MouseArea {
+                        id: gHit
+                        anchors.fill: parent
+                        onClicked: page.overlay.giftView.show(gCell.modelData, page.giftOwnerId, page.found, page.canManageGifts, page.ownsChannel)
+                    }
+                }
+            }
+        }
+
         SettingsGroup {     // files, links, voice notes, music: a row each
-            visible: page.tab !== "media" && page.tab !== "members" && page.found.length > 0
+            visible: page.tab !== "media" && page.tab !== "members" && page.tab !== "gifts" && page.found.length > 0
             Repeater {
                 id: rows
-                model: page.tab !== "media" && page.tab !== "members" ? page.found : []
+                model: page.tab !== "media" && page.tab !== "members" && page.tab !== "gifts" ? page.found : []
                 Rectangle {
                     id: row
                     required property var modelData

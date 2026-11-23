@@ -23,6 +23,15 @@ Page {
                                            (chat.type["@type"] === "chatTypeSupergroup" && !chat.type.is_channel))
     readonly property bool channel: chat && chat.type["@type"] === "chatTypeSupergroup" && chat.type.is_channel
     property bool canGift: false        // a gift may be sent to this channel (supergroupFullInfo.can_send_gift): 🎁 on its bar
+    property var directChatId: 0        // a channel's direct messages chat (supergroupFullInfo.direct_messages_chat_id)
+    property var directTopic: 0         // a subscriber's thread in an administered channel direct messages chat
+    property var directSender: null     // MessageSender of that directTopic
+    property bool directCanUnpaid: false
+    property int paidMessageStars: 0    // Stars required per message in a subscriber DM / paid supergroup
+    readonly property bool isDirectChat: (store.seen, store.isDirect(chat))
+    readonly property bool isDirectAdmin: (store.seen, store.isDirectAdmin(chat))
+    readonly property alias paidSheet: paidSheet
+    readonly property alias messageList: messages
     // a channel we may write in (its owner, or an admin who posts); the others have its bar instead of the field
     readonly property bool canPost: {
         if (outside || blocked)
@@ -89,7 +98,7 @@ Page {
         const k = g && g.status ? g.status["@type"] : ""
         if (!k || k === "chatMemberStatusCreator" || k === "chatMemberStatusAdministrator")
             return ""
-        if (k === "chatMemberStatusBanned" || k === "chatMemberStatusLeft")
+        if (k === "chatMemberStatusBanned" || (k === "chatMemberStatusLeft" && !isDirectChat))
             return Tr.t("Siz bu guruh a'zosi emassiz")
         const r = rights
         if (!r || r.text || r.some)
@@ -97,8 +106,9 @@ Page {
         return r.mine ? Tr.t("Adminlar sizga bu yerda yozishni cheklagan") : Tr.t("Bu guruhda faqat adminlar yoza oladi")
     }
     // a channel or a group we are not in (opened by a link): «Qo'shilish» in the bar
+    // (a channel's Direct Messages chat cannot be joined explicitly — subscribers just send a message)
     readonly property bool outside: {
-        if (!chat || thread || chat.type["@type"] !== "chatTypeSupergroup")
+        if (!chat || thread || isDirectChat || chat.type["@type"] !== "chatTypeSupergroup")
             return false
         const g = (store.seen, store.groups["s" + chat.type.supergroup_id])
         return !!g && g.status["@type"] === "chatMemberStatusLeft"
@@ -435,18 +445,23 @@ Page {
         if (td.devOpen)
             console.warn("nullgram: chat translatable", chat ? chat.is_translatable : "?", "premium", store.me ? store.me.is_premium : "?")
         store.send({ "@type": "openChat", chat_id: chatId })
-        if (chat && chat.type["@type"] === "chatTypeSupergroup") {   // its update may not have the count; a channel's 🎁
+        if (chat && chat.type["@type"] === "chatTypeSupergroup") {   // its update may not have the count; a channel's 🎁 & DM
             const g = store.groups["s" + chat.type.supergroup_id]
-            if (!g || !g.member_count || channel)
+            if (!g || !g.member_count || channel || isDirectChat)
                 store.send({ "@type": "getSupergroupFullInfo", supergroup_id: chat.type.supergroup_id }, (r) => {
-                    if (!page)
+                    if (!page || r["@type"] === "error")
                         return
                     page.canGift = !!r.can_send_gift
+                    page.directChatId = r.direct_messages_chat_id || 0
+                    if (page.directChatId && !store.chats[page.directChatId])
+                        store.send({ "@type": "getChat", chat_id: page.directChatId }, () => {})
                     const g = store.groups["s" + page.chat.type.supergroup_id]
                     if (g && r.member_count && !g.member_count) {
                         g.member_count = r.member_count
                         store.seen++
                     }
+                    if (!page.isDirectAdmin && !page.channel)
+                        page.paidMessageStars = r.outgoing_paid_message_star_count || (g ? g.paid_message_star_count || 0 : 0)
                 })
         }
         readTo = chat ? chat.last_read_inbox_message_id : 0
@@ -477,7 +492,7 @@ Page {
             page.ready = true
             Qt.callLater(page.seen)
             Qt.callLater(page.nearTop)          // a screen not yet full: more at once
-        }, null, thread)
+        }, null, thread, directTopic)
     }
 
     // as Telegram opens a chat with unread messages: around the last one read, the first unread
@@ -947,9 +962,13 @@ Page {
     }
 
     // a reaction chip's width: «👍 3», or 👍 and the faces of who chose it (24 pt, 12 apart: Telegram-iOS's
-    // ReactionButtonComponent, 4 after the emoji, 2 before the chip's round end)
+    // ReactionButtonComponent, 4 after the emoji, 2 before the chip's round end), or gold ⭐ paid reaction chip
     function chipWidth(r) {
         const n = r.who ? r.who.length : 0
+        if (r.paid) {
+            const facesW = n ? 4 + 20 + (n - 1) * 10 : 0
+            return 8 + 16 + facesW + 4 + chipMetrics.advanceWidth(store.short(r.n)) + 9
+        }
         return n ? 8 + chipMetrics.advanceWidth(r.e) + 4 + 24 + (n - 1) * 12 + 2 : chipMetrics.advanceWidth(r.e + " " + r.n) + 16
     }
 
@@ -1383,7 +1402,7 @@ Page {
                 if (!failed)
                     Qt.callLater(page.nearTop)  // still near the top (a short page, a fast flick): the next ones
             })
-        }, null, thread)
+        }, null, thread, directTopic)
     }
 
     // older messages while the top of the list is still 15 messages away, not only once it is reached:
@@ -1620,8 +1639,10 @@ Page {
         const both = () => { if (props && reactions) page.showMenu(item, m, props, reactions) }
         store.send({ "@type": "getMessageAvailableReactions", chat_id: chatId, message_id: item.reactId, row_size: 8 }, (r) => {
             const list = r["@type"] === "availableReactions" ? r.top_reactions.concat(r.popular_reactions || []) : []
-            reactions = list.filter((a) => a.type["@type"] === "reactionTypeEmoji" && !a.needs_premium)
-                            .map((a) => a.type.emoji).filter((e, i, all) => all.indexOf(e) === i).slice(0, 12)
+            const hasPaid = page.channel && list.some((a) => a.type["@type"] === "reactionTypePaid")
+            const emojis = list.filter((a) => a.type["@type"] === "reactionTypeEmoji" && !a.needs_premium)
+                               .map((a) => a.type.emoji).filter((e, i, all) => all.indexOf(e) === i).slice(0, hasPaid ? 11 : 12)
+            reactions = hasPaid ? ["⭐"].concat(emojis) : emojis
             both()
         })
         store.send({ "@type": "getMessageProperties", chat_id: chatId, message_id: m.id }, (p) => {
@@ -2039,6 +2060,14 @@ Page {
 
     // the back button: the menu first, then a reply or edit being written (Main asks)
     function dismiss() {
+        if (paidAlert.open) {
+            paidAlert.open = false
+            return true
+        }
+        if (paidSheet.open) {
+            paidSheet.backOne()
+            return true
+        }
         if (sheet.open) {
             sheet.close()
             return true
@@ -2107,6 +2136,9 @@ Page {
             if (m.chat_id !== page.chatId || page.gap)      // (in a gap it comes with the newer ones)
                 return
             if (page.thread && !(m.topic_id && m.topic_id.message_thread_id === page.thread))
+                return
+            if (page.directTopic && !(m.topic_id && m.topic_id["@type"] === "messageTopicDirectMessages"
+                                      && m.topic_id.direct_messages_chat_topic_id === page.directTopic))
                 return
             for (let i = 0; i < Math.min(messages.count, 20); i++)
                 if (messages.get(i).msgId === m.id)
@@ -3378,41 +3410,64 @@ Page {
                                             Rectangle {
                                                 id: chip
                                                 required property var modelData
+                                                readonly property bool isPaid: !!modelData.paid
                                                 readonly property var who: modelData.who || []
                                                 width: page.chipWidth(modelData); height: 28; radius: 14
                                                 readonly property color ink: item.bare ? "white" : item.out ? Theme.check : Theme.accent
-                                                // (on the wallpaper, under a sticker: on the day pills' dark glass, as iOS's
-                                                // standalone reactions; 15 % white there was hardly seen)
-                                                color: modelData.mine ? ink : item.bare ? Theme.dayPill : Qt.rgba(ink.r, ink.g, ink.b, 0.15)
+                                                readonly property color goldInk: Theme.dark ? "#ffc337" : "#c87000"
+                                                // paid star reaction chip: gold translucent (unchosen) or solid warm gold (chosen)
+                                                // regular chip: accent translucent or solid; standalone over wallpaper on dayPill
+                                                color: isPaid ? (modelData.mine ? "#f59300" : Qt.rgba(1, 0.72, 0.05, item.bare ? 0.45 : 0.22))
+                                                     : modelData.mine ? ink : item.bare ? Theme.dayPill : Qt.rgba(ink.r, ink.g, ink.b, 0.15)
+                                                border.width: isPaid && modelData.mine ? 1 : 0
+                                                border.color: "#ffd43b"
+                                                Icon {
+                                                    id: starGlyph
+                                                    visible: chip.isPaid
+                                                    x: 8; anchors.verticalCenter: parent.verticalCenter
+                                                    width: 16; height: 16
+                                                    name: "star"
+                                                    color: chip.modelData.mine ? "white" : "#ffb10a"
+                                                }
                                                 Text {
                                                     id: chipText
+                                                    visible: !chip.isPaid
                                                     anchors.centerIn: chip.who.length ? undefined : parent
                                                     x: 8; anchors.verticalCenter: parent.verticalCenter
                                                     text: chip.who.length ? chip.modelData.e : chip.modelData.e + " " + chip.modelData.n
                                                     color: chip.modelData.mine ? (item.bare ? "#1c1c1e" : Theme.dark && item.out ? Theme.bubbleOut : "white") : chip.ink
                                                     font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
                                                 }
-                                                // who chose it, when few (Telegram-iOS's AnimatedAvatarSetView: 24 pt, 12 apart, the
-                                                // first over the next, each cut out of the one under it by a ring of the chip's colour)
+                                                // top paid reactors (20 pt) OR regular reactors (24 pt)
                                                 Repeater {
                                                     model: chip.who
                                                     Rectangle {
                                                         required property var modelData
                                                         required property int index
-                                                        x: chipText.x + chipText.implicitWidth + 4 + index * 12 - 1.5
+                                                        readonly property int sz: chip.isPaid ? 20 : 24
+                                                        readonly property int step: chip.isPaid ? 10 : 12
+                                                        x: (chip.isPaid ? starGlyph.x + starGlyph.width + 4 : chipText.x + chipText.implicitWidth + 4) + index * step - 1.5
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         z: chip.who.length - index      // (over the chip: below 0 it went under its colour)
-                                                        width: 27; height: 27; radius: 13.5
+                                                        width: sz + 3; height: sz + 3; radius: width / 2
                                                         // (the chip's colour over the bubble's, whole: a see-through ring would show the face under it)
                                                         color: chip.modelData.mine || item.bare ? chip.color
                                                              : Qt.tint(item.out ? Theme.bubbleOut : Theme.bubbleIn, chip.color)
                                                         Avatar {
                                                             id: reactor
                                                             anchors.centerIn: parent
-                                                            width: 24; height: 24
+                                                            width: parent.sz; height: parent.sz
                                                             Component.onCompleted: store.faceOn(reactor, parent.modelData)
                                                         }
                                                     }
+                                                }
+                                                Text {
+                                                    visible: chip.isPaid
+                                                    x: starGlyph.x + starGlyph.width + (chip.who.length ? 4 + 20 + (chip.who.length - 1) * 10 : 0) + 4
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: store.short(chip.modelData.n)
+                                                    color: chip.modelData.mine ? "white" : chip.goldInk
+                                                    font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
                                                 }
                                             }
                                         }
@@ -3421,7 +3476,12 @@ Page {
                                         anchors.fill: parent
                                         onClicked: (mouse) => {
                                             const c = reactRow.item && reactRow.item.childAt(mouse.x, mouse.y)
-                                            if (c && c.modelData) store.react(page.chatId, item.reactId, c.modelData.e, !c.modelData.mine)
+                                            if (!c || !c.modelData)
+                                                return
+                                            if (c.modelData.paid)
+                                                paidSheet.show(item.reactId, c.modelData.reactors || [], !!c.modelData.mine)
+                                            else
+                                                store.react(page.chatId, item.reactId, c.modelData.e, !c.modelData.mine)
                                         }
                                     }
                                 }
@@ -3697,8 +3757,9 @@ Page {
             }
             Glass {          // the name, and under it what it is
                 id: titleCap
+                readonly property real rightEdge: dmBarBtn.visible ? bar.width - dmBarBtn.x : bar.width - face.x
                 readonly property real room: bar.width - 2 * (page.selecting ? bar.width - cancelCap.x
-                                                                 : Math.max(backCap.x + backCap.width, bar.width - face.x)) - 16
+                                                                 : Math.max(backCap.x + backCap.width, rightEdge)) - 16
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 8
                 width: Math.min(room, Math.max(titleText.implicitWidth, subText.visible ? subText.implicitWidth : 0) + 40)
@@ -3713,6 +3774,7 @@ Page {
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
                         text: page.selecting ? (page.pickedIds.length ? Tr.n("%1 ta tanlandi", page.pickedIds.length) : Tr.t("Xabarlarni tanlang"))
+                            : page.directTopic && page.directSender ? (store.seen, store.senderName(page.directSender, false) || store.title(page.chat))
                             : page.thread ? Tr.t("Izohlar") : store.title(page.chat)
                         color: Theme.text
                         font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
@@ -3722,7 +3784,8 @@ Page {
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
-                        text: page.thread ? page.threadOf : (store.seen, page.now, store.status(page.chat, page.now))     // (re-read when either changes)
+                        text: page.directTopic ? store.title(page.chat) + " · " + Tr.t("Kanalga xabarlar")
+                            : page.thread ? page.threadOf : (store.seen, page.now, store.status(page.chat, page.now))     // (re-read when either changes)
                         visible: text !== "" && !page.selecting
                         color: text === Tr.t("onlayn") || text.endsWith("...") ? Theme.accent : Theme.grey
                         font.family: Theme.font; font.pixelSize: 12
@@ -3737,8 +3800,38 @@ Page {
                 onClicked: {
                     if (page.thread)
                         page.focusFind()
+                    else if (page.directTopic && page.directSender && page.directSender["@type"] === "messageSenderUser")
+                        store.chatWith(page.directSender.user_id, (id) => page.nav.push(infoPage, { chatId: id, chatPage: page }))
                     else
                         page.nav.push(infoPage, { chatId: page.chatId, chatPage: page })
+                }
+            }
+            Glass {          // channel admin's DM inbox shortcut (with unread count badge)
+                id: dmBarBtn
+                visible: page.channel && page.canPost && page.directChatId !== 0 && !page.selecting
+                anchors.right: face.left; anchors.rightMargin: 8; y: 8
+                width: 44; height: 44
+                opacity: dmBarHit.pressed ? 0.65 : 1
+                Icon { anchors.centerIn: parent; width: 20; height: 20; name: "direct"; color: Theme.text }
+                Rectangle {
+                    readonly property int n: (store.seen, page.directChatId && store.chats[page.directChatId]
+                                              ? (store.chats[page.directChatId].unread_count || 0) : 0)
+                    visible: n > 0
+                    anchors.right: parent.right; anchors.rightMargin: -2; y: -3
+                    width: Math.max(18, dmCnt.implicitWidth + 8); height: 18; radius: 9
+                    color: Theme.badge
+                    Text {
+                        id: dmCnt
+                        anchors.centerIn: parent
+                        text: parent.n > 99 ? "99+" : String(parent.n)
+                        color: Theme.badgeText
+                        font.family: Theme.font; font.pixelSize: 11; font.weight: Font.Bold
+                    }
+                }
+                MouseArea {
+                    id: dmBarHit
+                    anchors.fill: parent
+                    onClicked: store.openDirectMessages(page.directChatId, page.nav, page.chatId)
                 }
             }
             Avatar {
@@ -3746,11 +3839,25 @@ Page {
                 anchors.right: parent.right; anchors.rightMargin: 10
                 y: 8
                 width: 44; height: 44
-                source: page.chat ? store.photoPath(page.chat) : ""
-                letters: page.chat ? store.letters(page.chat.title) : ""
-                tint: store.tints[Math.abs(page.chatId) % store.tints.length]
-                saved: store.isSaved(page.chat)
+                source: page.directTopic && page.directSender ? dmFacePhoto : (page.chat ? store.photoPath(page.chat) : "")
+                letters: page.directTopic && page.directSender
+                    ? store.letters(store.senderName(page.directSender, false))
+                    : (page.chat ? store.letters(page.chat.title) : "")
+                tint: page.directTopic && page.directSender
+                    ? store.tints[Math.abs(page.directSender.user_id || page.directSender.chat_id || 0) % store.tints.length]
+                    : store.tints[Math.abs(page.chatId) % store.tints.length]
+                saved: !page.directTopic && store.isSaved(page.chat)
                 visible: !page.selecting
+                property string dmFacePhoto: ""
+                Component.onCompleted: {
+                    if (page.directTopic && page.directSender) {
+                        const s = page.directSender
+                        if (s["@type"] === "messageSenderUser" && store.users[s.user_id])
+                            store.userPhoto(store.users[s.user_id], (p) => face.dmFacePhoto = p)
+                        else if (s["@type"] === "messageSenderChat" && store.chats[s.chat_id])
+                            face.dmFacePhoto = store.photoPath(store.chats[s.chat_id])
+                    }
+                }
             }
             Glass {          // picking: «Bekor» where the picture was
                 id: cancelCap
@@ -4019,15 +4126,34 @@ Page {
             transform: Translate { y: -page.barLift }
             width: parent.width
             height: visible ? 60 : 0
+            readonly property bool hasGift: page.canGift && !page.outside
+            readonly property bool hasDm: page.directChatId !== 0 && !page.outside
+            readonly property real leftEnd: hasGift && hasDm ? 102 : (hasGift || hasDm) ? 52 : 8
+            readonly property real rightStart: width - 52          // 8 margin + 44 search circle
+            readonly property real slotLeft: leftEnd + (hasGift || hasDm ? 8 : 0)
+            readonly property real slotRight: rightStart - 8
+            readonly property real slotW: Math.max(80, slotRight - slotLeft)
             Glass {
-                anchors.centerIn: parent
-                width: muteText.width + 44; height: 44
+                id: mutePill
+                readonly property real pad: chanBar.hasGift && chanBar.hasDm ? 28 : 44
+                width: Math.min(chanBar.slotW, muteText.implicitWidth + pad)
+                height: 44
+                // when both 🎁 and 💬 sit on the left, center cleanly inside the open middle slot between them and 🔍
+                // (equal breathing gaps on both sides, zero overlap); with 0 or 1 left button, center on the bar
+                x: chanBar.hasGift && chanBar.hasDm
+                   ? chanBar.slotLeft + (chanBar.slotW - width) / 2
+                   : Math.max(chanBar.slotLeft, Math.min(chanBar.slotRight - width, (chanBar.width - width) / 2))
+                anchors.verticalCenter: parent.verticalCenter
                 opacity: muteHit.pressed ? 0.7 : 1
                 Text {
                     id: muteText
                     anchors.centerIn: parent
-                    width: Math.min(implicitWidth, chanBar.width - 168)
-                    wrapMode: Text.Wrap
+                    width: Math.min(implicitWidth, mutePill.width - 18)
+                    wrapMode: page.barred ? Text.Wrap : Text.NoWrap
+                    maximumLineCount: page.barred ? 2 : 1
+                    fontSizeMode: page.barred ? Text.FixedSize : Text.HorizontalFit
+                    minimumPixelSize: 13
+                    elide: page.barred ? Text.ElideNone : Text.ElideRight
                     horizontalAlignment: Text.AlignHCenter
                     text: page.outside ? Tr.t("Qo'shilish") : page.blocked ? Tr.t(page.bot ? "Qayta ishga tushirish" : "Blokdan chiqarish")
                           : page.barred || (page.muted ? Tr.t("Sukutdan chiqarish") : Tr.t("Sukut qilish"))
@@ -4053,13 +4179,22 @@ Page {
                 }
             }
             Glass {              // 🎁 on the left (IMG_0297: gift · sound · search): GiftSheet
-                visible: page.canGift && !page.outside
+                visible: chanBar.hasGift
                 x: 8
                 anchors.verticalCenter: parent.verticalCenter
                 width: 44; height: 44
                 opacity: giftHit.pressed ? 0.7 : 1
                 Icon { anchors.centerIn: parent; name: "gift"; color: Theme.text }
                 MouseArea { id: giftHit; anchors.fill: parent; onClicked: giftSheet.show() }
+            }
+            Glass {              // Channel Direct Messages button on the left (next to 🎁 if both are shown)
+                visible: chanBar.hasDm
+                x: chanBar.hasGift ? 58 : 8
+                anchors.verticalCenter: parent.verticalCenter
+                width: 44; height: 44
+                opacity: dmSubHit.pressed ? 0.7 : 1
+                Icon { anchors.centerIn: parent; width: 20; height: 20; name: "direct"; color: Theme.text }
+                MouseArea { id: dmSubHit; anchors.fill: parent; onClicked: store.openDirectMessages(page.directChatId, page.nav, page.chatId) }
             }
             Glass {              // (as IMG_0297: the search on the bar's right)
                 anchors.right: parent.right; anchors.rightMargin: 8
@@ -4329,8 +4464,9 @@ Page {
                     }
                     Text {
                         visible: !field.text && !field.preeditText && !page.textBarred
-                        text: page.channel ? Tr.t("Xabar tarqatish") : Tr.t("Xabar")
-                        color: Theme.grey
+                        text: page.paidMessageStars > 0 ? Tr.f("Xabar (⭐ %1)", store.count(page.paidMessageStars))
+                            : page.channel ? Tr.t("Xabar tarqatish") : Tr.t("Xabar")
+                        color: page.paidMessageStars > 0 ? (Theme.dark ? "#ffc337" : "#c87000") : Theme.grey
                         font: field.font
                     }
                 }
@@ -4617,14 +4753,21 @@ Page {
                             field.text = ""
                             return
                         }
-                        if (page.gap)           // what is sent goes under the newest: go there first
-                            page.fresh()
-                        const at = field.mapToItem(page, 0, 0)
-                        page.flying = { text: t, x: at.x, y: at.y }
-                        store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, page.silent, w.marks)
-                        page.replying = null
-                        field.text = ""
-                        list.positionViewAtBeginning()
+                        const doSend = () => {
+                            if (page.gap)           // what is sent goes under the newest: go there first
+                                page.fresh()
+                            const at = field.mapToItem(page, 0, 0)
+                            page.flying = { text: t, x: at.x, y: at.y }
+                            store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, page.silent,
+                                           w.marks, page.directTopic, page.paidMessageStars)
+                            page.replying = null
+                            field.text = ""
+                            list.positionViewAtBeginning()
+                        }
+                        if (page.paidMessageStars > 0)
+                            page.askPaid(page.paidMessageStars, doSend)
+                        else
+                            doSend()
                     }
                 }
             }
@@ -4907,19 +5050,39 @@ Page {
         onSay: (text) => page.toast(text)
     }
 
+    PaidReactionSheet {
+        id: paidSheet
+        store: page.store
+        chatId: page.chatId
+        onSay: (text) => page.toast(text)
+    }
+    function askPaid(cost, run) {
+        paidAlert.title = Tr.t("Pullik xabar")
+        paidAlert.text = Tr.f("Ushbu xabarni yuborish uchun ⭐ %1 yulduz yechiladi. Davom etilsinmi?", store.count(cost))
+        paidAlert.answers = [{ t: Tr.t("Bekor qilish") }, { t: Tr.t("Yuborish"), run: run }]
+        paidAlert.open = true
+    }
+    Alert { id: paidAlert; z: 32; anchors.fill: parent }
+
     AttachSheet {
         id: sheet
         rights: page.rights
         onRefused: (text) => page.toast(text)
         onSend: (picked, asFiles, apart) => {
-            if (page.gap)
-                page.fresh()
-            store.sendFiles(page.chatId, picked, page.textBarred ? null : page.fieldWords(), page.replying ? page.replying.id : 0,
-                            asFiles, page.thread, page.silent, apart)
-            field.text = ""
-            page.replying = null
-            list.down = true
-            list.positionViewAtBeginning()
+            const doSend = () => {
+                if (page.gap)
+                    page.fresh()
+                store.sendFiles(page.chatId, picked, page.textBarred ? null : page.fieldWords(), page.replying ? page.replying.id : 0,
+                                asFiles, page.thread, page.silent, apart, page.directTopic, page.paidMessageStars)
+                field.text = ""
+                page.replying = null
+                list.down = true
+                list.positionViewAtBeginning()
+            }
+            if (page.paidMessageStars > 0)
+                page.askPaid(page.paidMessageStars * Math.max(1, picked.length), doSend)
+            else
+                doSend()
         }
     }
 
@@ -4980,20 +5143,34 @@ Page {
         field.remove(at - n, at)
     }
     function sendSticker(st) {
-        if (page.gap)
-            page.fresh()
-        store.sendSticker(page.chatId, st, page.replying ? page.replying.id : 0, page.thread, page.silent)
-        page.replying = null
-        list.down = true
-        list.positionViewAtBeginning()
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendSticker(page.chatId, st, page.replying ? page.replying.id : 0, page.thread, page.silent,
+                              page.directTopic, page.paidMessageStars)
+            page.replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
     }
     function sendGif(a) {
-        if (page.gap)
-            page.fresh()
-        store.sendGif(page.chatId, a, page.replying ? page.replying.id : 0, page.thread, page.silent)
-        page.replying = null
-        list.down = true
-        list.positionViewAtBeginning()
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendGif(page.chatId, a, page.replying ? page.replying.id : 0, page.thread, page.silent,
+                          page.directTopic, page.paidMessageStars)
+            page.replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
     }
 
     // the round video playing, its bubble gone off the screen: on in a 150 pt circle at the top right, 4 from the
@@ -5189,22 +5366,34 @@ Page {
             hearing.source = "file://" + at
             return
         }
-        if (page.gap)
-            page.fresh()
-        store.sendVoice(chatId, at, v.duration, v.waveform, replying ? replying.id : 0, thread, silent)
-        replying = null
-        list.down = true
-        list.positionViewAtBeginning()
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendVoice(chatId, at, v.duration, v.waveform, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars)
+            replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (paidMessageStars > 0)
+            askPaid(paidMessageStars, doSend)
+        else
+            doSend()
     }
     function sendPreview() {
         const p = preview
         dropPreview()
-        if (page.gap)
-            page.fresh()
-        store.sendVoice(chatId, p.path, p.dur, p.wave, replying ? replying.id : 0, thread, silent)
-        replying = null
-        list.down = true
-        list.positionViewAtBeginning()
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendVoice(chatId, p.path, p.dur, p.wave, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars)
+            replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (paidMessageStars > 0)
+            askPaid(paidMessageStars, doSend)
+        else
+            doSend()
     }
     function dropPreview() {
         hearing.stop()
@@ -5213,12 +5402,18 @@ Page {
         roundPreview = null
     }
     function sendRound(path, secs) {
-        if (page.gap)
-            page.fresh()
-        store.sendRound(chatId, path, secs, replying ? replying.id : 0, thread, silent)
-        replying = null
-        list.down = true
-        list.positionViewAtBeginning()
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendRound(chatId, path, secs, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars)
+            replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (paidMessageStars > 0)
+            askPaid(paidMessageStars, doSend)
+        else
+            doSend()
     }
     function sendRoundPreview() {
         const p = roundPreview
@@ -5571,6 +5766,16 @@ Page {
         ceiling: bar.height
         floor: page.height
         onReacted: (emoji) => {
+            if (emoji === "⭐") {
+                const i = page.indexOf(page.reacting)
+                let paid = null
+                if (i >= 0) {
+                    const list = JSON.parse(messages.get(i).reacts || "[]")
+                    paid = list.find((r) => r.paid)
+                }
+                paidSheet.show(page.reacting, paid ? (paid.reactors || []) : [], !!(paid && paid.mine))
+                return
+            }
             store.react(page.chatId, page.reacting, emoji, menu.chosen.indexOf(emoji) < 0)
         }
     }

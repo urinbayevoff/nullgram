@@ -163,29 +163,62 @@ Item {
             }
         }
 
-        Rectangle {          // «Havolani nusxalash»
+        Row {                // «Havolani nusxalash» and «Ulashish»
             visible: !!sheet.link
-            x: 16; width: parent.width - 32; height: 52; radius: 26
+            x: 16; spacing: 10
             anchors.bottom: parent.bottom; anchors.bottomMargin: 16 + safe.bottom
-            color: "white"
-            opacity: copyHit.pressed ? 0.7 : 1
-            Text {
-                anchors.centerIn: parent
-                text: Tr.t("Havolani nusxalash")
-                color: "#1f4f80"
-                font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
-            }
-            MouseArea {
-                id: copyHit
-                anchors.fill: parent
-                onClicked: {
-                    clip.text = sheet.link
-                    clip.selectAll()
-                    clip.copy()
-                    sheet.hide()
-                    sheet.copied()
+            Rectangle {
+                width: (fade.width - 32 - 10) / 2; height: 52; radius: 26
+                color: "white"
+                opacity: copyHit.pressed ? 0.7 : 1
+                Text {
+                    anchors.centerIn: parent
+                    width: parent.width - 20; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
+                    text: Tr.t("Nusxa olish")
+                    color: "#1f4f80"
+                    font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
+                }
+                MouseArea {
+                    id: copyHit
+                    anchors.fill: parent
+                    onClicked: {
+                        clip.text = sheet.link
+                        clip.selectAll()
+                        clip.copy()
+                        sheet.hide()
+                        sheet.copied()
+                    }
                 }
             }
+            Rectangle {
+                width: (fade.width - 32 - 10) / 2; height: 52; radius: 26
+                color: "white"
+                opacity: shareHit.pressed ? 0.7 : 1
+                Text {
+                    anchors.centerIn: parent
+                    width: parent.width - 20; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
+                    text: Tr.t("Ulashish")
+                    color: "#1f4f80"
+                    font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
+                }
+                MouseArea {
+                    id: shareHit
+                    anchors.fill: parent
+                    onClicked: {
+                        sheet.hide()
+                        forward.show()
+                    }
+                }
+            }
+        }
+    }
+    ForwardSheet {
+        id: forward
+        z: 110
+        store: sheet.store
+        onPicked: (to, title) => {
+            if (sheet.store)
+                sheet.store.sendText(to, sheet.link, 0)
         }
     }
     TextEdit { id: clip; visible: false }

@@ -22,7 +22,7 @@ SubPage {
     readonly property var shown: more ? packs : packs.filter((p) => !p.is_additional)
     function money(o) { return Money.money(o.amount, o.currency, Tr.en) }
     function buy(o) {
-        alert.show("⭐ " + o.star_count,
+        alert.show("⭐ " + store.count(o.star_count),
                    Tr.t("OmonullOS'da App Store yoki Google Play yo'q, shu sababli bu yerdan to'lab bo'lmaydi. Yulduzlarni @PremiumBot orqali olish mumkin."),
                    [{ t: Tr.t("Bekor qilish") }, { t: Tr.t("Ochish"), run: () =>
                        store.send({ "@type": "searchPublicChat", username: "PremiumBot" }, (c) => {
@@ -47,7 +47,8 @@ SubPage {
             SettingsRow {
                 required property var modelData
                 required property int index
-                text: "⭐  " + modelData.star_count.toLocaleString(Qt.locale(), "f", 0) + " " + Tr.t("yulduz")
+                icon: "star"; tint: "#ffb10a"; bare: true
+                text: store.count(modelData.star_count) + " " + Tr.t("yulduz")
                 value: page.money(modelData)
                 chevron: false
                 last: index === page.shown.length - 1 && (page.more || !page.packs.some((p) => p.is_additional))

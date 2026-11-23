@@ -61,6 +61,7 @@ Rectangle {
         property bool mergeCorners: true
         property int autoNight: 0
         property bool tapNext: true
+        property bool callsTab: false
         property bool storyHint: false
         property bool largeEmoji: true
         property string emojiSet: ""
@@ -104,6 +105,7 @@ Rectangle {
         Prefs.mergeCorners = prefs.mergeCorners
         Prefs.autoNight = prefs.autoNight
         Prefs.tapNext = prefs.tapNext
+        Prefs.callsTab = prefs.callsTab
         Prefs.storyHint = prefs.storyHint
         Prefs.largeEmoji = prefs.largeEmoji
         Prefs.emojiSet = prefs.emojiSet
@@ -141,6 +143,7 @@ Rectangle {
     Connections {
         target: Prefs
         function onTapNextChanged() { prefs.tapNext = Prefs.tapNext }
+        function onCallsTabChanged() { prefs.callsTab = Prefs.callsTab }
         function onStoryHintChanged() { prefs.storyHint = Prefs.storyHint }
         function onLargeEmojiChanged() { prefs.largeEmoji = Prefs.largeEmoji }
         function onEmojiSetChanged() { prefs.emojiSet = Prefs.emojiSet }

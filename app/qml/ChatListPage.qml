@@ -311,6 +311,7 @@ Page {
             required property var chatId
             required property string title
             required property bool saved
+            required property bool direct
             required property string who
             required property bool draft
             required property string glyph
@@ -359,14 +360,32 @@ Page {
                 width: row.storied ? 50 : 60; height: width
                 source: row.photo; letters: row.letters; tint: row.tint; saved: row.saved
             }
-            Text {
+            Row {
                 id: name
                 x: 80; y: 9
                 width: parent.width - x - stamp.width - 20
-                text: row.title
-                elide: Text.ElideRight
-                color: Theme.text
-                font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                spacing: 6
+                Text {
+                    width: Math.min(implicitWidth, parent.width - (directTag.visible ? directTag.width + 6 : 0))
+                    text: row.title
+                    elide: Text.ElideRight
+                    color: Theme.text
+                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                }
+                Rectangle {
+                    id: directTag
+                    visible: row.direct
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: directLbl.implicitWidth + 10; height: 17; radius: 5
+                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
+                    Text {
+                        id: directLbl
+                        anchors.centerIn: parent
+                        text: "DIRECT"
+                        color: Theme.accent
+                        font.family: Theme.font; font.pixelSize: 10; font.weight: Font.Bold
+                    }
+                }
             }
             Text {
                 id: stamp
@@ -439,7 +458,11 @@ Page {
                 onClicked: {
                     row.lit = true
                     unlight.restart()
-                    page.nav.push(chatPage, { chatId: row.chatId })
+                    const c = store.chats[row.chatId]
+                    if (store.isDirectAdmin(c))
+                        page.nav.push(directPage, { chatId: row.chatId })
+                    else
+                        page.nav.push(chatPage, { chatId: row.chatId })
                 }
             }
             MouseArea {         // (over the row's own: the ringed picture opens the stories)
@@ -452,6 +475,7 @@ Page {
     }
 
     Component { id: chatPage; ChatPage {} }
+    Component { id: directPage; DirectTopicsPage {} }
 
     SearchView {
         id: search

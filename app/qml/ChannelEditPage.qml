@@ -23,6 +23,9 @@ SubPage {
     property string photo: ""
     property var reactions: null            // chat.available_reactions
     property int links: 0                   // our invite links that work (iOS: «Invite Links 1»)
+    property var dmChat: null               // channel's direct_messages_chat (to read paid_message_star_count)
+    readonly property var dmGroup: dmChat ? (store.seen, store.groupOf(dmChat)) : null
+    readonly property int dmPaid: dmGroup ? (dmGroup.paid_message_star_count || 0) : 0
     // a basic group's full info has no counts: its members say them
     readonly property int admins: !full ? 0 : superg ? full.administrator_count
         : (full.members || []).filter((m) => m.status["@type"] === "chatMemberStatusCreator" || m.status["@type"] === "chatMemberStatusAdministrator").length
@@ -46,6 +49,10 @@ SubPage {
     actionOn: name.text.trim() !== ""
     onActed: save()
     guard: () => {
+        if (sheet && sheet.open) {
+            sheet.close()
+            return true
+        }
         if (!dirty)
             return false
         alert.title = ""
@@ -75,6 +82,13 @@ SubPage {
                 name.text = page.chat.title
                 about.text = r.description || ""
             }
+            if (r.direct_messages_chat_id)
+                store.send({ "@type": "getChat", chat_id: r.direct_messages_chat_id }, (dc) => {
+                    if (page && dc["@type"] === "chat")
+                        page.dmChat = dc
+                })
+            else
+                page.dmChat = null
         })
         store.send({ "@type": "getChat", chat_id: chatId }, (r) => { if (r["@type"] === "chat") page.reactions = r.available_reactions })
         if (can("can_invite_users") && store.me)
@@ -113,7 +127,45 @@ SubPage {
         const r = reactions
         if (!r || r["@type"] === "chatAvailableReactionsAll")
             return Tr.t("Hammasi")
-        return r.reactions.length ? Tr.n("%1 ta", r.reactions.length) : Tr.t("O'chiq")
+        const list = r.reactions || []
+        const paid = list.some((x) => x["@type"] === "reactionTypePaid")
+        const n = list.filter((x) => x["@type"] !== "reactionTypePaid").length
+        if (paid) {
+            if (n === 0)
+                return "⭐"
+            return (n >= 68 ? Tr.t("Hammasi") : Tr.n("%1 ta", n)) + " · ⭐"
+        }
+        return n ? Tr.n("%1 ta", n) : Tr.t("O'chiq")
+    }
+    property var sheet: null
+    function openPicker() {
+        if (!sheet)
+            sheet = sheetMaker.createObject(page)
+        sheet.show()
+    }
+    function pickPhoto() {
+        if (!can("can_change_info"))
+            return
+        if (!photo)
+            return openPicker()
+        alert.title = Tr.t(channel ? "Kanal rasmi" : "Guruh rasmi")
+        alert.text = ""
+        alert.answers = [{ t: Tr.t("Rasm tanlash"), run: () => page.openPicker() },
+                         { t: Tr.t("Rasmni o'chirish"), red: true, run: () => page.setPhoto("") },
+                         { t: Tr.t("Bekor qilish") }]
+        alert.open = true
+    }
+    function setPhoto(path) {
+        page.photo = path
+        nav.say(Tr.t(path ? "Rasm yuklanmoqda…" : "Rasm o'chirilmoqda…"))
+        store.send({ "@type": "setChatPhoto", chat_id: chatId,
+                     photo: path ? { "@type": "inputChatPhotoStatic", photo: { "@type": "inputFileLocal", path: path } } : null }, (r) => {
+            if (!page)
+                return
+            if (r["@type"] === "error")
+                return page.nav.say(Tr.f("Bo'lmadi: %1", r.message))
+            page.nav.say(Tr.t(!path ? "Rasm o'chirildi" : page.channel ? "Kanal rasmi yangilandi" : "Guruh rasmi yangilandi"))
+        })
     }
     function askDelete() {
         alert.title = Tr.t(channel ? "Kanalni o'chirish" : "Guruhni o'chirish")
@@ -141,15 +193,17 @@ SubPage {
             source: page.photo
             letters: store.letters(name.text || (page.chat ? page.chat.title : ""))
             tint: store.tints[Math.abs(page.chatId) % store.tints.length]
+            MouseArea { anchors.fill: parent; enabled: page.can("can_change_info"); onClicked: page.pickPhoto() }
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
+            visible: page.can("can_change_info")
             text: Tr.t("Rasmni o'zgartirish")
-            color: Theme.grey
+            color: Theme.accent
             font.family: Theme.font; font.pixelSize: 17
             MouseArea {
                 anchors.fill: parent; anchors.margins: -8
-                onClicked: page.nav.say(Tr.t("Rasm tanlash hali yo'q — Telegram'ning boshqa ilovasida o'zgartiring"))
+                onClicked: page.pickPhoto()
             }
         }
         Item { width: 1; height: 4 }
@@ -242,12 +296,21 @@ SubPage {
             onClicked: page.open("DiscussionPage.qml", { linkedId: page.full ? page.full.linked_chat_id : 0 })
         }
         SettingsRow {
+            icon: "direct"; tint: "#007aff"
+            visible: page.channel && page.owner
+            text: Tr.t("Kanalga xabarlar")
+            value: page.group && page.group.has_direct_messages_group
+                   ? (page.dmPaid > 0 ? "⭐ " + store.count(page.dmPaid) : Tr.t("Yoqilgan"))
+                   : Tr.t("O'chiq")
+            onClicked: page.open("ChannelDirectPage.qml", { full: page.full })
+        }
+        SettingsRow {
             art: "reactions"
             visible: page.can("can_change_info")
             text: Tr.t("Reaksiyalar")
             value: page.reactionsText()
             onClicked: {
-                const p = page.open("ReactionsPage.qml", { allowed: page.reactions })
+                const p = page.open("ReactionsPage.qml", { allowed: page.reactions, canPaid: !!(page.full && page.full.can_enable_paid_reaction) })
                 if (p)
                     p.changed.connect((r) => page.reactions = r)
             }
@@ -345,4 +408,16 @@ SubPage {
     }
     Item { width: 1; height: 30 + safe.bottom }
     Alert { id: alert; parent: page; anchors.fill: parent }
+    Component {
+        id: sheetMaker
+        AttachSheet {
+            rights: ({ photos: true, videos: false, files: false, music: false, other: false, voice: false, round: false })
+            onRefused: (text) => page.nav.say(Tr.t("Faqat rasm tanlang"))
+            onSend: (picked) => {
+                const p = picked.find((f) => f.kind === "photo")
+                if (p)
+                    page.setPhoto(p.path)
+            }
+        }
+    }
 }

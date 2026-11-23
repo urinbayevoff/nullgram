@@ -25,6 +25,12 @@ Page {
             if (r.sessions)
                 page.devices = r.sessions.length
         })
+        if (store.stars < 0 && store.me)
+            store.send({ "@type": "getStarTransactions", owner_id: { "@type": "messageSenderUser", user_id: store.me.id },
+                         subscription_id: "", direction: null, offset: "", limit: 1 }, (r) => {
+                if (r.star_amount)
+                    store.stars = r.star_amount.star_count
+            })
     }
     readonly property var me: store.me
     readonly property string username: me && me.usernames && me.usernames.active_usernames.length ? me.usernames.active_usernames[0] : ""
@@ -175,7 +181,7 @@ Page {
                 SettingsRow { art: "premium"; text: "Telegram Premium"; onClicked: page.openQml("PremiumPage.qml") }
                 SettingsRow {
                     art: "stars"; text: Tr.t("Mening yulduzlarim")
-                    value: store.stars > 0 ? Math.floor(store.stars).toLocaleString(Qt.locale(), "f", 0) : ""
+                    value: store.stars >= 0 ? store.count(Math.floor(store.stars)) : ""
                     onClicked: page.openQml("StarsPage.qml")
                 }
                 SettingsRow { art: "business"; text: "Telegram Business"; onClicked: page.business() }

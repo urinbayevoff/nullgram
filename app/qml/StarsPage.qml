@@ -98,7 +98,9 @@ SubPage {
     function when(t) { return new Date(t.date * 1000).toLocaleString(Qt.locale(Tr.en ? "en_US" : "uz_UZ"), "d MMM, HH:mm") }
     function amount(t) {
         const n = t.star_amount.star_count + (t.star_amount.nanostar_count || 0) / 1e9
-        return (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toLocaleString(Qt.locale(), "f", n % 1 ? 2 : 0)
+        const abs = Math.abs(n)
+        const s = n % 1 ? store.count(Math.floor(abs)) + (Tr.en ? "." : ",") + abs.toFixed(2).split(".")[1] : store.count(Math.floor(abs))
+        return (n > 0 ? "+" : n < 0 ? "−" : "") + s
     }
     function tell(t) {
         alert.show(name(t), [amount(t) + " ⭐", what(t), when(t), Tr.f("Tranzaksiya ID: %1", t.id)].filter((s) => s).join("\n"),
@@ -128,9 +130,9 @@ SubPage {
             Row {
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 18; spacing: 8
-                Text { anchors.verticalCenter: parent.verticalCenter; text: "⭐"; font.pixelSize: 34 }
+                Icon { anchors.verticalCenter: parent.verticalCenter; width: 34; height: 34; name: "star"; color: "#ffb10a" }
                 Text {
-                    text: page.balance < 0 ? "…" : Math.floor(page.balance).toLocaleString(Qt.locale(), "f", 0)
+                    text: page.balance < 0 ? "…" : store.count(Math.floor(page.balance))
                     color: Theme.text
                     font.family: Theme.font; font.pixelSize: 44; font.weight: Font.Bold
                 }
@@ -223,13 +225,18 @@ SubPage {
                         font.family: Theme.font; font.pixelSize: 13
                     }
                 }
-                Text {
+                Row {
                     id: amt
                     anchors.right: parent.right; anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: page.amount(tx.modelData) + " ⭐"
-                    color: tx.minus ? "#ff3b30" : "#34c759"
-                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                    spacing: 4
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: page.amount(tx.modelData)
+                        color: tx.minus ? "#ff3b30" : "#34c759"
+                        font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                    }
+                    Icon { anchors.verticalCenter: parent.verticalCenter; width: 15; height: 15; name: "star"; color: "#ffb10a" }
                 }
                 Rectangle { visible: tx.index < page.rows.length - 1; x: 68; anchors.bottom: parent.bottom; width: parent.width - x; height: 0.5; color: Theme.separator }
                 MouseArea { id: txHit; anchors.fill: parent; onClicked: page.tell(tx.modelData) }
