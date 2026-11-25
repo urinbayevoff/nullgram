@@ -59,7 +59,7 @@ EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram
 EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
 EMOJI_GET = os.path.join(HERE, "emoji_get.py")
 EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
-VERSION = "0.9.4"
+VERSION = "0.9.4.1"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -884,8 +884,14 @@ class Net(QObject):
 			for d in sorted(os.listdir(self.ROOT)):
 				try:
 					with open(os.path.join(self.ROOT, d, "operstate")) as f:
-						up = f.read().strip() == "up"
-				except OSError:
+						state = f.read().strip()
+					# a modem's point-to-point link (rmnet0) says "unknown" while it carries the data: its IFF_UP
+					# flag tells (read as "none", TDLib was told networkTypeNone and never connected on mobile data)
+					up = state == "up"
+					if state == "unknown":
+						with open(os.path.join(self.ROOT, d, "flags")) as f:
+							up = bool(int(f.read().strip(), 16) & 0x1)
+				except (OSError, ValueError):
 					continue
 				if not up:
 					continue
