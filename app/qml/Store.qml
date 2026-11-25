@@ -7,6 +7,10 @@ import "Looks.js" as Looks
 QtObject {
     id: store
 
+    property real tapAt: 0              // NULLGRAM_FPS: when a chat was tapped open (ChatPage's «open» lines count from it)
+    // NULLGRAM_FPS, read once: td is Python, and asking it for every update TDLib sent cost ~0.1 ms each
+    // (~1300 of them in the first seconds after start)
+    readonly property bool fps: td.fps
     property string auth: ""            // TDLib's authorizationState, without the prefix: "WaitPhoneNumber", "Ready", ...
     // an emoji alone's size against a sticker's: Telegram's app config emojies_animated_zoom (Telegram-iOS's
     // animatedEmojiScale, ChatHistoryListNode); 0.625 until it comes (its value when last looked)
@@ -29,6 +33,7 @@ QtObject {
     property var folderUnread: ({})     // folder id -> its chats with unread messages, not muted
     property int folder: 0              // the list on the screen: 0 the main one, else that folder
     property var openChat: 0            // the chat on the screen (its new messages do not notify)
+    property var spots: ({})            // chat id -> { id, gap }: where it was left scrolled up (ChatPage.leave), reopened there
     property var backgrounds: ({})      // "day" / "night" -> TDLib's default background for it (null: Telegram-iOS's own)
     property var emojiThemes: []        // the chat themes (updateEmojiChatThemes): [{ name (an emoji), light_settings, dark_settings }]
     property var accentColors: []       // the names' colours past the seven (updateAccentColors): [accentColor]
@@ -67,6 +72,7 @@ QtObject {
     signal contentOpened(var chatId, var id)    // a voice note or a round video played (here or by them)
     signal readOutbox(var chatId, var lastRead)
     signal chatChanged(var chatId)      // fields of a chat changed (an open chat page reads them again)
+    signal actionChanged(var chatId)    // someone started or stopped typing (or the like) in that chat
     signal fileUpdated(var f)           // a file is coming or going: how far, or done
     signal messagePinned(var chatId, var id, bool pinned)
     signal messageInteraction(var chatId, var id, var info)     // views, reactions
@@ -86,7 +92,7 @@ QtObject {
     property Connections _td: Connections {
         target: td
         function onReceived(text) {
-            if (!td.fps) {
+            if (!store.fps) {
                 store.receive(JSON.parse(text))
                 return
             }
@@ -127,18 +133,18 @@ QtObject {
             store.users[u.user.id] = u.user
             if (store.me && store.me.id === u.user.id)
                 store.me = u.user       // (Your Color: the colours just set)
-            store.seen++
+            store.seenSoon()
         },
         updateAnimatedEmojiMessageClicked: (u) => store.emojiClicked(u.chat_id, u.message_id, u.sticker),
         updateUserStatus: (u) => {
             const user = store.users[u.user_id]
             if (user) {
                 user.status = u.status
-                store.seen++
+                store.seenSoon()
             }
         },
-        updateBasicGroup: (u) => { store.groups["b" + u.basic_group.id] = u.basic_group; store.seen++ },
-        updateSupergroup: (u) => { store.groups["s" + u.supergroup.id] = u.supergroup; store.seen++ },
+        updateBasicGroup: (u) => { store.groups["b" + u.basic_group.id] = u.basic_group; store.seenSoon() },
+        updateSupergroup: (u) => { store.groups["s" + u.supergroup.id] = u.supergroup; store.seenSoon() },
         updateDirectMessagesChatTopic: (u) => {
             const t = u.topic
             if (!t)
@@ -159,8 +165,10 @@ QtObject {
             else
                 acts[key] = { sender: u.sender_id, action: u.action["@type"], emoji: u.action.emoji || "" }
             store.actions[u.chat_id] = acts
+            // (not `seen`: every binding on it, every row of every list, was worked out again for each
+            // «yozmoqda»; the list's row listens for its own chat, the header and profile bind to `acting`)
             store.acting++
-            store.seen++
+            store.actionChanged(u.chat_id)
         },
         updateNewChat: (u) => {
             const c = u.chat
@@ -216,7 +224,7 @@ QtObject {
                 store.stories[a.chat_id] = a
             else
                 delete store.stories[a.chat_id]
-            store.sortStories()
+            Qt.callLater(store.sortStories)    // (once for a burst: ~6 at the start, each row of the strip made anew)
         },
         updateStory: (u) => {
             store._storyCache[u.story.poster_chat_id + ":" + u.story.id] = u.story
@@ -486,18 +494,59 @@ QtObject {
         for (const k in folderLists)
             placeIn(Number(k), c)
     }
+    // A little later (_placer): at the start ~300 chats came one update each, all in one turn of the loop,
+    // and each was put in on its own (its place looked for row by row, the list told of each row): one
+    // ~400 ms frame. Now the chats a turn moved are put in once each after it, an empty list all at once.
+    property var _dirty: ({})           // list id -> chat id -> true
+    property Timer _placer: Timer { interval: 15; onTriggered: store.placeNow() }
     function placeIn(id, c) {
-        const m = modelOf(id)
+        if (!id) {
+            const p = positionIn(0, c)
+            if (p) {
+                c.order = p.order       // (the search sorts by it)
+                c.pinned = p.is_pinned
+            }
+        }
+        const d = _dirty[id] || (_dirty[id] = {})
+        d[c.id] = true
+        if (!_placer.running)
+            _placer.start()
+    }
+    function placeNow() {
+        const dirty = _dirty
+        _dirty = {}
+        for (const k in dirty) {
+            const id = Number(k)
+            if (id && !folderLists[id])
+                continue
+            const m = modelOf(id)
+            const ids = Object.keys(dirty[k])
+            if (m.count === 0 && ids.length > 1) {
+                const rows = []
+                for (const cid of ids) {
+                    const c = chats[cid]
+                    const p = c ? positionIn(id, c) : null
+                    if (p)
+                        rows.push({ c: c, order: p.order })
+                }
+                rows.sort((a, b) => before(a.order, b.order) ? -1 : 1)
+                m.append(rows.map((r) => row(r.c, id)))
+                if (fps && !id)
+                    td.mark("listed", 1)    // (tools/startup.py: when the chats came)
+                continue
+            }
+            for (const cid of ids)
+                if (chats[cid])
+                    placeOne(id, m, chats[cid])
+        }
+    }
+    function placeOne(id, m, c) {
         const p = positionIn(id, c)
         const at = rowIndex(m, c.id)
         if (!p) {
             if (at >= 0)
                 m.remove(at)
             return
-        }
-        if (!id) {
-            c.order = p.order       // (the search sorts by it)
-            c.pinned = p.is_pinned
         }
         const order = (q) => { const r = positionIn(id, q); return r ? r.order : "0" }
         let to = 0
@@ -515,18 +564,26 @@ QtObject {
             to--
         if (to !== at)
             m.move(at, to, 1)
-        m.set(to, row(c, id))
+        setRow(m, to, row(c, id))
     }
 
     function refresh(c) {
         let at = rowIndex(chatList, c.id)
         if (at >= 0)
-            chatList.set(at, row(c, 0))
+            setRow(chatList, at, row(c, 0))
         for (const k in folderLists) {
             at = rowIndex(folderLists[k], c.id)
             if (at >= 0)
-                folderLists[k].set(at, row(c, Number(k)))
+                setRow(folderLists[k], at, row(c, Number(k)))
         }
+    }
+    // only what changed: a whole set() told the list every field of the row changed, and the row worked
+    // out all it shows again (its texts laid out anew) for each read mark, each status, each message
+    function setRow(m, at, r) {
+        const was = m.get(at)
+        for (const k in r)
+            if (was[k] !== r[k])
+                m.setProperty(at, k, r[k])
     }
 
     // the language changed (Tr): every row's words anew (a row keeps the words it was made with)
@@ -1687,7 +1744,9 @@ QtObject {
     // `failed`: TDLib said no (offline, too many asks) -- that is not the beginning of the chat.
     // `thread`: only a post's comments (its thread in the discussion group)
     // `directTopic`: a subscriber's thread in an administered channel direct messages chat
-    function history(chatId, from, limit, done, got, thread, directTopic) {
+    // `local`: only what TDLib has without asking the server (only_local; Telegram X opens a chat so), up to
+    // the first message it lacks -- consecutive, as TDLib keeps them
+    function history(chatId, from, limit, done, got, thread, directTopic, local) {
         got = got || []
         const req = directTopic
             ? { "@type": "getDirectMessagesChatTopicHistory", chat_id: chatId, topic_id: directTopic,
@@ -1696,8 +1755,12 @@ QtObject {
             ? { "@type": "getMessageThreadHistory", chat_id: chatId, message_id: thread, from_message_id: from,
                 offset: 0, limit: limit - got.length }
             : { "@type": "getChatHistory", chat_id: chatId, from_message_id: from, offset: 0,
-                limit: limit - got.length, only_local: false }
+                limit: limit - got.length, only_local: !!local }
+        const t0 = td.fps ? Date.now() : 0
         send(req, (r) => {
+            if (td.fps)
+                console.warn("nullgram: history call from", from, "limit", limit - got.length, "got",
+                             (r.messages || []).length, "in", Date.now() - t0, "ms")
             if (r["@type"] === "error") {
                 console.warn("nullgram: getChatHistory", chatId, from, r.code, r.message)
                 done(got, true)
@@ -1708,7 +1771,7 @@ QtObject {
             if (msgs.length === 0 || got.length >= limit)
                 done(got, false)
             else
-                store.history(chatId, msgs[msgs.length - 1].id, limit, done, got, thread, directTopic)
+                store.history(chatId, msgs[msgs.length - 1].id, limit, done, got, thread, directTopic, local)
         })
     }
 
@@ -2077,6 +2140,13 @@ QtObject {
     }
 
     // the cache kept to Prefs.keep / maxCache: a minute after signing in (the chats known by then), then daily
+    // users' and groups' updates come in bursts (statuses, member counts): `seen` once for a burst, 50 ms
+    // after its first, not once each -- each was every binding on it worked out again
+    function seenSoon() {
+        if (!_seenSoon.running)
+            _seenSoon.start()
+    }
+    property Timer _seenSoon: Timer { interval: 50; onTriggered: store.seen++ }
     property Timer cleaner: Timer { interval: 60000; repeat: true; onTriggered: { interval = 86400000; store.keepClean() } }
     property Connections _netWatch: Connections {
         target: typeof net !== "undefined" ? net : null

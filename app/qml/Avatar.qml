@@ -1,8 +1,10 @@
-// A round picture (cut round once, off the UI thread: image://round/ in nullgram.py),
-// over the initials on the chat's colour until it comes.
+// A round picture (cut round once, off the UI thread: image://round/ in nullgram_app.py),
+// over the chat's colour until it comes (the initials on it when there is none).
 import QtQuick
+import QtQuick.Window
+import "Icons.js" as Icons
 
-Item {
+Rectangle {
     id: av
     property string source: ""          // a local file's path
     property string letters: ""
@@ -10,46 +12,32 @@ Item {
     property bool saved: false          // Saved Messages: the bookmark on blue, no picture
     property bool ghost: false          // a deleted account: Telegram-iOS's ghost on grey, no picture
     width: 56; height: 56
+    radius: width / 2
+    color: saved ? "#2a9ef1" : ghost ? "#b8b8bd" : pic.status !== Image.Ready ? tint : "transparent"
 
-    Rectangle {
-        anchors.fill: parent
-        radius: width / 2
-        color: av.saved ? "#2a9ef1" : av.ghost ? "#b8b8bd" : av.tint
-        visible: av.saved || av.ghost || pic.status !== Image.Ready
-        Icon {
-            visible: av.saved
-            anchors.centerIn: parent
-            width: av.width * 0.5; height: width
-            name: "bookmark"
-            color: "white"
-        }
-        Icon {
-            visible: av.ghost
-            anchors.centerIn: parent
-            width: av.width * 0.55; height: width
-            name: "ghost"
-            color: "white"
-        }
-        Text {
-            visible: !av.saved && !av.ghost
-            anchors.centerIn: parent
-            text: av.letters
-            color: "white"
-            font.family: Theme.font
-            font.pixelSize: Math.round(av.width * 0.38)
-            font.weight: Font.DemiBold
-        }
+    // the initials only for one with no picture (or one that failed): a Text made for every face in a flick
+    // through a group, its font set up, cost more than the rest of the avatar; a picture coming shows the
+    // tint until it is here (from nullgram_app.py's kept pictures: at once, mostly)
+    Loader {
+        anchors.centerIn: parent
+        readonly property string letters: av.letters
+        readonly property real side: av.width
+        source: !av.saved && !av.ghost && (av.source === "" || pic.status === Image.Error) ? "AvatarLetters.qml" : ""
     }
     Image {
         id: pic
-        anchors.fill: parent
-        visible: !av.saved && !av.ghost
-        source: av.source && !av.saved && !av.ghost ? "image://round/" + av.source : ""
+        anchors.centerIn: parent
+        width: av.saved ? av.width * 0.5 : av.ghost ? av.width * 0.55 : av.width
+        height: width
+        source: av.saved ? Icons.uri("bookmark", Qt.rgba(1, 1, 1, 1))
+              : av.ghost ? Icons.uri("ghost", Qt.rgba(1, 1, 1, 1))
+              : av.source ? "image://round/" + av.source : ""
         // in points: Qt asks the provider for these times the pixel ratio (4 on the S10). Times 4 here
         // as well, a 34-point face in a group came at 544 px, sixteen times the pixels it shows
-        sourceSize.width: av.width
-        sourceSize.height: av.height
-        asynchronous: true
+        sourceSize: av.saved || av.ghost
+                  ? Qt.size(Math.ceil(width * Screen.devicePixelRatio), Math.ceil(height * Screen.devicePixelRatio))
+                  : Qt.size(av.width, av.height)
+        asynchronous: !av.saved && !av.ghost
         smooth: true
     }
 }

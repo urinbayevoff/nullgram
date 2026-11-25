@@ -1,6 +1,6 @@
 // What to send from the phone, the way Telegram-iOS's attach sheet comes up from the foot:
 // the pictures and videos (newest first, three a row), or every file; a tap picks one (its
-// number in the corner), "Yuborish" sends them (from Fayllar as files, as Telegram does). The files are td.recent's (nullgram.py).
+// number in the corner), "Yuborish" sends them (from Fayllar as files, as Telegram does). The files are td.recent's (nullgram_app.py).
 // ⋯ over picked pictures, as MediaPickerScreen's: as files, one by one, hidden with a spoiler (blurred
 // under dust here too). A group's `rights` (ChatPage's): what it bars is refused, a kind all barred says so.
 import QtQuick

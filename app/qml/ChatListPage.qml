@@ -38,6 +38,36 @@ Page {
             for (const f of store.folders)
                 store.send({ "@type": "loadChats", chat_list: { "@type": "chatListFolder", chat_folder_id: f.id }, limit: 20 })
         }
+        function onActionChanged(id) {
+            const pages = pager.contentItem ? pager.contentItem.children : null
+            if (!pages)
+                return
+            for (let i = 0; i < pages.length; i++) {
+                const lv = pages[i].rows
+                const ci = lv && lv.contentItem ? lv.contentItem.children : null
+                if (!ci)
+                    continue
+                for (let j = 0; j < ci.length; j++) {
+                    const r = ci[j]
+                    if (r && r.chatId === id)
+                        r.acted++
+                }
+            }
+        }
+    }
+    property var litChatId: null
+    property var pressedChatId: null
+    Timer { id: unlight; interval: 600; onTriggered: page.litChatId = null }
+    function openChat(chatId) {
+        page.litChatId = chatId
+        unlight.restart()
+        const c = store.chats[chatId]
+        if (td.fps)
+            store.tapAt = Date.now()
+        if (store.isDirectAdmin(c))
+            page.nav.push(directPage, { chatId: chatId })
+        else
+            page.nav.pushChat(chatPage, { chatId: chatId })
     }
     function dismiss() {
         if (searching) {
@@ -75,16 +105,16 @@ Page {
         const me = store.me ? store.me.id : 0
         if (chatId === me) {
             if (store.hasStories(me))
-                root.storyView.show([me], 0)
+                root.stories().show([me], 0)
             else
                 root.say(Tr.t("Hikoya joylash hozircha yo'q"))
             return
         }
         const row = store.storyRow
         if (row.indexOf(chatId) < 0)
-            root.storyView.show([chatId], 0)
+            root.stories().show([chatId], 0)
         else
-            root.storyView.show(row, row.indexOf(chatId))
+            root.stories().show(row, row.indexOf(chatId))
     }
     readonly property real headHeight: 104 + storyH + (store.folders.length || miniList.on ? 52 - (store.folders.length ? 0 : 44) + miniList.height : 0)
     readonly property ListView list: pager.currentItem ? pager.currentItem.rows : null
@@ -115,6 +145,7 @@ Page {
                 anchors.fill: parent
                 Component.onCompleted: model = store.modelOf(folderPage.modelData.id)
                 cacheBuffer: 600
+                reuseItems: true
                 boundsBehavior: Flickable.DragOverBounds
                 onDragEnded: page.pulled(rows)
                 onContentYChanged: if (page.storiesOpen) page.scrolled(rows)
@@ -123,6 +154,33 @@ Page {
                 header: Item { width: 1; height: page.headHeight }     // the title, search and chips are over it
                 footer: Item { width: 1; height: 90 }      // room over the tab bar
                 delegate: rowDelegate
+                TapHandler {
+                    onPressedChanged: {
+                        if (!pressed) {
+                            page.pressedChatId = null
+                            return
+                        }
+                        const p = point.pressPosition
+                        const r = rows.itemAt(p.x, p.y)
+                        if (!r || r.chatId === undefined) {
+                            page.pressedChatId = null
+                            return
+                        }
+                        const ly = p.y - r.y
+                        page.pressedChatId = (r.storied && p.x >= 6 && p.x < 74 && ly >= 4 && ly < 72) ? null : r.chatId
+                    }
+                    onTapped: (eventPoint) => {
+                        const p = eventPoint.position
+                        const r = rows.itemAt(p.x, p.y)
+                        if (!r || r.chatId === undefined)
+                            return
+                        const ly = p.y - r.y
+                        if (r.storied && p.x >= 6 && p.x < 74 && ly >= 4 && ly < 72)
+                            page.openStories(r.chatId)
+                        else
+                            page.openChat(r.chatId)
+                    }
+                }
             }
         }
     }
@@ -303,6 +361,168 @@ Page {
         }
     }
 
+    // Optional row parts at page level, loaded via a single Loader per row only when needed
+    Component {
+        id: storySeenComp
+        Rectangle {
+            readonly property var r: parent ? parent.r : null
+            x: 10; y: 8
+            width: 60; height: 60; radius: 30
+            color: "transparent"
+            border.color: Theme.dark ? "#48484a" : "#c7c7cc"; border.width: 1.3
+        }
+    }
+    Component {
+        id: storyFreshComp
+        Rectangle {
+            id: ring
+            readonly property var r: parent ? parent.r : null
+            x: 10; y: 8
+            width: 60; height: 60; radius: 30
+            rotation: 45
+            gradient: Gradient {
+                GradientStop { position: 0; color: "#34c76f" }
+                GradientStop { position: 1; color: "#3da1fd" }
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 55.4; height: width; radius: width / 2
+                color: ring.r ? ring.r.color : Theme.bg
+            }
+        }
+    }
+    Component {
+        id: directTagComp
+        Rectangle {
+            id: directTag
+            readonly property var r: parent ? parent.r : null
+            readonly property var t: parent ? parent.t : null
+            readonly property real directW: width
+            x: t ? 80 + t.width + 6 : 80
+            y: t ? 9 + Math.floor((t.height - height) / 2) : 9
+            width: directLbl.implicitWidth + 10; height: 17; radius: 5
+            color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
+            Text {
+                id: directLbl
+                anchors.centerIn: parent
+                text: "DIRECT"
+                color: Theme.accent
+                font.family: Theme.font; font.pixelSize: 10; font.weight: Font.Bold
+            }
+        }
+    }
+    Component {
+        id: whoComp
+        Text {
+            readonly property var r: parent ? parent.r : null
+            x: 80; y: 31
+            width: r ? r.textWidth : 0
+            text: r ? r.who : ""
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            color: r && r.draft ? Theme.danger : Theme.text
+            font.family: Theme.font; font.pixelSize: 15
+        }
+    }
+    Component {
+        id: glyphComp
+        Icon {
+            readonly property var r: parent ? parent.r : null
+            x: 80; y: r && r.author ? 52 : 33
+            width: 16; height: 16
+            name: r ? r.glyph : ""
+            color: Theme.grey
+        }
+    }
+    Component {
+        id: pillComp
+        Rectangle {
+            id: pill
+            readonly property var r: parent ? parent.r : null
+            readonly property real pillW: width
+            x: r ? r.width - width - 14 : 0
+            y: 40
+            height: 22; radius: 11
+            width: r && r.unread > 0 ? Math.max(22, count.implicitWidth + 14) : 22
+            color: r && r.unread > 0 ? (r.muted ? Theme.mutedBadge : Theme.badge) : "transparent"
+            Text {
+                id: count
+                anchors.centerIn: parent
+                text: pill.r && pill.r.unread > 0 ? (pill.r.unread > 9999 ? Math.floor(pill.r.unread / 1000) + "K" : pill.r.unread) : "📌"
+                color: pill.r && pill.r.unread > 0 ? (pill.r.muted ? "white" : Theme.badgeText) : Theme.grey
+                font.family: Theme.font; font.pixelSize: pill.r && pill.r.unread > 0 ? 13 : 11; font.weight: Font.DemiBold
+            }
+        }
+    }
+    Component {
+        id: whoPillComp
+        Text {
+            id: wp
+            readonly property var r: parent ? parent.r : null
+            readonly property real pillW: wpPill.width
+            x: 80; y: 31
+            width: r ? r.textWidth : 0
+            text: r ? r.who : ""
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            color: r && r.draft ? Theme.danger : Theme.text
+            font.family: Theme.font; font.pixelSize: 15
+            Rectangle {
+                id: wpPill
+                x: wp.r ? wp.r.width - 80 - width - 14 : 0
+                y: 9
+                height: 22; radius: 11
+                width: wp.r && wp.r.unread > 0 ? Math.max(22, wpCount.implicitWidth + 14) : 22
+                color: wp.r && wp.r.unread > 0 ? (wp.r.muted ? Theme.mutedBadge : Theme.badge) : "transparent"
+                Text {
+                    id: wpCount
+                    anchors.centerIn: parent
+                    text: wp.r && wp.r.unread > 0 ? (wp.r.unread > 9999 ? Math.floor(wp.r.unread / 1000) + "K" : wp.r.unread) : "📌"
+                    color: wp.r && wp.r.unread > 0 ? (wp.r.muted ? "white" : Theme.badgeText) : Theme.grey
+                    font.family: Theme.font; font.pixelSize: wp.r && wp.r.unread > 0 ? 13 : 11; font.weight: Font.DemiBold
+                }
+            }
+        }
+    }
+    Component {
+        id: multiExtrasComp
+        Item {
+            id: multi
+            readonly property var r: parent ? parent.r : null
+            readonly property var t: parent ? parent.t : null
+            readonly property real pillW: mPill.item ? mPill.item.width : 22
+            readonly property real directW: mDirect.item ? mDirect.item.width : 0
+            Loader {
+                readonly property var r: multi.r
+                active: !!multi.r && multi.r.storied
+                sourceComponent: active ? (multi.r.fresh ? storyFreshComp : storySeenComp) : null
+            }
+            Loader {
+                id: mDirect
+                readonly property var r: multi.r
+                readonly property var t: multi.t
+                active: !!multi.r && multi.r.direct
+                sourceComponent: active ? directTagComp : null
+            }
+            Loader {
+                readonly property var r: multi.r
+                active: !!multi.r && multi.r.author
+                sourceComponent: active ? whoComp : null
+            }
+            Loader {
+                readonly property var r: multi.r
+                active: !!multi.r && multi.r.hasGlyph
+                sourceComponent: active ? glyphComp : null
+            }
+            Loader {
+                id: mPill
+                readonly property var r: multi.r
+                active: !!multi.r && multi.r.hasPill
+                sourceComponent: active ? pillComp : null
+            }
+        }
+    }
+
     Component {
         id: rowDelegate
         Rectangle {
@@ -326,70 +546,31 @@ Page {
             required property bool outgoing
             required property bool read
 
-            width: ListView.view.width; height: 76
-            color: tap.pressed || lit ? Theme.highlight : Theme.bg
-            property bool lit: false
+            width: page.width; height: 76
+            color: page.litChatId === row.chatId || page.pressedChatId === row.chatId ? Theme.highlight : Theme.bg
 
             // a story ring round it (Q); a tap on the picture then opens the stories, not the chat
-            readonly property bool storied: (store.storiesSeen, !row.saved && store.hasStories(row.chatId))
-            readonly property bool fresh: (store.storiesSeen, row.storied && store.unseen(row.chatId))
-            Rectangle {
-                visible: row.storied && !row.fresh
-                x: 10; y: 8
-                width: 60; height: 60; radius: 30
-                color: "transparent"
-                border.color: Theme.dark ? "#48484a" : "#c7c7cc"; border.width: 1.3
-            }
-            Rectangle {
-                visible: row.fresh
-                x: 10; y: 8
-                width: 60; height: 60; radius: 30
-                rotation: 45
-                gradient: Gradient {
-                    GradientStop { position: 0; color: "#34c76f" }
-                    GradientStop { position: 1; color: "#3da1fd" }
-                }
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 55.4; height: width; radius: width / 2
-                    color: tap.pressed || row.lit ? Theme.highlight : Theme.bg
-                }
-            }
+            readonly property bool storied: !row.saved && store.storiesSeen >= 0 && !!store.stories[row.chatId]
+            readonly property bool fresh: row.storied && store.storiesSeen >= 0 && store.unseen(row.chatId)
+
             Avatar {
+                z: 1
                 x: row.storied ? 15 : 10; y: row.storied ? 13 : 8
                 width: row.storied ? 50 : 60; height: width
                 source: row.photo; letters: row.letters; tint: row.tint; saved: row.saved
             }
-            Row {
-                id: name
+            Text {
+                id: titleText
                 x: 80; y: 9
-                width: parent.width - x - stamp.width - 20
-                spacing: 6
-                Text {
-                    width: Math.min(implicitWidth, parent.width - (directTag.visible ? directTag.width + 6 : 0))
-                    text: row.title
-                    elide: Text.ElideRight
-                    color: Theme.text
-                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
-                }
-                Rectangle {
-                    id: directTag
-                    visible: row.direct
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: directLbl.implicitWidth + 10; height: 17; radius: 5
-                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
-                    Text {
-                        id: directLbl
-                        anchors.centerIn: parent
-                        text: "DIRECT"
-                        color: Theme.accent
-                        font.family: Theme.font; font.pixelSize: 10; font.weight: Font.Bold
-                    }
-                }
+                width: Math.min(implicitWidth, row.width - 100 - stamp.width - (row.direct ? row.directW + 6 : 0))
+                text: row.title
+                elide: Text.ElideRight
+                color: Theme.text
+                font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
             }
             Text {
                 id: stamp
-                anchors.right: parent.right; anchors.rightMargin: 14
+                x: row.width - width - 14
                 y: 11
                 text: (row.outgoing ? (row.read ? "✓✓ " : "✓ ") : "") + row.time
                 color: Theme.grey
@@ -397,32 +578,23 @@ Page {
             }
             // under the name, as Telegram-iOS: who wrote it (a group's sender, «Siz», a red «Qoralama») on a
             // line of its own and the text under it on one; with no one, the text on two. Typing: in their place
-            readonly property string busy: store.acting, store.activity(store.chats[row.chatId])
+            property int acted: 0       // its own chat's actions changed (Store.actionChanged, dispatched by page)
+            readonly property string busy: row.acted >= 0 && store.actions[row.chatId] ? store.activity(store.chats[row.chatId]) : ""
             readonly property bool author: row.who !== "" && busy === ""
-            readonly property real textWidth: width - 80 - (pill.visible ? pill.width + 22 : 14)
+            // (by the data, not pill.visible / glyph.visible: those read false while the list's page is
+            // hidden under a chat, and every row of every folder was laid out again as it hid and showed)
+            readonly property bool hasPill: row.unread > 0 || row.pinned
+            readonly property bool hasGlyph: row.glyph !== "" && row.busy === ""
+            readonly property int extraMask: (row.author ? 1 : 0) | (row.hasPill ? 2 : 0) | (row.hasGlyph ? 4 : 0)
+                                           | (row.direct ? 8 : 0) | (row.storied ? (row.fresh ? 32 : 16) : 0)
+            readonly property real pillW: row.hasPill && extras.item && extras.item.pillW ? extras.item.pillW : 22
+            readonly property real directW: row.direct && extras.item && extras.item.directW ? extras.item.directW : 0
+            readonly property real textWidth: width - 80 - (hasPill ? pillW + 22 : 14)
             Text {
-                x: 80; y: 31
-                width: row.textWidth
-                visible: row.author
-                text: row.who
-                elide: Text.ElideRight
-                textFormat: Text.PlainText
-                color: row.draft ? Theme.danger : Theme.text
-                font.family: Theme.font; font.pixelSize: 15
-            }
-            Icon {
-                id: glyph
-                x: 80; y: row.author ? 52 : 33
-                width: 16; height: 16
-                visible: row.glyph !== "" && row.busy === ""
-                name: row.glyph
-                color: Theme.grey
-            }
-            Text {
-                x: glyph.visible ? 100 : 80; y: row.author ? 50 : 31
+                x: row.hasGlyph ? 100 : 80; y: row.author ? 50 : 31
                 width: row.textWidth - (x - 80)
-                height: row.author || glyph.visible ? 20 : 40
-                maximumLineCount: row.author || glyph.visible ? 1 : 2
+                height: row.author || row.hasGlyph ? 20 : 40
+                maximumLineCount: row.author || row.hasGlyph ? 1 : 2
                 wrapMode: Text.Wrap
                 elide: Text.ElideRight
                 textFormat: Text.PlainText
@@ -431,46 +603,26 @@ Page {
                 font.family: Theme.font; font.pixelSize: 15
                 lineHeight: 0.95
             }
-            Rectangle {
-                id: pill
-                visible: row.unread > 0 || row.pinned
-                anchors.right: parent.right; anchors.rightMargin: 14
-                y: 40
-                height: 22; radius: 11
-                width: row.unread > 0 ? Math.max(22, count.implicitWidth + 14) : 22
-                color: row.unread > 0 ? (row.muted ? Theme.mutedBadge : Theme.badge) : "transparent"
-                Text {
-                    id: count
-                    anchors.centerIn: parent
-                    text: row.unread > 0 ? (row.unread > 9999 ? Math.floor(row.unread / 1000) + "K" : row.unread) : "📌"
-                    color: row.unread > 0 ? (row.muted ? "white" : Theme.badgeText) : Theme.grey
-                    font.family: Theme.font; font.pixelSize: row.unread > 0 ? 13 : 11; font.weight: Font.DemiBold
-                }
+            Loader {
+                id: extras
+                readonly property var r: row
+                readonly property var t: titleText
+                active: row.extraMask !== 0
+                sourceComponent: row.extraMask === 0 ? null
+                               : row.extraMask === 1 ? whoComp
+                               : row.extraMask === 2 ? pillComp
+                               : row.extraMask === 3 ? whoPillComp
+                               : row.extraMask === 4 ? glyphComp
+                               : row.extraMask === 8 ? directTagComp
+                               : row.extraMask === 16 ? storySeenComp
+                               : row.extraMask === 32 ? storyFreshComp
+                               : multiExtrasComp
             }
             Rectangle {
                 x: 80; y: parent.height - 0.5
                 width: parent.width - x; height: 0.5
                 color: Theme.separator
             }
-            MouseArea {
-                id: tap
-                anchors.fill: parent
-                onClicked: {
-                    row.lit = true
-                    unlight.restart()
-                    const c = store.chats[row.chatId]
-                    if (store.isDirectAdmin(c))
-                        page.nav.push(directPage, { chatId: row.chatId })
-                    else
-                        page.nav.push(chatPage, { chatId: row.chatId })
-                }
-            }
-            MouseArea {         // (over the row's own: the ringed picture opens the stories)
-                enabled: row.storied
-                x: 6; y: 4; width: 68; height: 68
-                onClicked: page.openStories(row.chatId)
-            }
-            Timer { id: unlight; interval: 600; onTriggered: row.lit = false }
         }
     }
 

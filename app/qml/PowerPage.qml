@@ -5,7 +5,7 @@
 // to 96 («Doim yoqilgan»); iOS's words for each under the card. Then «KO'P QUVVAT OLADIGAN JARAYONLAR», each a
 // switch with its words under it; while saving they show off, half seen, and a tap says why (iOS's tooltip).
 // Ours are the ones Nullgram has: GIFs, stickers, an emoji alone, the effects (iOS's autoplay of videos, its
-// «Extended Background Time» and «Preload Media» have nothing here to turn off). The battery: nullgram.py's Battery.
+// «Extended Background Time» and «Preload Media» have nothing here to turn off). The battery: nullgram_app.py's Battery.
 import QtQuick
 
 SubPage {

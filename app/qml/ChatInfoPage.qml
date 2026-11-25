@@ -954,7 +954,7 @@ SubPage {
                 function tap(m) {
                     if (!page.expanded) {
                         if (bigPic.hasStory)
-                            root.storyView.show([page.chatId], 0)
+                            root.stories().show([page.chatId], 0)
                         else
                             page.expand()
                     } else
@@ -982,7 +982,7 @@ SubPage {
             y: name.y + page.lerp(34, 32, page.ex)
             elide: Text.ElideRight
             // (a group's full info counts its members better than the group itself)
-            text: page.saved ? "" : page.full && page.full.member_count && !store.activity(page.chat)
+            text: (store.acting, page.saved) ? "" : page.full && page.full.member_count && !store.activity(page.chat)
                   ? Tr.n(page.chat.type.is_channel ? "%1 obunachi" : "%1 a'zo", page.full.member_count, store.count(page.full.member_count))
                   : (store.seen, store.status(page.chat, page.now))
             readonly property bool online: text === Tr.t("onlayn")
@@ -1522,7 +1522,7 @@ SubPage {
                         Icon { anchors.centerIn: parent; width: 13; height: 13; name: "eyeoff"; color: "white" }
                     }
                     Rectangle {
-                        visible: gCell.modelData.is_saved && (gCell.upgraded || (!!gCell.inner && !!gCell.inner.overall_limits))
+                        visible: !!gCell.modelData.is_saved && (gCell.upgraded || (!!gCell.inner && !!gCell.inner.overall_limits))
                         anchors.right: parent.right; anchors.rightMargin: 6; y: 6
                         width: rBadge.implicitWidth + 10; height: 18; radius: 9
                         color: gCell.upgraded ? Qt.rgba(0, 0, 0, 0.28) : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)

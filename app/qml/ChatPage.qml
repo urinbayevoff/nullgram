@@ -13,15 +13,18 @@ import "Mosaic.js" as Mosaic
 Page {
     id: page
     required property var chatId
+    readonly property real dpr: Screen.devicePixelRatio
+    // NULLGRAM_FPS, read once: td is Python, and every row asked it twice as it was made (~0.1 ms each on the phone)
+    readonly property bool fps: td.fps
     property var target: 0              // open at this message (found by search) and light it up
     property var flashId: 0
     readonly property var chat: store.chats[chatId]
     // our messages up to this one are read by the other side (✓✓ by their time, as the chat list has it); TDLib's
     // updateChatReadOutbox moves it (Store.readOutbox; the chat object is changed in place, so not a binding)
     property real readUpTo: chat ? (chat.last_read_outbox_message_id || 0) : 0
-    readonly property bool group: chat && (chat.type["@type"] === "chatTypeBasicGroup" ||
+    readonly property bool group: !!chat && (chat.type["@type"] === "chatTypeBasicGroup" ||
                                            (chat.type["@type"] === "chatTypeSupergroup" && !chat.type.is_channel))
-    readonly property bool channel: chat && chat.type["@type"] === "chatTypeSupergroup" && chat.type.is_channel
+    readonly property bool channel: !!chat && chat.type["@type"] === "chatTypeSupergroup" && chat.type.is_channel
     property bool canGift: false        // a gift may be sent to this channel (supergroupFullInfo.can_send_gift): 🎁 on its bar
     property var directChatId: 0        // a channel's direct messages chat (supergroupFullInfo.direct_messages_chat_id)
     property var directTopic: 0         // a subscriber's thread in an administered channel direct messages chat
@@ -32,6 +35,49 @@ Page {
     readonly property bool isDirectAdmin: (store.seen, store.isDirectAdmin(chat))
     readonly property alias paidSheet: paidSheet
     readonly property alias messageList: messages
+    readonly property var menuSpring: [0.0333, 0.0, 0.0667, 0.1058, 0.1, 0.2201, 0.14, 0.3573, 0.18, 0.5086,
+                                       0.22, 0.6252, 0.28, 0.8001, 0.34, 0.9024, 0.4, 0.9553, 0.4833, 1.0287,
+                                       0.5667, 1.024, 0.65, 1.0199, 0.7667, 1.0141, 0.8833, 1.0032, 1, 1.0]
+    readonly property var emojiPanel: emojiPanelLoader.item
+    readonly property var giftSheet: giftSheetLoader.item
+    readonly property var forwardSheet: forwardSheetLoader.item
+    readonly property var sheet: sheetLoader.item
+    readonly property var viewer: viewerLoader.item
+    readonly property var menu: menuLoader.item
+    readonly property var roundCam: roundViewLoader.item ? roundViewLoader.item.cam : null
+    readonly property var placeMenu: placeMenuLoader.item
+    readonly property var voters: votersLoader.item
+    readonly property var timerMenu: timerMenuLoader.item
+    readonly property var deleteMenu: deleteMenuLoader.item
+    readonly property var reportMenu: reportMenuLoader.item
+    readonly property var why: reportMenu ? reportMenu.whyField : null
+    readonly property var transMenu: transMenuLoader.item
+    readonly property var paidAlert: paidAlertLoader.item
+    readonly property var devices: voiceRecLoader.item ? voiceRecLoader.item.devices : null
+    readonly property var mic: voiceRecLoader.item ? voiceRecLoader.item.mic : null
+    readonly property var recorder: voiceRecLoader.item ? voiceRecLoader.item.recorder : null
+    function ensureViewer() { viewerLoader.active = true; return viewerLoader.item }
+    function ensureMenu() { menuLoader.active = true; return menuLoader.item }
+    function openForward() { forwardSheetLoader.active = true; forwardSheetLoader.item.show() }
+    function openGiftSheet() { giftSheetLoader.active = true; giftSheetLoader.item.show() }
+    function openAttach() { sheetLoader.active = true; sheetLoader.item.show() }
+    function showPlaceMenu(l, n) { placeMenuLoader.active = true; placeMenuLoader.item.show(l, n) }
+    function showTimerMenu() { timerMenuLoader.active = true; timerMenuLoader.item.show() }
+    function showDeleteMenu() { deleteMenuLoader.active = true; deleteMenuLoader.item.show() }
+    function askReport(st) { reportMenuLoader.active = true; reportMenuLoader.item.ask(st) }
+    function showTransMenu() { transMenuLoader.active = true; transMenuLoader.item.show() }
+    property Component infoPageMaker: null
+    property Component joinPageMaker: null
+    function openInfo(id) {
+        if (!infoPageMaker)
+            infoPageMaker = Qt.createComponent("ChatInfoPage.qml")
+        page.nav.push(infoPageMaker, { chatId: id, chatPage: page })
+    }
+    function openJoinRequests() {
+        if (!joinPageMaker)
+            joinPageMaker = Qt.createComponent("JoinRequestsPage.qml")
+        page.nav.push(joinPageMaker, { chatId: page.chatId })
+    }
     // a channel we may write in (its owner, or an admin who posts); the others have its bar instead of the field
     readonly property bool canPost: {
         if (outside || blocked)
@@ -306,7 +352,8 @@ Page {
             osk.hide()
         }
         panelOpen = true
-        emojiPanel.load()
+        emojiPanelLoader.active = true
+        emojiPanelLoader.item.load()
     }
     function keyboardUp() {          // from the panel: the field's focus brings the keyboard; held till it comes
         panelHold = panelOpen
@@ -437,11 +484,38 @@ Page {
     Connections { target: Theme; function onDarkChanged() { page.rewall() } }
     Connections { target: store; function onEmojiThemesChanged() { page._wallOf = null; page.rewall() } }
 
+    // NULLGRAM_FPS: how long each step of opening took, from the tap (Store.tapAt): the page made, TDLib's
+    // history, the first rows in, the first frame drawn with them
+    function openLog(what) {
+        if (td.fps && store.tapAt)
+            console.warn("nullgram: open", what, Date.now() - store.tapAt, "ms")
+    }
+    property bool openFramed: false
+    Connections {
+        target: page.Window.window
+        enabled: td.fps && !page.openFramed && page.ready
+        function onFrameSwapped() {
+            page.openFramed = true
+            page.openLog("frame")
+            store.tapAt = 0
+        }
+    }
+    // made ahead, with no chat yet (Main's `spare`, Telegram X's reused MessagesController): it opens one
+    // when Main.pushChat gives it the chat and calls begin(); a page made for a chat begins at once
+    property bool spare: false
     Component.onCompleted: {
+        if (!spare)
+            begin()
+    }
+    function begin() {
+        spare = false
+        openLog("made")
         store.openChat = chatId
         rewall()
+        openLog("rewall")
         loadPinned()
         loadRanks()
+        openLog("pinned+ranks")
         if (td.devOpen)
             console.warn("nullgram: chat translatable", chat ? chat.is_translatable : "?", "premium", store.me ? store.me.is_premium : "?")
         store.send({ "@type": "openChat", chat_id: chatId })
@@ -466,74 +540,207 @@ Page {
         }
         readTo = chat ? chat.last_read_inbox_message_id : 0
         loadDraft()
+        openLog("draft")
+        const spot = thread || directTopic ? null : store.spots[chatId]
         if (target)
             openAt(target, false)
         else if (chat && chat.unread_count > 0 && readTo && !thread)
             openAt(readTo, true)
+        else if (spot)
+            openAt(spot.id, false, spot)
         else
             fresh()
+        openLog("begun")
+        if (td.fps && store.tapAt)
+            Qt.callLater(() => page.openLog("after begin, next tick"))
     }
 
     // the newest messages, the list at the bottom
     function fresh() {
+        cancelFeed()
+        const gen = feedGen
         messages.clear()
         gap = false
         more = true
         list.down = true
-        store.history(chatId, 0, 30, (got, failed) => {
-            if (!page)          // closed before TDLib answered
+        // what TDLib has here first (Telegram X's way: only_local, shown at once), the server asked only
+        // when that is not a screenful; more than these come as it is scrolled up (older(): the server's)
+        const shown = (got, failed, local) => {
+            if (!page || gen !== page.feedGen)          // closed or superseded before TDLib answered
                 return
-            page.add(page.withRoot(got, !failed && got.length < 30))
-            // one that came meanwhile (sent as it opened) is laid out again with neighbours now, and
-            // had scrolled to where the newest was before these: lay out, stop that, then go down
-            list.forceLayout()
-            scroll.stop()
-            list.positionViewAtBeginning()
-            page.ready = true
-            Qt.callLater(page.seen)
-            Qt.callLater(page.nearTop)          // a screen not yet full: more at once
-        }, null, thread, directTopic)
+            page.openLog((local ? "history local " : "history ") + got.length)
+            const all = page.withRoot(got, !local && !failed && got.length < 30)
+            page.rememberAll(all)
+            if (!all.length) {
+                page.ready = true
+                Qt.callLater(page.seen)
+                return
+            }
+            page.loading = true         // hold nearTop() until the initial chunks have all landed
+            page.feeding = all.slice()
+            page.fed = () => {
+                page.loading = false
+                Qt.callLater(page.seen)
+                Qt.callLater(page.nearTop)          // a screen not yet full: more at once
+            }
+            Qt.callLater(() => {
+                if (!page || gen !== page.feedGen)
+                    return
+                page.feedOneOlder(8, 40, true)
+                page.openLog("rows " + messages.count)
+                // one that came meanwhile (sent as it opened) is laid out again with neighbours now, and
+                // had scrolled to where the newest was before these: lay out, stop that, then go down
+                list.forceLayout()
+                scroll.stop()
+                list.positionViewAtBeginning()
+                page.ready = true
+                Qt.callLater(page.seen)
+                if (page.feeding.length)
+                    feeder.start()
+                else
+                    page.finishOlder()
+            })
+        }
+        const asked = () => store.history(chatId, 0, 30, (got, failed) => shown(got, failed, false), null, thread, directTopic)
+        if (thread || directTopic)
+            return asked()
+        // from 0, as the server path: not from chat.last_message.id -- that left the newest message out
+        // (a just-sent one was missing on reopen till another was sent); TDLib answers the last one alone
+        // first and history() asks again for the rest, a local call, cheap
+        store.history(chatId, 0, 30, (got, failed) => {
+            if (!page || gen !== page.feedGen)
+                return
+            if (!failed && got.length >= 12)
+                shown(got, false, true)
+            else
+                asked()
+        }, null, 0, 0, true)
     }
 
     // as Telegram opens a chat with unread messages: around the last one read, the first unread
     // under the bar at the top of the screen; or (`unread` false) around a message found, in the middle
-    function openAt(id, unread) {
-        store.send({ "@type": "getChatHistory", chat_id: chatId, from_message_id: id, offset: unread ? -30 : -20,
-                     limit: unread ? 50 : 40, only_local: false }, (r) => {
-            if (!page)
+    // `spot`: where it was left (store.spots): that row as high as it was, not lit
+    function openAt(id, unread, spot) {
+        cancelFeed()
+        const gen = feedGen
+        const offset = unread ? -30 : -20, limit = unread ? 50 : 40
+        store.send(directTopic ? { "@type": "getDirectMessagesChatTopicHistory", chat_id: chatId, topic_id: directTopic,
+                                   from_message_id: id, offset: offset, limit: limit }
+                 : thread ? { "@type": "getMessageThreadHistory", chat_id: chatId, message_id: thread,
+                              from_message_id: id, offset: offset, limit: limit }
+                 : { "@type": "getChatHistory", chat_id: chatId, from_message_id: id, offset: offset,
+                     limit: limit, only_local: false }, (r) => {
+            if (!page || gen !== page.feedGen)
                 return
             const got = r.messages || []
+            page.openLog("history@ " + got.length)
             if (!got.length) {
                 page.fresh()
                 return
             }
             const last = page.chat && page.chat.last_message
             page.gap = !(last && got[0].id >= last.id)
-            if (unread)
+            if (unread) {
+                page.firstUnread = 0
                 for (let k = got.length - 1; k >= 0; k--)
                     if (got[k].id > page.readTo && !got[k].is_outgoing) {
                         page.firstUnread = got[k].id
                         break
                     }
-            page.add(got)
-            if (!unread) {
-                const t = page.indexOf(id)
-                if (t >= 0)
-                    page.centre(t)
-                page.flashId = id
-                unflash.restart()
             }
-            const i = unread ? page.indexOf(page.firstUnread) : -1
-            if (i >= 0)
-                page.toTop(i, 0)
-            list.down = false
-            page.ready = true
-            Qt.callLater(page.seen)
-            Qt.callLater(page.nearTop)
-            Qt.callLater(page.nearBottom)
+            page.rememberAll(got)
+            // visible messages around the anchor first; older and newer remainders stream in a few rows a frame
+            const anchorId = unread ? (page.firstUnread || id) : id
+            let a = got.findIndex((m) => m.id === anchorId)
+            if (a < 0)
+                a = 0
+            let lo = unread ? Math.max(0, a - 6) : Math.max(0, a - 4)
+            let hi = unread ? Math.min(got.length - 1, Math.max(a + 1, lo + 7)) : Math.min(got.length - 1, a + 4)
+            const aidA = page.albumId(got[a])
+            if (aidA) {
+                while (lo > 0 && page.albumId(got[lo - 1]) === aidA) lo--
+                while (hi + 1 < got.length && page.albumId(got[hi + 1]) === aidA) hi++
+            }
+            // never split an album at either boundary of the initial visible slice
+            const loAid = page.albumId(got[lo])
+            if (lo > 0 && loAid && page.albumId(got[lo - 1]) === loAid) {
+                if (loAid === aidA)
+                    while (lo > 0 && page.albumId(got[lo - 1]) === loAid) lo--
+                else
+                    while (lo < a && page.albumId(got[lo]) === loAid) lo++
+            }
+            const hiAid = page.albumId(got[hi])
+            if (hi + 1 < got.length && hiAid && page.albumId(got[hi + 1]) === hiAid) {
+                if (hiAid === aidA)
+                    while (hi + 1 < got.length && page.albumId(got[hi + 1]) === hiAid) hi++
+                else
+                    while (hi > a && page.albumId(got[hi]) === hiAid) hi--
+            }
+            const visible = got.slice(lo, hi + 1)
+            const newerPart = got.slice(0, lo)
+            const olderPart = got.slice(hi + 1)
+            if (olderPart.length)
+                page.loading = true
+            if (newerPart.length)
+                page.newering = true
+            page.anchorPin = { id: unread ? page.firstUnread : id, unread: unread, gap: spot ? spot.gap : undefined }
+            page.userMoved = false
+
+            Qt.callLater(() => {
+                if (!page || gen !== page.feedGen)
+                    return
+                page.add(visible)
+                page.openLog("rows@ " + messages.count)
+                page.pinAnchor(true)
+                if (!unread && !spot) {
+                    page.flashId = id
+                    unflash.restart()
+                }
+                list.down = false
+                page.ready = true
+                Qt.callLater(page.seen)
+
+                page.feeding = olderPart
+                page.fed = () => {
+                    page.loading = false
+                    Qt.callLater(page.nearTop)
+                }
+                page.newerQueue = newerPart
+                page.newerDone = () => {
+                    page.newering = false
+                    page.anchorPin = null
+                    page.flushPendingLive()
+                    Qt.callLater(page.seen)
+                    Qt.callLater(page.nearBottom)
+                }
+                if (!olderPart.length)
+                    page.finishOlder()
+                if (!newerPart.length)
+                    page.finishNewer()
+                if (page.feeding.length || page.newerQueue.length)
+                    feeder.start()
+            })
         })
     }
+    // the row at the top and how far under the header, when the newest were out of sight (as Telegram-iOS
+    // keeps a chat's place); at the bottom it is forgotten: opened at the newest again
+    function leave() {
+        if (thread || directTopic || !ready)
+            return
+        let at = -1
+        for (let y = bar.height + 1; away && at < 0 && y < list.height / 2; y += 16)   // (over the oldest: the list's head)
+            at = list.indexAt(list.width / 2, list.contentY + y)
+        const it = at >= 0 ? list.itemAtIndex(at) : null
+        if (it)
+            store.spots[chatId] = { id: messages.get(at).msgId, gap: it.mapToItem(list, 0, 0).y - bar.height }
+        else
+            delete store.spots[chatId]
+    }
     Component.onDestruction: {
+        if (spare)              // never opened a chat: nothing to close
+            return
+        leave()
+        cancelFeed()
         saveDraft()
         if (roundId)            // (its picture is this page's: it goes with it)
             player.stop()
@@ -557,43 +764,242 @@ Page {
             messages.setProperty(k, "edge", messages.get(k).edge + 1)
     }
 
-    // older ones while the list may be moving: a few rows a frame, then `done` (a page of 40 at
-    // once held a flick for 50 ms)
+    // ---- chunked history feeding --------------------------------------------
+    // TDLib gives up to 30-50 heavy messages in one `messages` response; building all rows at once
+    // froze the UI thread. Queue older (`feeding`) and newer (`newerQueue`) remainders and drain a
+    // few rows per frame (~10 ms budget), keeping every album whole.
+    property int feedGen: 0
     property var feeding: []
     property var fed: null
-    function addLater(got, done) {
-        got = got.filter((m) => rowAt[m.id] === undefined)
+    property var newerQueue: []
+    property var newerDone: null
+    property var pendingLive: []        // live updates arriving while openAt's newerQueue is draining
+    property var anchorPin: null        // { id, unread }: keep openAt's target pinned until user scrolls or done
+    property bool userMoved: false
+    property double _lastFeedAt: 0
+    readonly property int chunkMax: 6
+
+    function cancelFeed() {
+        feedGen++
+        feeder.stop()
+        feeding = []
+        fed = null
+        newerQueue = []
+        newerDone = null
+        pendingLive = []
+        anchorPin = null
+        userMoved = false
+        loading = false
+        newering = false
+    }
+    function albumId(m) {
+        return m && m.media_album_id && m.media_album_id !== "0" ? String(m.media_album_id) : ""
+    }
+    function rememberAll(got) {
         for (const m of got)
             remember(m)
-        feeding = got
-        fed = done
-        feeder.restart()
     }
-    function feed() {
+    // build up to `maxRows` rows from front (`!fromEnd`) or back (`fromEnd`) with a single splice,
+    // yielding once `budgetMs` is reached on giant rich posts; `wholeAlbum` keeps visible albums intact
+    function buildChunk(arr, fromEnd, maxRows, budgetMs, wholeAlbum) {
+        if (!arr.length)
+            return []
+        const t0 = Date.now()
+        const rows = []
+        let count = 0
+        let idx = fromEnd ? arr.length : 0
+        while ((fromEnd ? idx > 0 : idx < arr.length) && (count === 0 || (count < maxRows && Date.now() - t0 < budgetMs))) {
+            let u = 1
+            if (!fromEnd) {
+                if (wholeAlbum) {
+                    const aid = albumId(arr[idx])
+                    if (aid)
+                        while (idx + u < arr.length && albumId(arr[idx + u]) === aid) u++
+                    if (count > 0 && count + u > maxRows)
+                        break
+                }
+                for (let k = idx; k < idx + u; k++) {
+                    const m = arr[k]
+                    if (rowAt[m.id] === undefined)
+                        rows.push(row(m))
+                }
+                idx += u
+            } else {
+                if (wholeAlbum) {
+                    const aid = albumId(arr[idx - 1])
+                    if (aid)
+                        while (idx - u > 0 && albumId(arr[idx - 1 - u]) === aid) u++
+                    if (count > 0 && count + u > maxRows)
+                        break
+                }
+                const start = idx - u
+                for (let k = idx - 1; k >= start; k--) {
+                    const m = arr[k]
+                    if (rowAt[m.id] === undefined)
+                        rows.unshift(row(m))
+                }
+                idx = start
+            }
+            count += u
+        }
+        if (!fromEnd)
+            arr.splice(0, idx)
+        else
+            arr.splice(idx, arr.length - idx)
+        return rows
+    }
+    function pinAnchor(first) {
+        if (!anchorPin)
+            return
+        const i = anchorPin.id ? indexOf(anchorPin.id) : -1
+        if (i < 0)
+            return
+        if (anchorPin.unread) {
+            if (first || i < 10) {
+                toTop(i, 0)
+            } else {
+                // positionViewAtIndex lays out around `i` (already on screen) without jumping to index 0
+                list.positionViewAtIndex(i, ListView.End)
+                const it = list.itemAtIndex(i)
+                if (it) {
+                    const want = list.contentY + it.mapToItem(list, 0, 0).y - bar.height
+                    const low = list.originY + list.contentHeight - list.height
+                    list.contentY = Math.min(low, Math.max(list.originY, want))
+                }
+            }
+        } else if (anchorPin.gap !== undefined) {
+            toTop(i, anchorPin.gap)
+        } else {
+            centre(i)
+        }
+    }
+    function flushPendingLive() {
+        const live = pendingLive
+        pendingLive = []
+        if (!page.gap)
+            for (const m of live)
+                page.acceptLive(m)
+    }
+    function finishOlder() {
+        const done = fed
+        fed = null
+        if (done)
+            done()
+    }
+    function finishNewer() {
+        const done = newerDone
+        newerDone = null
+        if (done)
+            done()
+    }
+    function feedOneOlder(maxRows, budgetMs, wholeAlbum) {
         const t0 = td.fps ? Date.now() : 0
-        const part = feeding.splice(0, 6)
-        if (part.length) {
-            const k = messages.count - 1
-            const rows = part.map((m) => row(m))
+        const rows = buildChunk(feeding, false, maxRows || chunkMax, budgetMs || 10, !!wholeAlbum)
+        if (rows.length) {
             if (td.fps)
                 td.mark("rowms", Date.now() - t0)
+            const k = messages.count - 1
             messages.append(rows)
-            if (k >= 0)
+            if (k >= 0) {
                 messages.setProperty(k, "edge", messages.get(k).edge + 1)
+                if (list.down && !list.dragging && !list.flicking && !scroll.running && !userMoved)
+                    Qt.callLater(() => {
+                        if (page && list.down && !list.dragging && !list.flicking && !scroll.running && !page.userMoved) {
+                            list.forceLayout()
+                            list.positionViewAtBeginning()
+                        }
+                    })
+            }
         }
         if (td.fps) {
-            td.mark("fed", part.length)
+            td.mark("fed", rows.length)
             td.mark("feedms", Date.now() - t0)
         }
-        if (!feeding.length) {
-            feeder.stop()
-            const done = fed
-            fed = null
-            if (done)
-                done()
+    }
+    function feedOneNewer(maxRows, budgetMs, wholeAlbum) {
+        const t0 = td.fps ? Date.now() : 0
+        const rows = buildChunk(newerQueue, true, maxRows || chunkMax, budgetMs || 10, !!wholeAlbum)
+        if (rows.length) {
+            if (td.fps)
+                td.mark("rowms", Date.now() - t0)
+            messages.insert(0, rows)
+            if (anchorPin && !userMoved)
+                pinAnchor(false)
+        }
+        if (td.fps) {
+            td.mark("fed", rows.length)
+            td.mark("feedms", Date.now() - t0)
         }
     }
-    Timer { id: feeder; interval: 16; repeat: true; triggeredOnStart: true; onTriggered: page.feed() }
+    // kick off chunked feeding on the next event-loop turn (0 ms delay, after onReceived returns),
+    // never double-feeding in the same frame and pausing while the user's finger drags the list
+    function kickFeed(gen) {
+        if (!page || gen !== page.feedGen)
+            return
+        if (!feeding.length && !newerQueue.length)
+            return
+        if (list.dragging)
+            return
+        if (!feeder.running && Date.now() - _lastFeedAt >= 14)
+            feed()
+        if ((feeding.length || newerQueue.length) && !feeder.running)
+            feeder.start()
+    }
+    // older ones while the list may be moving: a few rows a frame, then `done` (never synchronously inside onReceived)
+    function addLater(got, done) {
+        got = got.filter((m) => rowAt[m.id] === undefined)
+        rememberAll(got)
+        feeding = feeding.concat(got)
+        fed = done
+        if (!feeding.length) {
+            finishOlder()
+            return
+        }
+        const gen = feedGen
+        Qt.callLater(() => page.kickFeed(gen))
+    }
+    // newer ones (when gap is true): a few rows a frame closest to index 0 first, then `done`
+    function prependLater(got, done) {
+        got = got.filter((m) => rowAt[m.id] === undefined)
+        rememberAll(got)
+        newerQueue = got.concat(newerQueue)
+        newerDone = done
+        if (!newerQueue.length) {
+            finishNewer()
+            return
+        }
+        const gen = feedGen
+        Qt.callLater(() => page.kickFeed(gen))
+    }
+    function feed() {
+        // do not stall frames while a finger is dragging the list; resume on release
+        if (list.dragging) {
+            if (list.atYEnd && feeding.length) {
+                _lastFeedAt = Date.now()
+                feedOneOlder(1, 3)
+                if (!feeding.length)
+                    finishOlder()
+            } else {
+                feeder.stop()
+            }
+            if (!feeding.length && !newerQueue.length)
+                feeder.stop()
+            return
+        }
+        _lastFeedAt = Date.now()
+        if (newerQueue.length) {
+            feedOneNewer(chunkMax, 12)
+            if (!newerQueue.length)
+                finishNewer()
+        } else if (feeding.length) {
+            feedOneOlder(chunkMax, 12)
+            if (!feeding.length)
+                finishOlder()
+        }
+        if (!feeding.length && !newerQueue.length)
+            feeder.stop()
+    }
+    Timer { id: feeder; interval: 16; repeat: true; onTriggered: page.feed() }
 
     function remember(m) {
         quotes[m.id] = { name: m.is_outgoing ? Tr.t("Siz") : store.senderName(m.sender_id, false) || (chat ? chat.title : ""),
@@ -729,10 +1135,10 @@ Page {
         }
         const src = item.pic ? "image://pic/0/" + Math.round(item.pw) + "/" + item.pic
                   : item.mini ? "image://pic/0/" + Math.round(item.pw) + "/mini/" + item.mini : ""
-        viewer.show(item.picFace, item.aspect, src, "", item.msgId)
+        ensureViewer().show(item.picFace, item.aspect, src, "", item.msgId)
         const f = bigFiles[item.msgId]
         if (f)
-            store.fetch(f, 32, (path) => { if (page) viewer.better(path) })
+            store.fetch(f, 32, (path) => { if (page && viewer) viewer.better(path) })
     }
 
     // the message's own file (the video, the voice, the document...): how far it has come, and
@@ -814,7 +1220,7 @@ Page {
         }
         const k = item.rowKind || item.picKind
         if (k === "map") {
-            placeMenu.show(maps[item.msgId], item.text)
+            showPlaceMenu(maps[item.msgId], item.text)
             return
         }
         if (k === "photo") {
@@ -869,7 +1275,7 @@ Page {
         if (k === "video" || k === "gif" || (k === "file" && mime.startsWith("video/"))) {
             const src = item.pic ? "image://pic/0/" + Math.round(item.pw) + "/" + item.pic
                       : item.mini ? "image://pic/0/" + Math.round(item.pw) + "/mini/" + item.mini : ""
-            viewer.show(item.media ? item.picFace : item.face, item.media ? item.aspect : 9 / 16, src, item.path,
+            ensureViewer().show(item.media ? item.picFace : item.face, item.media ? item.aspect : 9 / 16, src, item.path,
                         k === "video" ? item.msgId : 0, startAt)
             startAt = 0
             viewing = item.msgId
@@ -878,7 +1284,7 @@ Page {
         } else if (k === "voice" || k === "audio" || (k === "file" && mime.startsWith("audio/"))) {
             play(item.msgId, item.path)
         } else if (k === "file" && mime.startsWith("image/")) {
-            viewer.show(item.face, fileAspect[item.msgId] || 1, "file://" + item.path)
+            ensureViewer().show(item.face, fileAspect[item.msgId] || 1, "file://" + item.path)
             viewing = item.msgId
         } else if (k === "file") {
             save(item.msgId)
@@ -1063,7 +1469,7 @@ Page {
             replies: !m.is_channel_post && m.interaction_info && m.interaction_info.reply_info
                      ? m.interaction_info.reply_info.reply_count : 0,
             edited: m.edit_date > 0,
-            replyId: r ? r.message_id : 0,
+            replyId: r ? r.message_id : 0, replyChat: r ? r.chat_id : 0,
             quoteName: quote ? quote.name : "", quoteText: quote ? quote.text : (r ? "..." : ""),
             picKind: p.picKind, picW: p.picW, picH: p.picH, mini: p.mini, dur: p.dur, edge: 0,
             pic: p.file && p.file.local.is_downloading_completed ? p.file.local.path : "",
@@ -1278,7 +1684,7 @@ Page {
             if (m["@type"] === "message")
                 page.remember(m)
             else
-                page.quotes[id] = { name: "", text: Tr.t("O'chirilgan xabar") }
+                page.quotes[id] = { name: "", text: Tr.t("O'chirilgan xabar"), gone: true }
             page.requote(id)
         })
     }
@@ -1302,8 +1708,11 @@ Page {
         return -1
     }
 
+    // the local day of a unix time, as a number: two Dates and their toDateString() each row cost ~0.16 ms
+    // (the profiler's, on the phone); the offset taken once (Uzbekistan keeps no summer time)
+    readonly property int tzSec: new Date().getTimezoneOffset() * 60
     function otherDay(other, date) {
-        return !other || new Date(other.date * 1000).toDateString() !== new Date(date * 1000).toDateString()
+        return !other || Math.floor((other.date - tzSec) / 86400) !== Math.floor((date - tzSec) / 86400)
     }
 
     function dayName(unix) {
@@ -1345,7 +1754,7 @@ Page {
             store.send({ "@type": "viewMessages", chat_id: chatId, message_ids: ids, force_read: true })
     }
     Timer { id: seenLater; interval: 250; onTriggered: page.seen() }
-    Timer { id: unflash; interval: 1400; onTriggered: page.flashId = 0 }
+    Timer { id: unflash; interval: 1900; onTriggered: page.flashId = 0 }
 
     // newer messages while the bottom is 15 away, when it was opened at the unread ones
     function nearBottom() {
@@ -1358,29 +1767,33 @@ Page {
 
     function newer() {
         newering = true
+        const gen = feedGen
         const from = messages.get(0).msgId
         store.send({ "@type": "getChatHistory", chat_id: chatId, from_message_id: from, offset: -40, limit: 41,
                      only_local: false }, (r) => {
-            if (!page)
+            if (!page || gen !== page.feedGen)
                 return
-            page.newering = false
             if (r["@type"] === "error") {
+                page.newering = false
                 console.warn("nullgram: getChatHistory (newer)", page.chatId, from, r.code, r.message)
                 return
             }
             const got = (r.messages || []).filter((m) => m.id > from)      // newest first
             if (!got.length) {
                 page.gap = false            // nothing newer: these are the newest
+                page.newering = false
                 return
             }
-            for (const m of got)
-                page.remember(m)
-            messages.insert(0, got.map((m) => page.row(m)))
-            const last = page.chat && page.chat.last_message
-            if (last && got[0].id >= last.id)
-                page.gap = false
-            Qt.callLater(page.nearBottom)
-            seenLater.restart()
+            const newestId = got[0].id
+            page.prependLater(got, () => {
+                page.newering = false
+                const last = page.chat && page.chat.last_message
+                if (last && newestId >= last.id)
+                    page.gap = false
+                page.flushPendingLive()
+                Qt.callLater(page.nearBottom)
+                seenLater.restart()
+            })
         })
     }
 
@@ -1391,8 +1804,9 @@ Page {
         if (loading || !more || !messages.count)
             return
         loading = true
+        const gen = feedGen
         store.history(chatId, messages.get(messages.count - 1).msgId, pageSize, (got, failed) => {
-            if (!page)
+            if (!page || gen !== page.feedGen)
                 return
             if (td.fps)
                 td.mark("page", 1)
@@ -1418,8 +1832,13 @@ Page {
     // the replied message, if it is loaded
     function jump(id) {
         const i = indexOf(id)
-        if (i >= 0)
-            centre(i)
+        if (i < 0)
+            return
+        // gone up on purpose: the rows still streaming in must not pull the list back down to the newest
+        list.down = false
+        userMoved = true
+        anchorPin = null
+        centre(i)
     }
     // a message in the middle of the screen; one taller than the room there from its top
     function centre(i) {
@@ -1440,12 +1859,43 @@ Page {
         list.contentY = Math.min(low, Math.max(list.originY, want))  // (originY may still be short of the rows above)
     }
     // a message in the middle, lit up a moment: loaded here, else the history around it in place of these
+    // a quote tapped (Telegram X's way): one in another chat opens that chat there; a deleted one says so and
+    // stays; else the list goes to it, and ↓ comes back here first (`backTo`), the newest only after that
+    property var backTo: []             // messages the quotes were tapped in, the last one first back
+    function openReply(from, id, inChat) {
+        if (!id)
+            return
+        if (inChat && inChat !== chatId) {
+            store.send({ "@type": "getChat", chat_id: inChat }, (c) => { if (page) page.openChat(c, id) })
+            return
+        }
+        if (quotes[id] && quotes[id].gone)
+            return toast(Tr.t("Bu xabar o'chirilgan"))
+        const go = () => {
+            if (from && backTo[backTo.length - 1] !== from)
+                backTo = backTo.concat([from])
+            goTo(id)
+        }
+        if (indexOf(id) >= 0)
+            return go()
+        store.send({ "@type": "getMessage", chat_id: chatId, message_id: id }, (m) => {
+            if (!page)
+                return
+            if (m["@type"] !== "message") {
+                page.quotes[id] = { name: "", text: Tr.t("O'chirilgan xabar"), gone: true }
+                page.requote(id)
+                return page.toast(Tr.t("Bu xabar o'chirilgan"))
+            }
+            go()
+        })
+    }
     function goTo(id) {
         if (indexOf(id) >= 0) {
             jump(id)
             flashId = id
             unflash.restart()
         } else {
+            cancelFeed()
             messages.clear()
             more = true
             openAt(id, false)
@@ -1664,12 +2114,14 @@ Page {
             acts.push(page.originals[m.id] !== undefined
                       ? { text: Tr.t("Asl nusxasi"), glyph: "🌐", run: () => page.untranslateOne(m.id) }
                       : { text: Tr.t("Tarjima qilish"), glyph: "🌐", run: () => { page.ones[m.id] = true; page.translateId(m.id) } })
+        if (ok && p.can_get_message_thread && !page.thread)     // Telegram-iOS's «View Thread»: the answers around it
+            acts.push({ text: Tr.t("Javoblarni ochish"), glyph: "💬", run: () => page.openComments(m.id) })
         if (ok && p.can_get_link)
             acts.push({ text: Tr.t("Havolani nusxalash"), glyph: "🔗", run: () => page.copyLink(m.id) })
         if (ok && p.can_be_forwarded)
-            acts.push({ text: Tr.t("Uzatish"), glyph: "↪", run: () => { page.forwarding = m.ids; page.copying = false; forwardSheet.show() } })
+            acts.push({ text: Tr.t("Uzatish"), glyph: "↪", run: () => { page.forwarding = m.ids; page.copying = false; page.openForward() } })
         if (ok && p.can_be_copied && page.channel)   // (Telegram-iOS's "forward without the author's name")
-            acts.push({ text: Tr.t("Imzosiz forward qilish"), glyph: "↪", run: () => { page.forwarding = m.ids; page.copying = true; forwardSheet.show() } })
+            acts.push({ text: Tr.t("Imzosiz forward qilish"), glyph: "↪", run: () => { page.forwarding = m.ids; page.copying = true; page.openForward() } })
         if (ok && p.can_be_pinned)
             acts.push({ text: item.isPinned ? Tr.t("Qadashni olish") : Tr.t("Qadash"), glyph: "📌",
                         run: () => store.pin(page.chatId, m.id, !item.isPinned) })
@@ -1715,7 +2167,7 @@ Page {
         const it = shell ? shell.view : null
         page.reacting = item.reactId
         if (it && acts.length) {
-            menu.show(it.face, m.out, acts, reactions, it.reactList.filter((r) => r.mine).map((r) => r.e))
+            ensureMenu().show(it.face, m.out, acts, reactions, it.reactList.filter((r) => r.mine).map((r) => r.e))
             if (stats)
                 readStats(m.id, p.can_get_read_date, it.face)
         }
@@ -1727,7 +2179,7 @@ Page {
         return (day === Tr.t("Bugun") ? "" : day + " ") + Qt.formatTime(d, "HH:mm")
     }
     function readStats(id, private_, face) {
-        const here = () => page && menu.open && menu.bubble === face
+        const here = () => page && menu && menu.open && menu.bubble === face
         const set = (row) => {      // the first row (the kept one) now this, or gone (null)
             if (!here())
                 return
@@ -1903,9 +2355,9 @@ Page {
             if (t === "reportChatResultOk")
                 toast(Tr.t("Shikoyat yuborildi"))
             else if (t === "reportChatResultOptionRequired")
-                reportMenu.ask({ ids: ids, title: r.title, options: r.options })
+                askReport({ ids: ids, title: r.title, options: r.options })
             else if (t === "reportChatResultTextRequired")
-                reportMenu.ask({ ids: ids, option: r.option_id, optional: r.is_optional })
+                askReport({ ids: ids, option: r.option_id, optional: r.is_optional })
             else
                 toast(t === "error" ? Tr.t("Shikoyat yuborilmadi") : Tr.t("Avval xabarlarni tanlang"))
         })
@@ -1969,7 +2421,8 @@ Page {
     function stopPicking() {
         selecting = false
         picked = ({})
-        deleteMenu.visible = false
+        if (deleteMenu)
+            deleteMenu.visible = false
     }
     // whether every one picked can (each one's properties known)
     function pickedCan(what) {
@@ -1997,7 +2450,7 @@ Page {
         forwarding = pickedIds
         copying = false
         stopPicking()
-        forwardSheet.show()
+        openForward()
     }
 
     function copy(text) {
@@ -2060,7 +2513,7 @@ Page {
 
     // the back button: the menu first, then a reply or edit being written (Main asks)
     function dismiss() {
-        if (paidAlert.open) {
+        if (paidAlert && paidAlert.open) {
             paidAlert.open = false
             return true
         }
@@ -2068,27 +2521,27 @@ Page {
             paidSheet.backOne()
             return true
         }
-        if (sheet.open) {
+        if (sheet && sheet.open) {
             sheet.close()
             return true
         }
-        if (giftSheet.open) {
+        if (giftSheet && giftSheet.open) {
             giftSheet.backOne()
             return true
         }
-        if (forwardSheet.open) {
+        if (forwardSheet && forwardSheet.open) {
             forwardSheet.close()
             return true
         }
-        if (viewer.open) {
+        if (viewer && viewer.open) {
             viewer.close()
             return true
         }
-        if (menu.open) {
+        if (menu && menu.open) {
             menu.close()
             return true
         }
-        if (deleteMenu.visible) {
+        if (deleteMenu && deleteMenu.visible) {
             deleteMenu.visible = false
             return true
         }
@@ -2100,9 +2553,9 @@ Page {
             dropPreview()
             return true
         }
-        if (voters.visible || placeMenu.visible) {
-            voters.visible = false
-            placeMenu.visible = false
+        if ((voters && voters.visible) || (placeMenu && placeMenu.visible)) {
+            if (voters) voters.visible = false
+            if (placeMenu) placeMenu.visible = false
             return true
         }
         if (panelOpen) {         // the emoji panel down, as the keyboard would go
@@ -2126,44 +2579,50 @@ Page {
 
     TextEdit { id: clip; visible: false }      // the clipboard's way in
 
+    function acceptLive(m) {
+        if (m.chat_id !== page.chatId || page.gap)      // (in a gap it comes with the newer ones)
+            return
+        if (page.thread && !(m.topic_id && m.topic_id.message_thread_id === page.thread))
+            return
+        if (page.directTopic && !(m.topic_id && m.topic_id["@type"] === "messageTopicDirectMessages"
+                                  && m.topic_id.direct_messages_chat_topic_id === page.directTopic))
+            return
+        if (page.newerQueue.length) {
+            page.pendingLive.push(m)
+            return
+        }
+        for (let i = 0; i < Math.min(messages.count, 20); i++)
+            if (messages.get(i).msgId === m.id)
+                return
+        const from = m.is_outgoing && page.flying &&     // (one emoji alone comes back as messageAnimatedEmoji)
+                     store.plain(m.content) === page.flying.text ? page.flying : null
+        const bottom = list.atYBeginning || scroll.running || from
+        const was = list.contentY
+        page.remember(m)
+        messages.insert(0, page.row(m))
+        if (bottom) {            // keep the newest in sight: scroll to it on the sent bubble's vertical curve
+            list.positionViewAtBeginning()
+            const to = list.contentY
+            list.contentY = was
+            scroll.to = to
+            scroll.restart()
+            if (from) {
+                page.flying = null
+                const it = list.itemAtIndex(0)
+                if (it && it.view)
+                    it.view.flyFrom(from)
+            }
+        }
+        seenLater.restart()
+    }
+
     Connections {
         target: store
         function onReadOutbox(chatId, lastRead) {
             if (chatId === page.chatId)
                 page.readUpTo = lastRead
         }
-        function onMessage(m) {
-            if (m.chat_id !== page.chatId || page.gap)      // (in a gap it comes with the newer ones)
-                return
-            if (page.thread && !(m.topic_id && m.topic_id.message_thread_id === page.thread))
-                return
-            if (page.directTopic && !(m.topic_id && m.topic_id["@type"] === "messageTopicDirectMessages"
-                                      && m.topic_id.direct_messages_chat_topic_id === page.directTopic))
-                return
-            for (let i = 0; i < Math.min(messages.count, 20); i++)
-                if (messages.get(i).msgId === m.id)
-                    return
-            const from = m.is_outgoing && page.flying &&     // (one emoji alone comes back as messageAnimatedEmoji)
-                         store.plain(m.content) === page.flying.text ? page.flying : null
-            const bottom = list.atYBeginning || scroll.running || from
-            const was = list.contentY
-            page.remember(m)
-            messages.insert(0, page.row(m))
-            if (bottom) {            // keep the newest in sight: scroll to it on the sent bubble's vertical curve
-                list.positionViewAtBeginning()
-                const to = list.contentY
-                list.contentY = was
-                scroll.to = to
-                scroll.restart()
-                if (from) {
-                    page.flying = null
-                    const it = list.itemAtIndex(0)
-                    if (it && it.view)
-                        it.view.flyFrom(from)
-                }
-            }
-            seenLater.restart()
-        }
+        function onMessage(m) { page.acceptLive(m) }
         function onChatChanged(chatId) {
             if (chatId === page.chatId) {
                 page.rewall()
@@ -2295,9 +2754,22 @@ Page {
         function onMessagesDeleted(chatId, ids) {
             if (chatId !== page.chatId)
                 return
+            if (page.feeding.length)
+                page.feeding = page.feeding.filter((m) => ids.indexOf(m.id) < 0)
+            if (page.newerQueue.length)
+                page.newerQueue = page.newerQueue.filter((m) => ids.indexOf(m.id) < 0)
+            if (page.pendingLive.length)
+                page.pendingLive = page.pendingLive.filter((m) => ids.indexOf(m.id) < 0)
             for (let i = messages.count - 1; i >= 0; i--)
                 if (ids.indexOf(messages.get(i).msgId) >= 0)
                     messages.remove(i)
+            for (const id of ids)
+                if (page.quotes[id]) {
+                    page.quotes[id] = { name: "", text: Tr.t("O'chirilgan xabar"), gone: true }
+                    page.requote(id)
+                }
+            if (page.backTo.length)
+                page.backTo = page.backTo.filter((id) => ids.indexOf(id) < 0)
             if (page.editing && ids.indexOf(page.editing.id) >= 0)
                 page.cancelCompose()
             if (page.replying && ids.indexOf(page.replying.id) >= 0)
@@ -2343,7 +2815,31 @@ Page {
             readonly property real seen: Math.round(contentY / 100) * 100
             // whether it stands at the newest: then it stays there when the field grows or shrinks
             property bool down: true
-            onMovementEnded: down = atYBeginning
+            onDragStarted: page.userMoved = true
+            onDraggingChanged: {
+                if (dragging) {
+                    if (!atYEnd)
+                        feeder.stop()
+                } else if ((page.feeding.length || page.newerQueue.length) && !feeder.running) {
+                    feeder.start()
+                }
+            }
+            onMovementEnded: {
+                down = atYBeginning
+                if (down && !page.gap)
+                    page.backTo = []
+            }
+            // low-res pictures while the list is moving (drag or flick), full size ~120 ms after it stops
+            property bool lowRes: false
+            onMovingChanged: {
+                if (moving) {
+                    lowResOff.stop()
+                    lowRes = true
+                } else {
+                    lowResOff.restart()
+                }
+            }
+            Timer { id: lowResOff; interval: 120; onTriggered: if (!list.moving) list.lowRes = false }
 
             // a row is a shell (what the model gives it, whether it shows) and, only when it shows, its bubble in
             // it (`look`). An album's others are tucked under its first: rows of their own with nothing to show,
@@ -2351,7 +2847,7 @@ Page {
             // group of albums more than half the rows made in a first flick, every one of them hidden.
             delegate: Item {
                 id: shell
-                readonly property real born: td.fps ? Date.now() : 0     // (NULLGRAM_FPS: what a row cost to make)
+                readonly property real born: page.fps ? Date.now() : 0     // (NULLGRAM_FPS: what a row cost to make)
                 required property int index
                 required property var msgId
                 required property bool out
@@ -2369,6 +2865,7 @@ Page {
                 required property int date
                 required property bool edited
                 required property var replyId
+                required property var replyChat
                 required property string quoteName
                 required property string quoteText
                 required property string picKind
@@ -2406,11 +2903,15 @@ Page {
                 readonly property bool grouped: group !== null && group.ids.length > 1
                 readonly property bool tucked: grouped && group.main !== msgId
                 readonly property bool media: picKind !== ""
+                readonly property bool simpleText: !tucked && said === "" && picKind === "" && rowKind === "" &&
+                    jumbo === 0 && rich === "" && kind === "" && fwd === "" && rank === "" &&
+                    reacts.length <= 2 && views === 0 && replies === 0 && comments < 0 &&
+                    !page.channel && !page.picking && page.firstUnread !== msgId
                 readonly property Item view: look.item          // the row as the page asks it things (null: tucked)
                 readonly property bool translated: page.translating
                 onTranslatedChanged: if (translated) page.translateId(msgId)
                 Component.onCompleted: {
-                    if (td.fps) {
+                    if (page.fps) {
                         td.mark("row", 1)
                         td.mark("makems", Date.now() - born)
                         if (Date.now() - born > 25)
@@ -2433,1203 +2934,11 @@ Page {
                     id: look
                     active: !shell.tucked
                     width: shell.width
-                    // (inside, `item` is the row: its own id, found before the Loader's `item`; what the model
-                    // gave the shell, handed in)
-                    sourceComponent: Item {
-                        id: item
-                        readonly property int index: shell.index
-                        readonly property var msgId: shell.msgId
-                        readonly property bool out: shell.out
-                        readonly property string text: shell.text
-                        readonly property string rich: shell.rich
-                        readonly property string kind: shell.kind
-                        readonly property string sender: shell.sender
-                        readonly property string senderKey: shell.senderKey
-                        readonly property string tint: shell.tint
-                        readonly property string rank: shell.rank
-                        readonly property int rankKind: shell.rankKind
-                        readonly property string time: shell.time
-                        readonly property bool sending: shell.sending
-                        readonly property int views: shell.views
-                        readonly property int date: shell.date
-                        readonly property bool edited: shell.edited
-                        readonly property var replyId: shell.replyId
-                        readonly property string quoteName: shell.quoteName
-                        readonly property string quoteText: shell.quoteText
-                        readonly property string picKind: shell.picKind
-                        readonly property int picW: shell.picW
-                        readonly property int picH: shell.picH
-                        readonly property string mini: shell.mini
-                        readonly property string pic: shell.pic
-                        readonly property int dur: shell.dur
-                        readonly property int edge: shell.edge
-                        readonly property string rowKind: shell.rowKind
-                        readonly property string fileName: shell.fileName
-                        readonly property real fileSize: shell.fileSize
-                        readonly property string wave: shell.wave
-                        readonly property string title: shell.title
-                        readonly property string sub: shell.sub
-                        readonly property bool anim: shell.anim
-                        readonly property string emo: shell.emo
-                        readonly property int fitz: shell.fitz
-                        readonly property bool auto: shell.auto
-                        readonly property real got: shell.got
-                        readonly property string path: shell.path
-                        readonly property int jumbo: shell.jumbo
-                        readonly property string fwd: shell.fwd
-                        readonly property string reacts: shell.reacts
-                        readonly property bool isPinned: shell.isPinned
-                        readonly property int comments: shell.comments
-                        readonly property int replies: shell.replies
-                        readonly property string said: shell.said
-                        readonly property string album: shell.album
-                        readonly property bool veiled: shell.veiled
-                        readonly property string poll: shell.poll
-                        readonly property bool heard: shell.heard
-                        readonly property var group: shell.group
-                        readonly property bool grouped: shell.grouped
-                        readonly property bool tucked: shell.tucked
-                        readonly property bool mosaic: grouped && group.main === msgId && rowKind === ""
-                        readonly property bool stacked: grouped && group.main === msgId && rowKind !== ""     // files or songs
-                        readonly property var tiles: mosaic ? page.tilesOf(group, wide) : null
-                        readonly property var ids: grouped ? group.ids : [msgId]
-                        function tileOf(id) {       // an album's picture, or its file
-                            return picLoad.item ? picLoad.item.tileOf(id) : stack.item ? stack.item.memberOf(id) : null
-                        }
-                        function oneAt(x, y) {      // the album's picture or file at (x, y) on the row: its message (0: none)
-                            if (mosaic && picLoad.item) {
-                                const at = item.mapToItem(picture, x, y)
-                                const t = picLoad.item.tileAt(at.x, at.y)
-                                return t ? t.msgId : 0
-                            }
-                            if (stacked && stack.item) {
-                                const at = item.mapToItem(attach, x, y)
-                                const f = stack.item.memberAt(at.x, at.y)
-                                return f ? f.msgId : 0
-                            }
-                            return 0
-                        }
-                        function replay(gently) {   // an animated emoji: played again (tapped; gently: if it has stopped)
-                            if (picLoad.item)
-                                picLoad.item.replay(gently)
-                        }
-                        readonly property bool bursting: bursts.count > 0      // its effects (a tap on the emoji): below
-                        function burst(path) {
-                            if (Prefs.fx && bursts.count < 4)      // (not with the Quvvat tejash page's effects off)
-                                bursts.append({ file: path, key: ++page.burstSeq,
-                                                dx: Math.random() * 60 - 30, dy: Math.random() * 60 - 30 })
-                        }
-                        function burstGone(key) {
-                            for (let k = 0; k < bursts.count; k++)
-                                if (bursts.get(k).key === key) {
-                                    bursts.remove(k)
-                                    return
-                                }
-                        }
-                        function blow(x, y) {       // its spoiler off, from (x, y) on the picture (its middle when not given)
-                            if (picLoad.item)
-                                picLoad.item.blow(x === undefined ? picture.width / 2 : x, y === undefined ? picture.height / 2 : y)
-                        }
-                        readonly property int talk: mosaic || stacked ? group.talk : comments          // the comments, an album's on one of them
-                        readonly property var talkId: mosaic || stacked ? group.talkId : msgId
-                        // the last line of what is last in the bubble: the time goes by it when it fits
-                        readonly property real lastLine: stacked ? (stack.item ? stack.item.last : 0) : body.last
-                        readonly property Item face: bubble
-                        readonly property Item picFace: picture
-                        // a picture: photo, video or GIF in the bubble; sticker and round video without one
-                        readonly property bool media: picKind !== ""
-                        readonly property bool bare: picKind === "sticker" || picKind === "round" || jumbo > 0
-                        // nearly on the screen: a GIF's player is made ready; on it: only then it plays (one
-                        // playing just off the screen kept the whole window redrawn at the video's 30 fps)
-                        // (the shell's y: this item stands at 0 in it)
-                        readonly property bool inSight: shell.y + height > list.seen - 300 && shell.y < list.seen + list.height + 300
-                        readonly property bool onScreen: shell.y + height > list.seen - 100 && shell.y < list.seen + list.height + 100
-                        readonly property real aspect: picH / picW
-                        // a sticker's side (Telegram-iOS's 180 on its wider screen); an emoji alone's that times the
-                        // server's emojies_animated_zoom (iOS: animatedEmojiScale)
-                        readonly property real side: emo !== "" ? Math.round(160 * page.store.emojiZoom) : 160
-                        // a round video playing: from 200 to the width but 10 on each side (404 at most), its avatar
-                        // gone (Telegram-iOS's ChatMessageInstantVideoItemNode: maximumDisplaySize, avatarOffset)
-                        readonly property bool roundBig: picKind === "round" && page.roundId === msgId
-                        property real roundK: roundBig ? 1 : 0
-                        Behavior on roundK { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                        readonly property real roundSide: 200 + (Math.min(404, width - 20) - 200) * roundK
-                        // its middle on the screen, between the header and the field: else it goes on in the corner (PiP)
-                        readonly property bool roundShown: roundBig && (shell.y + bubble.y + bubble.height / 2 - list.contentY - page.kb > bar.height + pinBar.height
-                                                                        && shell.y + bubble.y + bubble.height / 2 - list.contentY - page.kb < page.height - page.kb - page.foot)
-                        onRoundShownChanged: if (roundBig) page.roundSeen = roundShown
-                        onRoundBigChanged: if (roundBig) page.roundSeen = roundShown
-                        Component.onDestruction: if (page && page.roundId === msgId) page.roundSeen = false
-                        readonly property real pw: mosaic ? tiles.width : picKind === "round" ? roundSide : picKind === "sticker" ? side * Math.min(1, 1 / aspect)
-                                                 : aspect * wide > 360 ? Math.max(150, 360 / aspect) : wide
-                        readonly property real ph: mosaic ? tiles.height : picKind === "round" ? roundSide : picKind === "sticker" ? side * Math.min(1, aspect)
-                                                 : Math.max(110, Math.min(360, aspect * wide))
-                        readonly property real wide: Math.min(width * 0.72, 270) - moved
-                        readonly property bool overlaid: media && text === "" && !reacted     // the time over the picture
-                        // an album's reactions are its first message's, as Telegram-iOS shows them and puts them on (topMessage)
-                        readonly property var reactId: grouped ? group.ids[0] : msgId
-                        readonly property string reactsShown: reactId === msgId ? reacts : (page.albumTick, page.reactsOf(reactId))
-                        readonly property var reactList: reactsShown ? JSON.parse(reactsShown) : []
-                        readonly property bool reacted: reactList.length > 0
-                        // a run: one sender's messages within 10 minutes of each other. Its first (the
-                        // top) has the name and more space over it, its last (the bottom) the tail.
-                        readonly property bool first: edge, grouped ? page.apart(page.beyond(index, 1, album), senderKey, date)
-                                                             : page.apart(messages.get(index + 1), senderKey, date)
-                        readonly property bool last: grouped ? page.apart(page.beyond(index, -1, album), senderKey, date)
-                                                     : page.apart(messages.get(index - 1), senderKey, date)
-                        readonly property real most: width * 0.78 - moved
-                        // a group's incoming messages leave room on the left for their sender's picture,
-                        // which stands by the last of a run (Telegram-iOS)
-                        readonly property bool faced: sender !== "" && !said       // (sender: only a group's incoming)
-                        // the first message of a day has the day over it
-                        readonly property bool newDay: edge, grouped ? page.otherDay(page.beyond(index, 1, album), date)
-                                                              : page.otherDay(messages.get(index + 1), date)
-                        readonly property bool unreadBar: msgId === page.firstUnread || (grouped && ids.indexOf(page.firstUnread) >= 0)
-                        // «Tanlash»: a circle on its left, the incoming ones moved over for it (iOS)
-                        readonly property bool pickable: page.selecting && !said && !sending
-                        readonly property bool isPicked: ids.every((id) => page.picked[id] !== undefined)
-                        readonly property real moved: pickable && !out ? 40 : 0       // (and narrower by as much)
-                        readonly property real above: (newDay ? 38 : 0) + (unreadBar ? 36 : 0) + (first ? 8 : 2)
-                        width: shell.width
-                        height: (said ? pill.height + 4 : bubble.height) + above
-
-                        // what only some rows show is made only for them (a row's every Text costs it to make,
-                        // shown or not, and a first flick makes a row a frame or two)
-                        Loader {
-                            id: dayPill
-                            active: item.newDay
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: 10
-                            readonly property Item msg: item
-                            sourceComponent: Rectangle {
-                                readonly property Item item: dayPill.msg
-                                width: dayText.implicitWidth + 16; height: 22; radius: 11
-                                color: Theme.dayPill
-                                Text {
-                                    id: dayText
-                                    anchors.centerIn: parent
-                                    text: page.dayName(item.date)
-                                    color: "white"
-                                    font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
-                                }
-                            }
-                        }
-                        Rectangle {          // the message found, lit up a moment (as Telegram-iOS does)
-                            y: item.above - 2
-                            width: parent.width; height: parent.height - y + 2
-                            color: Theme.accent
-                            opacity: item.ids.indexOf(page.flashId) >= 0 ? 0.18 : 0
-                            Behavior on opacity { NumberAnimation { duration: 500 } }
-                        }
-                        Loader {             // Telegram-iOS's unread bar, over the first unread message
-                            active: item.unreadBar
-                            y: (item.newDay ? 38 : 0) + 6
-                            width: parent.width; height: 28
-                            sourceComponent: Rectangle {
-                                color: Theme.bar
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: Tr.t("O'qilmagan xabarlar")
-                                    color: Theme.grey
-                                    font.family: Theme.font; font.pixelSize: 13
-                                }
-                            }
-                        }
-
-                        Loader {             // a service message (who did what): no bubble, a pill in the middle
-                            id: pill
-                            active: item.said !== ""
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: item.above + 2
-                            readonly property Item msg: item
-                            sourceComponent: Rectangle {
-                                readonly property Item item: pill.msg
-                                width: Math.min(saidText.implicitWidth, item.width - 80) + 20
-                                height: saidText.height + 8; radius: Math.min(11, height / 2)
-                                color: Theme.dayPill
-                                Text {
-                                    id: saidText
-                                    anchors.centerIn: parent
-                                    width: Math.min(implicitWidth, item.width - 80)
-                                    text: item.said
-                                    wrapMode: Text.Wrap
-                                    horizontalAlignment: Text.AlignHCenter
-                                    textFormat: Text.PlainText
-                                    color: "white"
-                                    font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
-                                }
-                            }
-                        }
-
-                        // a message just sent flies here from where its text was in the field: it starts
-                        // there (moved by mover's x, y) and comes to rest on Telegram-iOS's two curves
-                        // (ChatMessageTransitionNode.swift), on the render thread
-                        Item {
-                            id: mover
-                            visible: !item.said
-                            width: item.width; height: item.height
-                            transform: Translate {
-                                x: item.moved
-                                Behavior on x { NumberAnimation { duration: 420; easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring } }
-                            }
-                            // a tap on an emoji alone: its effect (Telegram-iOS's playEffectAnimation) three times its size,
-                            // its middle moved in toward the chat by the emoji's width less 10, a little off at random each
-                            // time, turned round for one that came in; once, over the rows about it, four at most at a time
-                            ListModel { id: bursts }
-                            Repeater {
-                                model: bursts
-                                Lottie {
-                                    required property string file
-                                    required property int key
-                                    required property real dx
-                                    required property real dy
-                                    readonly property real w: picture.width
-                                    readonly property real h: picture.height
-                                    z: 10
-                                    width: 3 * w; height: 3 * h
-                                    x: bubble.x + picture.x - w + (item.out ? 10 - w : w - 10) + dx
-                                    y: bubble.y + picture.y - h + dy
-                                    path: file
-                                    once: true
-                                    most: 512
-                                    running: page.visible
-                                    transform: Scale { origin.x: 1.5 * w; xScale: item.out ? 1 : -1 }
-                                    onEnded: item.burstGone(key)
-                                    onFailedChanged: if (failed) item.burstGone(key)
-                                }
-                            }
-                            Loader {
-                                id: faceAt
-                                active: item.faced && item.last
-                                opacity: 1 - item.roundK
-                                x: 8 - 100 * item.roundK; y: bubble.y + bubble.height - 34
-                                width: 34; height: 34
-                                // (handed through: inside sourceComponent `item` is the Loader's)
-                                readonly property string name: item.sender
-                                readonly property string key: item.senderKey
-                                readonly property string tint: item.tint
-                                sourceComponent: Avatar {
-                                    id: face
-                                    letters: store.letters(faceAt.name)
-                                    tint: faceAt.tint
-                                    Component.onCompleted: {
-                                        const s = JSON.parse(faceAt.key)
-                                        const u = s.user_id && store.users[s.user_id]
-                                        if (u && u.type && u.type["@type"] === "userTypeDeleted")
-                                            face.ghost = true
-                                        else if (s.user_id)
-                                            store.userPhoto(store.users[s.user_id], (path) => face.source = path)
-                                        else if (store.chats[s.chat_id]) {
-                                            store.watchPhoto(store.chats[s.chat_id])
-                                            face.source = store.photoPath(store.chats[s.chat_id])
-                                        }
-                                    }
-                                }
-                            }
-                            Item {
-                                id: bubble
-                                y: item.above
-                                x: item.out ? item.width - width - 14 + 4 * item.roundK : (14 + (item.faced ? 40 : 0)) * (1 - item.roundK) + 10 * item.roundK
-                                // the time goes in the last line's corner when it fits there, else under it
-                                readonly property real stampRoom: stamp.implicitWidth + 8
-                                readonly property real tail: item.talk >= 0 && !item.bare ? 42 : 0     // the comments row
-
-                                readonly property bool stampUnder: !item.overlaid && item.lastLine + stampRoom > (item.media ? width : item.most) - 24
-                                width: item.jumbo ? Math.max(body.implicitWidth, stamp.implicitWidth + 12) + 8
-                                     : item.bare ? item.pw : item.media ? item.pw + 6
-                                     : Math.min(item.most, Math.max(body.implicitWidth, who.implicitWidth + (rankText.visible ? rankText.implicitWidth + 11 : 0), quote.visible ? quote.wants : 0,
-                                                                    attach.visible ? attach.width : 0, fwdText.visible ? fwdText.implicitWidth : 0,
-                                                                    item.reacted ? reactRow.wants + stamp.implicitWidth + 6 : 0,
-                                                                    stampUnder ? stamp.implicitWidth : item.lastLine + stampRoom, tail ? 196 : 0) + 24)
-                                height: tail + (item.jumbo ? body.y + body.height + 26
-                                      : item.overlaid ? picture.y + item.ph + (item.bare ? 0 : 3)
-                                      : item.reacted ? reactRow.y + reactRow.height + 6
-                                      : body.y + body.height + (stampUnder ? 24 : 8))
-
-                                Rectangle {     // while the stretched picture loads
-                                    anchors.fill: parent
-                                    visible: !item.bare && shape.status !== Image.Ready
-                                    radius: Prefs.bubbleR
-                                    color: item.out ? Theme.bubbleOut : Theme.bubbleIn
-                                }
-                                BorderImage {   // the bubble, stretched from a small picture (nullgram.py Bubble), drawn
-                                    id: shape       // in device pixels and scaled down: then its borders come out right
-                                    readonly property real d: Screen.devicePixelRatio
-                                    x: item.out ? 0 : -6
-                                    width: (parent.width + 6) * d; height: parent.height * d
-                                    scale: 1 / d; transformOrigin: Item.TopLeft
-                                    readonly property int r: Prefs.bubbleR
-                                    readonly property int b: Prefs.bubbleB
-                                    border { left: (item.out ? r : b + 6) * d; right: (item.out ? b + 6 : r) * d; top: r * d; bottom: b * d }
-                                    source: "image://bubble/" + (item.out ? "out/" : "in/") + (item.first ? "b/" : "s/") + (item.last ? "t/" : "s/")
-                                            + String(item.out ? Theme.bubbleOut : Theme.bubbleIn).slice(1) + "/" + Screen.devicePixelRatio
-                                            + "/" + r + "/" + Prefs.bubbleS
-                                    smooth: true
-                                    visible: !item.bare
-                                }
-
-                                // a long press lifts it into the menu; while pressed it sinks a little (iOS)
-                                MouseArea {
-                                    id: hold
-                                    anchors.fill: parent
-                                    pressAndHoldInterval: 350
-                                    // held: the menu is coming or open and this finger still down -- the list keeps
-                                    // still (page.holding; preventStealing instead left an action lit, pressed, as the
-                                    // menu came), and where it goes and is lifted is the menu's (MessageMenu.track)
-                                    // Only once it has moved: the actions may come up right under a finger that stays.
-                                    property bool held: false
-                                    property bool slid: false
-                                    property point heldAt
-                                    onHeldChanged: page.holding = held
-                                    Component.onDestruction: if (held) page.holding = false
-                                    onPressed: { held = false; rise.stop(); sink.restart() }
-                                    onReleased: (mouse) => {
-                                        sink.stop(); rise.restart()
-                                        if (held && slid) {
-                                            const at = hold.mapToItem(menu, mouse.x, mouse.y)
-                                            menu.lift(at.x, at.y)
-                                        }
-                                        held = false
-                                    }
-                                    onCanceled: { held = false; sink.stop(); rise.restart() }
-                                    onPositionChanged: (mouse) => {
-                                        if (!held)
-                                            return
-                                        slid = slid || Math.hypot(mouse.x - heldAt.x, mouse.y - heldAt.y) > 10
-                                        if (slid) {
-                                            const at = hold.mapToItem(menu, mouse.x, mouse.y)
-                                            menu.track(at.x, at.y)
-                                        }
-                                    }
-                                    onPressAndHold: (mouse) => {
-                                        held = true
-                                        slid = false
-                                        heldAt = Qt.point(mouse.x, mouse.y)
-                                        const at = hold.mapToItem(item, mouse.x, mouse.y)
-                                        page.openMenu(item, item.oneAt(at.x, at.y))
-                                    }
-                                    onClicked: (mouse) => {
-                                        if (item.mosaic) {          // the album's picture under the finger
-                                            const at = hold.mapToItem(picture, mouse.x, mouse.y)
-                                            const t = picLoad.item ? picLoad.item.tileAt(at.x, at.y) : null
-                                            if (t)
-                                                page.tapMedia(t, at.x - t.x, at.y - t.y)
-                                        } else if (item.stacked) {  // the album's file under the finger
-                                            const at = hold.mapToItem(attach, mouse.x, mouse.y)
-                                            const f = stack.item ? stack.item.memberAt(at.x, at.y) : null
-                                            if (f)
-                                                page.tapMedia(f)
-                                        } else if (item.media || item.rowKind) {
-                                            const at = hold.mapToItem(picture, mouse.x, mouse.y)
-                                            page.tapMedia(item, at.x, at.y)
-                                        }
-                                    }
-                                }
-                                ScaleAnimator { id: sink; target: bubble; to: 0.96; duration: 350; easing.type: Easing.OutQuad }
-                                ScaleAnimator { id: rise; target: bubble; to: 1; duration: 150; easing.type: Easing.OutQuad }
-
-                                // how wide the name and the forward line may be: a picture's bubble is as wide as
-                                // the picture, they are cut to it (Telegram-iOS: maximumNodeWidth, the media's);
-                                // a text's grows to them up to `most` (not bubble.width: that is made of them)
-                                readonly property real headRoom: (item.media ? item.pw + 6 : item.most) - 24
-                                Text {          // (not over a sticker, a round video or big emoji: Telegram-iOS's
-                                    id: who     // ChatMessageAnimatedStickerItemNode has no name, the face says who)
-                                    visible: item.sender !== "" && item.first && !item.bare
-                                    x: 12; y: 7
-                                    width: Math.min(implicitWidth, bubble.headRoom - (rankText.visible ? rankText.implicitWidth + 11 : 0))
-                                    elide: Text.ElideRight
-                                    text: item.sender
-                                    color: item.tint
-                                    font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
-                                }
-                                Rectangle {     // the rank's capsule: an admin's and the owner's only (faint, of its colour)
-                                    visible: rankText.visible && item.rankKind > 0
-                                    x: rankText.x - 5; y: rankText.y + rankText.height / 2 - 8.5
-                                    width: rankText.width + 10; height: 17; radius: 8.5
-                                    color: rankText.color
-                                    opacity: 0.1
-                                }
-                                Text {          // on the right, as far as the bubble goes
-                                    id: rankText
-                                    visible: who.visible && item.rank !== ""
-                                    x: bubble.width - 12 - width; y: who.y + 1
-                                    width: Math.min(implicitWidth, bubble.headRoom / 2)
-                                    elide: Text.ElideRight
-                                    text: item.rank
-                                    color: item.rankKind === 2 ? "#956ac8" : item.rankKind === 1 ? "#49a355" : (item.out ? Theme.outMeta : Theme.inMeta)
-                                    font.family: Theme.font; font.pixelSize: 13
-                                }
-                                Loader {        // forwarded: from whom (Telegram-iOS: two lines in the accent colour)
-                                    id: fwdText     // (its implicitWidth: the lines' width, at most headRoom)
-                                    active: item.fwd !== "" && !item.bare
-                                    visible: active
-                                    x: 12; y: who.visible ? who.y + who.height + 1 : 7
-                                    readonly property Item msg: item
-                                    readonly property real room: bubble.headRoom
-                                    // two Texts: one Text of two lines ("…\n…") was not cut by its elide at all,
-                                    // a long channel's name ran out of the bubble
-                                    sourceComponent: Column {
-                                        readonly property Item item: fwdText.msg
-                                        Repeater {
-                                            model: [Tr.t("Uzatilgan xabar"), item.fwd]
-                                            Text {
-                                                required property string modelData
-                                                width: Math.min(implicitWidth, fwdText.room)
-                                                elide: Text.ElideRight
-                                                text: modelData
-                                                color: item.out ? Theme.check : Theme.accent
-                                                lineHeight: 0.95
-                                                font.family: Theme.font; font.pixelSize: 14
-                                            }
-                                        }
-                                    }
-                                }
-                                // the lowest of the name and the forward line: what comes next goes under it
-                                readonly property Item head: fwdText.visible ? fwdText : who
-                                Loader {        // what it answers: a bar, the name, a line of the text; a tap goes there
-                                    id: quote       // (made only for a reply; inside, `item` is the message again: answer's own)
-                                    active: item.replyId !== 0
-                                    visible: active
-                                    readonly property real wants: quote.item ? quote.item.wants : 0
-                                    // a sticker's, an animated emoji's, a round video's or big emoji's (no bubble): at the
-                                    // screen's other edge, level with its top, on the time's dark pill -- Telegram-iOS's
-                                    // ChatMessageAnimatedStickerItemNode (14 pt in from the left of ours, from the right of
-                                    // theirs; 200 pt at most), not over the picture
-                                    readonly property real side: item.out ? bubble.x - 22 : item.width - bubble.x - bubble.width - 22
-                                    x: item.bare ? (item.out ? 14 - bubble.x : item.width - 14 - width - bubble.x) : 8
-                                    y: item.bare ? 8 : bubble.head.visible ? bubble.head.y + bubble.head.height + 4 : 8
-                                    width: item.bare ? Math.max(60, Math.min(wants, 200, side)) : bubble.width - 16
-                                    height: visible ? 40 : 0
-                                    readonly property Item msg: item
-                                    sourceComponent: Rectangle {
-                                        id: answer
-                                        readonly property Item item: quote.msg
-                                        readonly property color ink: item.bare ? "white" : item.out ? Theme.check : Theme.accent
-                                        readonly property real wants: Math.max(quoteWho.implicitWidth, Math.min(quoteWhat.implicitWidth, 220)) + 22
-                                        radius: 6
-                                        // (by a sticker: on the wallpaper, as the time by it)
-                                        color: item.bare ? Qt.rgba(0, 0, 0, 0.4) : Qt.rgba(ink.r, ink.g, ink.b, 0.12)
-                                        clip: true
-                                        Rectangle { width: 3; height: parent.height; color: answer.ink }
-                                        Text {
-                                            id: quoteWho
-                                            x: 11; y: 3
-                                            width: parent.width - 16
-                                            elide: Text.ElideRight
-                                            text: item.quoteName
-                                            color: answer.ink
-                                            font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
-                                        }
-                                        Text {
-                                            id: quoteWhat
-                                            x: 11; y: 20
-                                            width: parent.width - 16
-                                            elide: Text.ElideRight
-                                            maximumLineCount: 1
-                                            // (its emoji as pictures, the text's size: the font's came out small and low)
-                                            textFormat: Text.StyledText
-                                            text: Emo.emojify(page.store.escaped(item.quoteText.replace(/\s+/g, " ")), 16)
-                                            color: item.bare ? "white" : item.out ? Theme.outText : Theme.inText
-                                            font.family: Theme.font; font.pixelSize: 14
-                                        }
-                                        MouseArea { anchors.fill: parent; onClicked: page.jump(item.replyId) }
-                                    }
-                                }
-                                Item {          // the picture: Telegram's blurred preview at once, the picture over it when here
-                                    id: picture
-                                    visible: item.media
-                                    x: item.bare ? 0 : 3
-                                    y: item.bare ? 0 : quote.visible ? quote.y + quote.height + 4 : bubble.head.visible ? bubble.head.y + bubble.head.height + 4 : 3
-                                    width: item.pw; height: visible ? item.ph : 0
-                                    readonly property string corner: item.picKind === "round" ? "-1" : item.bare ? "0" : String(Math.max(1, Prefs.bubbleR - 3))
-                                    // what is in it made only for a message with a picture (a text's row made all of it,
-                                    // two dozen hidden things). Inside, `item` is the message again (block's): the
-                                    // Loader is the context object there, its own `item` would come first
-                                    Loader {
-                                        id: picLoad
-                                        anchors.fill: parent
-                                        active: item.media && !item.tucked      // (an album's others: shown by its main)
-                                        // made a piece at a time over the next frames, not with the row: a row coming
-                                        // into sight in a flick is made there and then, in the frame, and an album's
-                                        // (its tiles, their pictures and veils) was half of its 40-60 ms. Its size is
-                                        // the row's (pw, ph), known at once: nothing moves when it comes.
-                                        asynchronous: true
-                                        readonly property Item msg: item
-                                        sourceComponent: Item {
-                                            id: block
-                                            readonly property Item item: picLoad.msg
-                                            function tileOf(id) {
-                                                for (let k = 0; k < tileRep.count; k++)
-                                                    if (tileRep.itemAt(k) && tileRep.itemAt(k).msgId === id)
-                                                        return tileRep.itemAt(k)
-                                                return null
-                                            }
-                                            function tileAt(x, y) {         // the album's picture there
-                                                const t = tilesView.childAt(x, y)
-                                                return t && t.msgId ? t : null
-                                            }
-                                            function replay(gently) {
-                                                if (moving.item && moving.lottie)
-                                                    moving.item.replay(gently)
-                                            }
-                                            function blow(x, y) {
-                                                if (veil.item)
-                                                    veil.item.blow(x, y)
-                                            }
-                                            Item {      // an album's: each its own picture
-                                                id: tilesView
-                                                visible: item.mosaic
-                                                anchors.fill: parent
-                                                Repeater {
-                                                    id: tileRep
-                                                    model: item.mosaic ? item.tiles.items : []
-                                                    AlbumTile {
-                                                        required property var modelData
-                                                        x: modelData.x; y: modelData.y; width: modelData.w; height: modelData.h
-                                                        msgId: modelData.id
-                                                        corner: modelData.corner
-                                                        cell: page.albumTick, page.albumRev, page.cellOf(modelData.id)
-                                                        live: item.onScreen
-                                                        onUnveiled: page.unveil(msgId)
-                                                        marks: page.picking
-                                                        picking: item.pickable
-                                                        picked: page.picked[modelData.id] !== undefined
-                                                        Component.onCompleted: if (!pic) page.loadPic(msgId)
-                                                    }
-                                                }
-                                            }
-                                            Image {
-                                                anchors.fill: parent
-                                                visible: item.mini !== "" && full.status !== Image.Ready && !item.mosaic
-                                                asynchronous: true
-                                                // (in points: Qt asks the provider for these times the pixel ratio)
-                                                sourceSize: Qt.size(12, 12 * item.ph / item.pw)     // blurred: small is enough
-                                                source: item.mini ? "image://pic/" + picture.corner + "/" + Math.round(item.pw) + "/mini/" + item.mini : ""
-                                                smooth: true
-                                            }
-                                            Image {
-                                                id: full
-                                                anchors.fill: parent
-                                                asynchronous: true
-                                                sourceSize: Qt.size(Math.round(item.pw), Math.round(item.ph))
-                                                source: item.pic && !item.mosaic ? "image://pic/" + picture.corner + "/" + Math.round(item.pw) + "/" + item.pic : ""
-                                                opacity: status === Image.Ready && !moving.covers ? 1 : 0
-                                                Behavior on opacity { OpacityAnimator { duration: 150 } }
-                                            }
-                                            Loader {        // a GIF (or a video sticker) over and over; a round video tapped, once with sound
-                                                id: moving
-                                                anchors.fill: parent
-                                                readonly property bool round: block.item.picKind === "round"
-                                                readonly property var msgId: block.item.msgId
-                                                active: block.item.path !== "" && page.visible && block.item.inSight && !block.item.mosaic && !block.item.veiled &&
-                                                        ((block.item.picKind === "gif" && Prefs.gifs) || (round && page.roundId === block.item.msgId) ||
-                                                         (block.item.anim && (block.item.emo !== "" ? Prefs.emoji : Prefs.stickers)))
-                                                // (handed through here: inside sourceComponent `item` is not the delegate)
-                                                readonly property string file: block.item.path
-                                                // paused, not taken apart, under the gallery: made anew all at once as it
-                                                // closed they held up the frames of its flight back
-                                                readonly property bool playing: !viewer.open && (round || block.item.onScreen)
-                                                // a TGS sticker (TDLib keeps it as .tgs): its frames drawn here, not a video
-                                                readonly property bool lottie: /\.tgs$/i.test(file)
-                                                readonly property bool emo: block.item.emo !== ""
-                                                // (its still under it goes once a frame is up: the frames are see-through)
-                                                readonly property bool covers: lottie && !!item && item.shown === true
-                                                sourceComponent: lottie ? lottiePlayer : videoPlayer
-                                                Component {
-                                                    id: videoPlayer
-                                                    InlineVideo {
-                                                        id: clip
-                                                        path: moving.file
-                                                        running: moving.round ? block.item.roundShown && !page.player.roundPaused : moving.playing
-                                                        resumeFrom: moving.round ? (() => page.player.roundPos) : null
-                                                        radius: Number(picture.corner)
-                                                        sound: moving.round
-                                                        loop: !moving.round
-                                                        rate: moving.round ? page.player.rate : 1
-                                                        onEnded: if (moving.round && page.roundId === moving.msgId) page.player.step(false)
-                                                        // (how far it is: the mini player's line, the ring, the time)
-                                                        Binding { when: moving.round && clip.running; target: page.player; property: "roundPos"; value: clip.position }
-                                                        Binding { when: moving.round && clip.duration > 0; target: page.player; property: "roundDur"; value: clip.duration }
-                                                    }
-                                                }
-                                                Component {
-                                                    id: lottiePlayer
-                                                    Lottie {
-                                                        path: moving.file
-                                                        running: moving.playing
-                                                        once: moving.emo
-                                                        fitz: block.item.fitz
-                                                        // (played once already in this chat: on its last frame, as on iOS)
-                                                        atEnd: moving.emo && !!page.seenEmo[block.item.msgId]
-                                                        onEnded: page.seenEmo[block.item.msgId] = true
-                                                    }
-                                                }
-                                            }
-                                            Loader {        // a round video playing: how far, an arc round its edge (Telegram-iOS's
-                                                id: roundRing   // InstantVideoRadialStatusNode: white 0.6, 4 wide, round ends, from the top,
-                                                anchors.fill: parent    // its circle 1.5 + 2 + 4 in; seen 0.15 s after it starts, faded in 0.2 s)
-                                                active: block.item.roundBig
-                                                readonly property Item msg: block.item
-                                                sourceComponent: Shape {
-                                                    preferredRendererType: Shape.CurveRenderer
-                                                    opacity: 0
-                                                    SequentialAnimation on opacity {
-                                                        PauseAnimation { duration: 150 }
-                                                        NumberAnimation { to: 1; duration: 200 }
-                                                    }
-                                                    ShapePath {
-                                                        fillColor: "transparent"
-                                                        strokeColor: Qt.rgba(1, 1, 1, 0.6)
-                                                        strokeWidth: 4
-                                                        capStyle: ShapePath.RoundCap
-                                                        PathAngleArc {
-                                                            centerX: roundRing.width / 2; centerY: roundRing.height / 2
-                                                            radiusX: (roundRing.width - 15) / 2; radiusY: radiusX
-                                                            startAngle: -90
-                                                            sweepAngle: page.player.duration > 0 ? 360 * Math.min(1, page.player.position / page.player.duration) : 0
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Loader {        // a spoiler: blurred under its dust until tapped (the play button and
-                                                id: veil        // the length stay over it, as Telegram-iOS has them)
-                                                anchors.fill: parent
-                                                active: block.item.veiled && !block.item.mosaic
-                                                readonly property Item msg: block.item     // (inside sourceComponent `item` is the Loader's own)
-                                                sourceComponent: Veil {
-                                                    corner: picture.corner
-                                                    mini: veil.msg.mini
-                                                    pic: veil.msg.pic
-                                                    live: veil.msg.onScreen
-                                                    onGone: page.unveil(veil.msg.msgId)
-                                                }
-                                            }
-                                            Rectangle {     // a video: play over it (the ring while it comes); a GIF: the ring
-                                                visible: !item.mosaic && (item.got >= 0 || item.picKind === "video" || (item.picKind === "gif" && !item.path)
-                                                                            || (item.picKind === "round" && (page.roundId !== item.msgId || page.player.roundPaused)))
-                                                anchors.centerIn: parent
-                                                width: 48; height: 48; radius: 24
-                                                color: Qt.rgba(0, 0, 0, 0.45)
-                                                Icon {
-                                                    visible: item.got < 0
-                                                    anchors.centerIn: parent
-                                                    anchors.horizontalCenterOffset: name === "play" ? 1.5 : 0
-                                                    width: 24; height: 24
-                                                    name: item.path || item.picKind === "video" ? "play" : "down"
-                                                    color: "white"
-                                                }
-                                                Ring {
-                                                    visible: item.got >= 0
-                                                    anchors.fill: parent
-                                                    value: item.got
-                                                }
-                                            }
-                                            Loader {    // a place: the pin at the map's middle (its point there); live: a dot, pulsing
-                                                id: pin
-                                                active: block.item.picKind === "map"
-                                                anchors.fill: parent
-                                                readonly property Item msg: block.item
-                                                sourceComponent: Item {
-                                                    readonly property Item item: pin.msg
-                                                    readonly property bool live: item.dur > 0 && (item.dur === 0x7FFFFFFF || item.dur > page.now)
-                                                    Icon {
-                                                        visible: !parent.live
-                                                        x: (parent.width - width) / 2; y: parent.height / 2 - height + 3
-                                                        width: 40; height: 40
-                                                        name: "place"
-                                                        color: Theme.danger
-                                                    }
-                                                    Rectangle {
-                                                        visible: parent.live
-                                                        anchors.centerIn: parent
-                                                        width: 44; height: 44; radius: 22
-                                                        color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.25)
-                                                        SequentialAnimation on scale {
-                                                            running: parent.visible && item.onScreen; loops: Animation.Infinite
-                                                            ScaleAnimator { from: 0.6; to: 1.2; duration: 1000; easing.type: Easing.OutQuad }
-                                                            ScaleAnimator { from: 1.2; to: 0.6; duration: 1000; easing.type: Easing.InQuad }
-                                                        }
-                                                    }
-                                                    Rectangle {
-                                                        visible: parent.live
-                                                        anchors.centerIn: parent
-                                                        width: 16; height: 16; radius: 8
-                                                        color: Theme.accent
-                                                        border.color: "white"; border.width: 2.5
-                                                    }
-                                                }
-                                            }
-                                            Loader {    // (made only for a video's, a GIF's: not for every photo's)
-                                                id: lenTag
-                                                // (`block.item`: on a Loader, `item` is its own)
-                                                active: !block.item.mosaic && (block.item.picKind === "video" || block.item.picKind === "gif" || block.item.picKind === "round"
-                                                                               || (block.item.picKind === "map" && block.item.dur > 0))
-                                                // a round video's at its foot on the left; big: its middle − 81 (Telegram-iOS: − 56 − 25)
-                                                x: 6 + (block.item.picKind === "round" ? block.item.roundK * (parent.width / 2 - 87) : 0)
-                                                y: block.item.picKind === "round" ? parent.height - 26 : 6
-                                                readonly property Item msg: block.item
-                                                sourceComponent: Rectangle {
-                                                    readonly property Item item: lenTag.msg
-                                                    // a round video not yet watched: a dot after its length (Telegram-iOS)
-                                                    readonly property bool fresh: item.picKind === "round" && !item.heard
-                                                    width: len.implicitWidth + 12 + (fresh ? 9 : 0); height: 20; radius: 10
-                                                    color: Qt.rgba(0, 0, 0, 0.45)
-                                                    Rectangle {
-                                                        visible: parent.fresh
-                                                        x: len.x + len.implicitWidth + 4; anchors.verticalCenter: parent.verticalCenter
-                                                        width: 5; height: 5; radius: 2.5
-                                                        color: "white"
-                                                    }
-                                                    Text {
-                                                        id: len
-                                                        x: 6; anchors.verticalCenter: parent.verticalCenter
-                                                        text: item.picKind === "map" ? page.liveLeft(item.dur)
-                                                            : item.picKind === "gif" ? "GIF" : page.clock(item.roundBig ? Math.floor(page.player.position / 1000) : item.dur)
-                                                              + (item.picKind === "video" && !item.path && item.fileSize ? " · " + store.size(item.fileSize) : "")
-                                                        color: "white"
-                                                        font.family: Theme.font; font.pixelSize: 12
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Item {          // a voice note, a song or a file
-                                    id: attach
-                                    visible: item.rowKind !== ""
-                                    x: 12
-                                    y: quote.visible ? quote.y + quote.height + 6 : bubble.head.visible ? bubble.head.y + bubble.head.height + 4 : 6
-                                    width: item.stacked ? (stack.item ? stack.item.width : 0)
-                                         : item.rowKind === "file" ? (fileRow.item ? fileRow.item.width : 0)
-                                         : item.rowKind === "poll" ? Math.min(item.most - 24, 300) : 230
-                                    height: !visible ? 0 : item.stacked ? (stack.item ? stack.item.height : 0)
-                                          : item.rowKind === "poll" ? (pollRow.item ? pollRow.item.height : 0) : 50
-                                    // made only for such a message (each row made both: a voice note's 43 bars
-                                    // for every message made while scrolling). The message handed through
-                                    // `msg`: inside sourceComponent `item` is the Loader's own (null, then the row)
-                                    Loader {
-                                        id: audioRow
-                                        active: !item.stacked && !item.tucked && (item.rowKind === "voice" || item.rowKind === "audio")
-                                        readonly property Item msg: item
-                                        sourceComponent: AudioRow {
-                                            kind: audioRow.msg.rowKind === "audio" ? "audio" : "voice"
-                                            out: audioRow.msg.out
-                                            wave: audioRow.msg.wave
-                                            dur: audioRow.msg.dur
-                                            title: audioRow.msg.title
-                                            sub: audioRow.msg.sub
-                                            got: audioRow.msg.got
-                                            here: audioRow.msg.path !== ""
-                                            current: page.soundId === audioRow.msg.msgId
-                                            playing: current && page.player.playing
-                                            at: current ? page.player.position : 0
-                                            fresh: !audioRow.msg.heard
-                                        }
-                                    }
-                                    Loader {
-                                        id: pollRow
-                                        active: !item.tucked && item.rowKind === "poll" && item.poll !== ""
-                                        readonly property Item msg: item
-                                        sourceComponent: PollView {
-                                            width: attach.width
-                                            out: pollRow.msg.out
-                                            poll: JSON.parse(pollRow.msg.poll)
-                                            onVote: (ids) => page.vote(pollRow.msg.msgId, ids)
-                                            onVoters: page.showVoters(pollRow.msg.msgId, poll)
-                                            onExplain: (t) => page.toast(t)
-                                            onHeld: page.openMenu(pollRow.msg)
-                                        }
-                                    }
-                                    Loader {
-                                        id: fileRow
-                                        active: !item.stacked && !item.tucked && item.rowKind === "file"
-                                        readonly property Item msg: item
-                                        sourceComponent: FileRow {
-                                            out: fileRow.msg.out
-                                            name: fileRow.msg.fileName
-                                            size: fileRow.msg.fileSize
-                                            got: fileRow.msg.got
-                                            here: fileRow.msg.path !== ""
-                                            thumb: fileRow.msg.pic
-                                        }
-                                    }
-                                    Loader {        // files or songs sent together: each under the one before, its
-                                        id: stack   // caption under it, as Telegram-iOS stacks them in one bubble
-                                        active: item.stacked
-                                        readonly property Item msg: item
-                                        sourceComponent: Column {
-                                            id: files
-                                            readonly property Item item: stack.msg
-                                            spacing: 6
-                                            // the last caption's last line (0: the last has none): the time goes by it
-                                            readonly property real last: {
-                                                const f = members.count ? members.itemAt(members.count - 1) : null
-                                                return f ? f.lastLine : 0
-                                            }
-                                            function memberOf(id) {
-                                                for (let k = 0; k < members.count; k++)
-                                                    if (members.itemAt(k) && members.itemAt(k).msgId === id)
-                                                        return members.itemAt(k)
-                                                return null
-                                            }
-                                            function memberAt(x, y) {
-                                                const f = childAt(x, y)
-                                                return f && f.msgId ? f : null
-                                            }
-                                            Repeater {
-                                                id: members
-                                                model: item.group ? item.group.ids : []     // (oldest first: the top)
-                                                Item {
-                                                    id: member
-                                                    required property var modelData
-                                                    readonly property var msgId: modelData
-                                                    readonly property var cell: (page.albumTick, page.albumRev, page.cellOf(modelData))
-                                                    // what tapMedia and openMedia ask of a message's file
-                                                    readonly property string rowKind: cell ? cell.rowKind : ""
-                                                    readonly property string picKind: ""
-                                                    readonly property bool media: false
-                                                    readonly property bool veiled: false
-                                                    readonly property real got: cell ? cell.got : -1
-                                                    readonly property string path: cell ? cell.path : ""
-                                                    readonly property bool sending: cell ? cell.sending : false
-                                                    readonly property Item face: member
-                                                    readonly property bool worded: !!cell && (cell.text !== "" || cell.rich !== "")
-                                                    readonly property real lastLine: worded ? caption.last : 0
-                                                    width: Math.max(rowKind === "file" ? (fileOne.item ? fileOne.item.width : 200) : 230,
-                                                                    worded ? caption.width : 0)
-                                                    height: 50 + (worded ? caption.height + 4 : 0)
-                                                    Loader {
-                                                        id: songOne
-                                                        active: member.rowKind === "audio"
-                                                        sourceComponent: AudioRow {
-                                                            kind: "audio"
-                                                            out: member.cell.out
-                                                            dur: member.cell.dur
-                                                            title: member.cell.title
-                                                            sub: member.cell.sub
-                                                            got: member.cell.got
-                                                            here: member.cell.path !== ""
-                                                            current: page.soundId === member.msgId
-                                                            playing: current && page.player.playing
-                                                            at: current ? page.player.position : 0
-                                                        }
-                                                    }
-                                                    Loader {
-                                                        id: fileOne
-                                                        active: member.rowKind === "file"
-                                                        sourceComponent: FileRow {
-                                                            out: member.cell.out
-                                                            name: member.cell.fileName
-                                                            size: member.cell.fileSize
-                                                            got: member.cell.got
-                                                            here: member.cell.path !== ""
-                                                            thumb: member.cell.pic
-                                                        }
-                                                    }
-                                                    Loader {        // «Tanlash»'s mark over the icon's corner (iOS: 20 pt at 29, 26)
-                                                        active: page.picking
-                                                        x: 29; y: 26
-                                                        sourceComponent: Check {
-                                                            width: 20; height: 20
-                                                            on: files.item.pickable
-                                                            checked: page.picked[member.msgId] !== undefined
-                                                            hollow: files.item.out ? Theme.bubbleOut : Theme.bubbleIn
-                                                            ring: Theme.grey
-                                                            ringChecked: files.item.out ? Theme.bubbleOut : Theme.bubbleIn
-                                                        }
-                                                    }
-                                                    Words {
-                                                        id: caption
-                                                        visible: member.worded
-                                                        y: 54
-                                                        width: Math.min(implicitWidth, item.most - 24)
-                                                        room: item.most - 24
-                                                        size: Prefs.chatSize
-                                                        live: item.onScreen
-                                                        text: member.worded ? member.cell.text : ""
-                                                        parts: member.worded ? member.cell.rich : ""
-                                                        ink: item.out ? Theme.outText : Theme.inText
-                                                        tint: item.out ? Theme.check : Theme.accent
-                                                        open: !!page.unfolded[member.msgId]
-                                                        onLink: (url) => page.follow(url, member.msgId)
-                                                        onTouched: (down) => { if (down) { rise.stop(); sink.restart() } else { sink.stop(); rise.restart() } }
-                                                        onHeld: page.openMenu(item, member.msgId)
-                                                        onTapped: page.tapMedia(member)
-                                                        onFold: page.unfold(member.msgId)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Words {
-                                    id: body
-                                    visible: !item.overlaid
-                                    x: item.jumbo ? 4 : 12
-                                    y: item.media ? picture.y + picture.height + 5 : attach.visible ? attach.y + attach.height + (text || parts ? 4 : 0)
-                                     : quote.visible && !item.bare ? quote.y + quote.height + 4 : bubble.head.visible ? bubble.head.y + bubble.head.height + 2 : item.jumbo ? 0 : 8
-                                    height: (attach.visible || item.media) && !text && !parts ? 0 : implicitHeight
-                                    width: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.width, Math.min(implicitWidth, item.most - 24))
-                                         : Math.min(implicitWidth, item.most - 24)
-                                    live: item.onScreen
-                                    room: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.width, item.most - 24) : item.most - 24
-                                    text: item.stacked ? "" : (item.kind ? "[" + item.kind + "] " : "") + item.text     // (a stack has each caption under its file)
-                                    parts: item.kind || item.stacked ? "" : item.rich
-                                    ink: item.out ? Theme.outText : Theme.inText
-                                    tint: item.out ? Theme.check : Theme.accent
-                                    size: item.jumbo === 1 ? 94 : item.jumbo === 2 ? 79 : item.jumbo === 3 ? 65 : Prefs.chatSize    // (Telegram-iOS: 94 × 1, 0.84, 0.69; words: Matn o'lchami)
-                                    open: !!page.unfolded[item.msgId]
-                                    onLink: (url) => page.follow(url, item.msgId)
-                                    onTouched: (down) => { if (down) { rise.stop(); sink.restart() } else { sink.stop(); rise.restart() } }
-                                    onHeld: page.openMenu(item)
-                                    onTapped: if (!item.mosaic && (item.media || item.rowKind)) page.tapMedia(item)
-                                    onFold: page.unfold(item.msgId)
-                                }
-                                Loader {        // the reactions: emoji and how many, ours lit; a tap puts ours on or off.
-                                    id: reactRow    // More than a line holds go on to the next, the time by the last (Telegram-iOS)
-                                    active: item.reacted        // (made only when there are; its height is the Flow's)
-                                    visible: active
-                                    x: item.bare ? 0 : 10
-                                    y: body.y + body.height + (body.height ? 6 : 4)
-                                    readonly property real wants: item.reactList.reduce((w, r, k) =>
-                                        w + page.chipWidth(r) + (k ? 4 : 0), 0)
-                                    width: Math.min(wants + 1, bubble.width - x - 10)
-                                    readonly property Item msg: item
-                                    sourceComponent: Flow {
-                                        readonly property Item item: reactRow.msg
-                                        // the time by the last line, or under it when that line has no room
-                                        property bool stampBelow: false
-                                        onPositioningComplete: {
-                                            const last = children.length > 1 ? children[children.length - 2] : null     // (the Repeater is last)
-                                            stampBelow = !!last && last.x + last.width + stamp.implicitWidth + 12 > bubble.width - reactRow.x - 10
-                                        }
-                                        height: implicitHeight + (stampBelow ? 18 : 0)
-                                        spacing: 4
-                                        Repeater {
-                                            model: item.reactList
-                                            Rectangle {
-                                                id: chip
-                                                required property var modelData
-                                                readonly property bool isPaid: !!modelData.paid
-                                                readonly property var who: modelData.who || []
-                                                width: page.chipWidth(modelData); height: 28; radius: 14
-                                                readonly property color ink: item.bare ? "white" : item.out ? Theme.check : Theme.accent
-                                                readonly property color goldInk: Theme.dark ? "#ffc337" : "#c87000"
-                                                // paid star reaction chip: gold translucent (unchosen) or solid warm gold (chosen)
-                                                // regular chip: accent translucent or solid; standalone over wallpaper on dayPill
-                                                color: isPaid ? (modelData.mine ? "#f59300" : Qt.rgba(1, 0.72, 0.05, item.bare ? 0.45 : 0.22))
-                                                     : modelData.mine ? ink : item.bare ? Theme.dayPill : Qt.rgba(ink.r, ink.g, ink.b, 0.15)
-                                                border.width: isPaid && modelData.mine ? 1 : 0
-                                                border.color: "#ffd43b"
-                                                Icon {
-                                                    id: starGlyph
-                                                    visible: chip.isPaid
-                                                    x: 8; anchors.verticalCenter: parent.verticalCenter
-                                                    width: 16; height: 16
-                                                    name: "star"
-                                                    color: chip.modelData.mine ? "white" : "#ffb10a"
-                                                }
-                                                Text {
-                                                    id: chipText
-                                                    visible: !chip.isPaid
-                                                    anchors.centerIn: chip.who.length ? undefined : parent
-                                                    x: 8; anchors.verticalCenter: parent.verticalCenter
-                                                    text: chip.who.length ? chip.modelData.e : chip.modelData.e + " " + chip.modelData.n
-                                                    color: chip.modelData.mine ? (item.bare ? "#1c1c1e" : Theme.dark && item.out ? Theme.bubbleOut : "white") : chip.ink
-                                                    font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
-                                                }
-                                                // top paid reactors (20 pt) OR regular reactors (24 pt)
-                                                Repeater {
-                                                    model: chip.who
-                                                    Rectangle {
-                                                        required property var modelData
-                                                        required property int index
-                                                        readonly property int sz: chip.isPaid ? 20 : 24
-                                                        readonly property int step: chip.isPaid ? 10 : 12
-                                                        x: (chip.isPaid ? starGlyph.x + starGlyph.width + 4 : chipText.x + chipText.implicitWidth + 4) + index * step - 1.5
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                        z: chip.who.length - index      // (over the chip: below 0 it went under its colour)
-                                                        width: sz + 3; height: sz + 3; radius: width / 2
-                                                        // (the chip's colour over the bubble's, whole: a see-through ring would show the face under it)
-                                                        color: chip.modelData.mine || item.bare ? chip.color
-                                                             : Qt.tint(item.out ? Theme.bubbleOut : Theme.bubbleIn, chip.color)
-                                                        Avatar {
-                                                            id: reactor
-                                                            anchors.centerIn: parent
-                                                            width: parent.sz; height: parent.sz
-                                                            Component.onCompleted: store.faceOn(reactor, parent.modelData)
-                                                        }
-                                                    }
-                                                }
-                                                Text {
-                                                    visible: chip.isPaid
-                                                    x: starGlyph.x + starGlyph.width + (chip.who.length ? 4 + 20 + (chip.who.length - 1) * 10 : 0) + 4
-                                                    anchors.verticalCenter: parent.verticalCenter
-                                                    text: store.short(chip.modelData.n)
-                                                    color: chip.modelData.mine ? "white" : chip.goldInk
-                                                    font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
-                                                }
-                                            }
-                                        }
-                                    }
-                                    MouseArea {     // one for all the chips: the one under the finger
-                                        anchors.fill: parent
-                                        onClicked: (mouse) => {
-                                            const c = reactRow.item && reactRow.item.childAt(mouse.x, mouse.y)
-                                            if (!c || !c.modelData)
-                                                return
-                                            if (c.modelData.paid)
-                                                paidSheet.show(item.reactId, c.modelData.reactors || [], !!c.modelData.mine)
-                                            else
-                                                store.react(page.chatId, item.reactId, c.modelData.e, !c.modelData.mine)
-                                        }
-                                    }
-                                }
-                                Rectangle {     // under the time when it is over a picture, or on the wallpaper (a sticker's)
-                                    visible: item.overlaid || item.jumbo > 0 || item.bare
-                                    anchors.fill: stamp; anchors.margins: -3; anchors.leftMargin: -6; anchors.rightMargin: -6
-                                    radius: height / 2
-                                    color: Qt.rgba(0, 0, 0, 0.4)
-                                }
-                                Row {           // the time: 📌, 👁 views, ↩ answers, edited, when, ✓ (Telegram-iOS's order)
-                                    id: stamp
-                                    anchors.right: parent.right; anchors.rightMargin: item.overlaid || item.jumbo ? (item.bare ? 8 : 12) : 10
-                                    anchors.bottom: parent.bottom; anchors.bottomMargin: bubble.tail + (item.overlaid || item.jumbo ? (item.bare ? 6 : 10) : 6)
-                                    spacing: 2
-                                    readonly property color ink: item.overlaid || item.jumbo || item.bare ? "white" : item.out ? Theme.outMeta : Theme.inMeta
-                                    Loader {        // (made only when there are any)
-                                        id: counts
-                                        active: item.views > 0 || item.replies > 0
-                                        visible: active
-                                        readonly property Item msg: item
-                                        sourceComponent: Row {
-                                            readonly property Item item: counts.msg
-                                            spacing: 2
-                                            Icon {
-                                                visible: item.views > 0
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                width: 14; height: 14
-                                                name: "eye"; color: stamp.ink
-                                            }
-                                            Text {
-                                                visible: item.views > 0
-                                                text: store.short(item.views) + " "
-                                                color: stamp.ink
-                                                font.family: Theme.font; font.pixelSize: 12
-                                            }
-                                            Icon {
-                                                visible: item.replies > 0
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                width: 13; height: 13
-                                                name: "reply"; color: stamp.ink
-                                            }
-                                            Text {
-                                                visible: item.replies > 0
-                                                text: item.replies + " "
-                                                color: stamp.ink
-                                                font.family: Theme.font; font.pixelSize: 12
-                                            }
-                                        }
-                                    }
-                                    Text {
-                                        textFormat: Text.StyledText
-                                        text: (item.isPinned ? "📌 " : "") + (item.edited ? Tr.t("tahrirlandi") + " " : "") + item.time +
-                                              (item.out ? (item.sending ? " ◷" : " <font color='" + (item.overlaid || item.jumbo ? "white" : Theme.check) + "'>" + (item.msgId <= page.readUpTo ? "✓✓" : "✓") + "</font>") : "")
-                                        color: stamp.ink
-                                        font.family: Theme.font; font.pixelSize: 12
-                                    }
-                                }
-                                Loader {        // a channel post's comments: how many, a tap opens them (made only for such a post)
-                                    id: talkRow
-                                    active: bubble.tail > 0
-                                    anchors.bottom: parent.bottom
-                                    width: parent.width; height: bubble.tail
-                                    readonly property Item msg: item
-                                    sourceComponent: Item {
-                                        readonly property Item item: talkRow.msg
-                                        Rectangle { x: 12; width: parent.width - 24; height: 1; color: Theme.fieldBorder }
-                                        Icon {
-                                            x: 10; anchors.verticalCenter: parent.verticalCenter
-                                            name: "chats"; color: Theme.accent; scale: 0.8
-                                        }
-                                        Text {
-                                            x: 40; anchors.verticalCenter: parent.verticalCenter
-                                            text: item.talk > 0 ? Tr.n("%1 ta izoh", item.talk) : Tr.t("Izoh qoldirish")
-                                            color: Theme.accent
-                                            font.family: Theme.font; font.pixelSize: 15
-                                        }
-                                        Text {
-                                            anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
-                                            text: "›"
-                                            color: Theme.accent
-                                            font.family: Theme.font; font.pixelSize: 22
-                                        }
-                                        MouseArea { anchors.fill: parent; onClicked: page.openComments(item.talkId) }
-                                    }
-                                }
-                            }
-                            Loader {            // beside a channel's post: send it on (as Telegram has it; made only in a channel)
-                                id: share
-                                active: page.channel && !item.out
-                                x: bubble.x + bubble.width + 8
-                                y: bubble.y + bubble.height - bubble.tail - height
-                                width: 32; height: 32
-                                readonly property Item msg: item
-                                sourceComponent: Rectangle {
-                                    readonly property Item item: share.msg
-                                    radius: 16
-                                    color: Qt.rgba(0, 0, 0, 0.22)
-                                    Icon { anchors.centerIn: parent; name: "forward"; color: "white"; scale: 0.72 }
-                                    MouseArea {
-                                        anchors.fill: parent; anchors.margins: -6
-                                        onClicked: { page.forwarding = item.ids; forwardSheet.show() }
-                                    }
-                                }
-                            }
-                        }
-                        Loader {             // «Tanlash»: its circle, filled and ticked once picked (made while picking and as it goes)
-                            id: circle
-                            active: page.picking
-                            readonly property Item msg: item
-                            sourceComponent: Rectangle {
-                                readonly property Item item: circle.msg
-                                // in from the left once made: Behaviors move nothing until the row is complete
-                                property bool shown: false
-                                Component.onCompleted: Qt.callLater(() => shown = Qt.binding(() => item.pickable))
-                                visible: opacity > 0
-                                opacity: shown ? 1 : 0
-                                x: shown ? 12 : -16
-                                y: item.above + (bubble.height - height) / 2
-                                width: 26; height: 26; radius: 13
-                                color: item.isPicked ? Theme.accent : Qt.rgba(0, 0, 0, 0.12)
-                                border.color: item.isPicked ? Theme.accent : "white"; border.width: 1.5
-                                Behavior on x { NumberAnimation { duration: 420; easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring } }
-                                Behavior on opacity { NumberAnimation { duration: 200 } }
-                                Icon { visible: item.isPicked; anchors.centerIn: parent; width: 18; height: 18; name: "check"; color: "white" }
-                            }
-                        }
-                        MouseArea {          // while picking a tap anywhere on its row picks it (or puts it back);
-                            anchors.fill: parent    // on one of an album's pictures or files, that one alone
-                            visible: item.pickable
-                            onClicked: (mouse) => {
-                                const one = item.oneAt(mouse.x, mouse.y)
-                                page.pick(one ? [one] : item.ids)
-                            }
-                        }
-                        XAnimator { id: flyX; target: mover; to: 0; duration: 300; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.23, 1.0, 0.32, 1.0, 1.0, 1.0] }
-                        YAnimator { id: flyY; target: mover; to: 0; duration: 300; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.19919, 0.01064, 0.27921, 0.91025, 1.0, 1.0] }
-                        // start where the text was in the field. Called before the list scrolls to this on
-                        // the same vertical curve: the two together make one path from there to rest.
-                        function flyFrom(from) {
-                            const here = body.mapToItem(page, 0, 0)
-                            mover.x = from.x - here.x
-                            mover.y = from.y - here.y
-                            page.lift = true
-                            landed.restart()
-                            flyX.start()
-                            flyY.start()
-                        }
-                    }
+                    readonly property Item rowShell: shell
+                    sourceComponent: shell.said !== "" ? saidRowComp
+                                   : shell.simpleText ? simpleTextRowComp
+                                   : msgRowComp
+                    onLoaded: if (item && item.initRow) item.initRow()
                 }
             }
         }
@@ -3665,6 +2974,12 @@ Page {
             MouseArea {
                 anchors.fill: parent; anchors.margins: -6
                 onClicked: {
+                    if (page.backTo.length) {
+                        const back = page.backTo[page.backTo.length - 1]
+                        page.backTo = page.backTo.slice(0, -1)
+                        page.goTo(back)
+                        return
+                    }
                     if (page.gap) {
                         page.fresh()
                         return
@@ -3785,7 +3100,7 @@ Page {
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
                         text: page.directTopic ? store.title(page.chat) + " · " + Tr.t("Kanalga xabarlar")
-                            : page.thread ? page.threadOf : (store.seen, page.now, store.status(page.chat, page.now))     // (re-read when either changes)
+                            : page.thread ? page.threadOf : (store.seen, store.acting, page.now, store.status(page.chat, page.now))     // (re-read when either changes)
                         visible: text !== "" && !page.selecting
                         color: text === Tr.t("onlayn") || text.endsWith("...") ? Theme.accent : Theme.grey
                         font.family: Theme.font; font.pixelSize: 12
@@ -3801,9 +3116,9 @@ Page {
                     if (page.thread)
                         page.focusFind()
                     else if (page.directTopic && page.directSender && page.directSender["@type"] === "messageSenderUser")
-                        store.chatWith(page.directSender.user_id, (id) => page.nav.push(infoPage, { chatId: id, chatPage: page }))
+                        store.chatWith(page.directSender.user_id, (id) => page.openInfo(id))
                     else
-                        page.nav.push(infoPage, { chatId: page.chatId, chatPage: page })
+                        page.openInfo(page.chatId)
                 }
             }
             Glass {          // channel admin's DM inbox shortcut (with unread count badge)
@@ -3922,40 +3237,42 @@ Page {
             }
         }
 
-        Rectangle {          // searching: under the messages, which one of how many, ↑ older ↓ newer
+        Loader {             // searching: under the messages, which one of how many, ↑ older ↓ newer
             id: findBar
             z: 2
-            visible: page.searching
+            active: page.searching
             anchors.bottom: parent.bottom
             transform: Translate { y: -page.barLift }
-            width: parent.width; height: 52
-            color: Theme.bar
-            MouseArea { anchors.fill: parent }
-            Rectangle { y: parent.height; width: parent.width; height: page.barLift - page.kb; color: Theme.bar }    // on to the edge
-            Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
-            Row {
-                x: 8; anchors.verticalCenter: parent.verticalCenter
-                Repeater {
-                    model: [{ g: "⌃", d: 1 }, { g: "⌄", d: -1 }]
-                    Text {
-                        required property var modelData
-                        readonly property int to: page.hit + modelData.d
-                        readonly property bool can: to >= 0 && to < page.hits.length
-                        width: 44; height: 44
-                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                        text: modelData.g
-                        color: can ? Theme.accent : Theme.grey
-                        font.family: Theme.font; font.pixelSize: 26; font.weight: Font.DemiBold
-                        MouseArea { anchors.fill: parent; enabled: parent.can; onClicked: page.showHit(parent.to) }
+            width: parent.width; height: active ? 52 : 0
+            sourceComponent: Rectangle {
+                color: Theme.bar
+                MouseArea { anchors.fill: parent }
+                Rectangle { y: parent.height; width: parent.width; height: page.barLift - page.kb; color: Theme.bar }    // on to the edge
+                Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+                Row {
+                    x: 8; anchors.verticalCenter: parent.verticalCenter
+                    Repeater {
+                        model: [{ g: "⌃", d: 1 }, { g: "⌄", d: -1 }]
+                        Text {
+                            required property var modelData
+                            readonly property int to: page.hit + modelData.d
+                            readonly property bool can: to >= 0 && to < page.hits.length
+                            width: 44; height: 44
+                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                            text: modelData.g
+                            color: can ? Theme.accent : Theme.grey
+                            font.family: Theme.font; font.pixelSize: 26; font.weight: Font.DemiBold
+                            MouseArea { anchors.fill: parent; enabled: parent.can; onClicked: page.showHit(parent.to) }
+                        }
                     }
                 }
-            }
-            Text {
-                anchors.centerIn: parent
-                text: page.hits.length ? Tr.f("%1 tadan %2", store.count(page.hits.length), page.hit + 1)
-                    : page.searched ? Tr.t("Hech narsa topilmadi") : ""
-                color: Theme.text
-                font.family: Theme.font; font.pixelSize: 15
+                Text {
+                    anchors.centerIn: parent
+                    text: page.hits.length ? Tr.f("%1 tadan %2", store.count(page.hits.length), page.hit + 1)
+                        : page.searched ? Tr.t("Hech narsa topilmadi") : ""
+                    color: Theme.text
+                    font.family: Theme.font; font.pixelSize: 15
+                }
             }
         }
 
@@ -4018,7 +3335,7 @@ Page {
                     MouseArea {
                         id: askHit
                         anchors.fill: parent
-                        onClicked: page.nav.push(joinPage, { chatId: page.chatId })
+                        onClicked: page.openJoinRequests()
                     }
                     Icon {
                         anchors.right: parent.right; anchors.rightMargin: 14
@@ -4076,7 +3393,7 @@ Page {
                             spacing: 3
                             Repeater { model: 3; Rectangle { width: 3; height: 3; radius: 1.5; color: Theme.text } }
                         }
-                        MouseArea { id: moreHit; anchors.fill: parent; anchors.margins: -10; onClicked: transMenu.show() }
+                        MouseArea { id: moreHit; anchors.fill: parent; anchors.margins: -10; onClicked: page.showTransMenu() }
                     }
                 }
                 Item {          // the pinned message: a tap goes to it
@@ -4185,7 +3502,7 @@ Page {
                 width: 44; height: 44
                 opacity: giftHit.pressed ? 0.7 : 1
                 Icon { anchors.centerIn: parent; name: "gift"; color: Theme.text }
-                MouseArea { id: giftHit; anchors.fill: parent; onClicked: giftSheet.show() }
+                MouseArea { id: giftHit; anchors.fill: parent; onClicked: page.openGiftSheet() }
             }
             Glass {              // Channel Direct Messages button on the left (next to 🎁 if both are shown)
                 visible: chanBar.hasDm
@@ -4206,51 +3523,53 @@ Page {
             }
         }
 
-        Item {               // picking: what goes for all of them — deleted (🗑, left), their words copied
-            id: pickBar      // (the middle), forwarded (right); each a piece of glass as the field's
+        Loader {             // picking: what goes for all of them — deleted (🗑, left), their words copied
+            id: pickBar      // (the middle), forwarded (right); created only when selecting
             z: 1
-            visible: page.selecting
+            active: page.selecting
             anchors.bottom: parent.bottom
             transform: Translate { y: -page.barLift }
             width: parent.width
-            height: visible ? 60 : 0
-            Glass {
-                x: 10; anchors.verticalCenter: parent.verticalCenter
-                width: 44; height: 44
-                opacity: !page.pickedDeletable ? 0.4 : trashHit.pressed ? 0.7 : 1
-                Icon { anchors.centerIn: parent; name: "trash"; color: Theme.danger }
-                MouseArea { id: trashHit; anchors.fill: parent; enabled: page.pickedDeletable; onClicked: deleteMenu.show() }
-            }
-            Glass {
-                anchors.centerIn: parent
-                visible: page.pickedText !== ""
-                width: copyPickText.implicitWidth + 44; height: 44
-                opacity: copyPickHit.pressed ? 0.7 : 1
-                Text {
-                    id: copyPickText
-                    anchors.centerIn: parent
-                    text: Tr.t("Nusxalash")
-                    color: Theme.text
-                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.Medium
+            height: active ? 60 : 0
+            sourceComponent: Item {
+                Glass {
+                    x: 10; anchors.verticalCenter: parent.verticalCenter
+                    width: 44; height: 44
+                    opacity: !page.pickedDeletable ? 0.4 : trashHit.pressed ? 0.7 : 1
+                    Icon { anchors.centerIn: parent; name: "trash"; color: Theme.danger }
+                    MouseArea { id: trashHit; anchors.fill: parent; enabled: page.pickedDeletable; onClicked: page.showDeleteMenu() }
                 }
-                MouseArea {
-                    id: copyPickHit
-                    anchors.fill: parent
-                    onClicked: {
-                        page.copy(page.pickedText)
-                        page.toast(page.pickedIds.length > 1 ? Tr.n("%1 ta xabar nusxalandi", page.pickedIds.length) : Tr.t("Nusxalandi"))
-                        page.stopPicking()
+                Glass {
+                    anchors.centerIn: parent
+                    visible: page.pickedText !== ""
+                    width: copyPickText.implicitWidth + 44; height: 44
+                    opacity: copyPickHit.pressed ? 0.7 : 1
+                    Text {
+                        id: copyPickText
+                        anchors.centerIn: parent
+                        text: Tr.t("Nusxalash")
+                        color: Theme.text
+                        font.family: Theme.font; font.pixelSize: 16; font.weight: Font.Medium
+                    }
+                    MouseArea {
+                        id: copyPickHit
+                        anchors.fill: parent
+                        onClicked: {
+                            page.copy(page.pickedText)
+                            page.toast(page.pickedIds.length > 1 ? Tr.n("%1 ta xabar nusxalandi", page.pickedIds.length) : Tr.t("Nusxalandi"))
+                            page.stopPicking()
+                        }
                     }
                 }
-            }
-            Glass {
-                anchors.right: parent.right; anchors.rightMargin: 10
-                anchors.verticalCenter: parent.verticalCenter
-                width: 44; height: 44
-                readonly property bool can: page.pickedCan("can_be_forwarded")
-                opacity: !can ? 0.4 : fwdPickHit.pressed ? 0.7 : 1
-                Icon { anchors.centerIn: parent; name: "forward"; color: Theme.text }
-                MouseArea { id: fwdPickHit; anchors.fill: parent; enabled: parent.can; onClicked: page.forwardPicked() }
+                Glass {
+                    anchors.right: parent.right; anchors.rightMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 44; height: 44
+                    readonly property bool can: page.pickedCan("can_be_forwarded")
+                    opacity: !can ? 0.4 : fwdPickHit.pressed ? 0.7 : 1
+                    Icon { anchors.centerIn: parent; name: "forward"; color: Theme.text }
+                    MouseArea { id: fwdPickHit; anchors.fill: parent; enabled: parent.can; onClicked: page.forwardPicked() }
+                }
             }
         }
 
@@ -4387,7 +3706,7 @@ Page {
                         if (!page.canAttach)        // (none of what it sends may be sent here)
                             return page.toast(page.allowedText)
                         page.keyboardDown()     // (over the sheet it stayed, its «Yuborish» under it)
-                        sheet.show()
+                        page.openAttach()
                     }
                 }
             }
@@ -4535,7 +3854,7 @@ Page {
                             font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
                         }
                     }
-                    MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: timerMenu.show() }
+                    MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.showTimerMenu() }
                 }
                 Icon {           // a channel's 🔔: the post with or without a sound (Telegram-iOS's silent posting)
                     id: bell
@@ -4557,96 +3876,101 @@ Page {
                     MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.setSilent(!page.silent) }
                 }
             }
-            Rectangle {          // recording: the time, and how to let it go (over the clip and the field)
+            Loader {             // recording: the time, and how to let it go (over the clip and the field)
                 id: recBar
-                visible: page.recording
+                active: page.recording
                 x: 8; y: fieldBox.y + compose.height
                 width: parent.width - 66; height: fieldBox.height - compose.height
-                radius: 22
-                color: Theme.glass
-                Rectangle {
-                    id: dot
-                    x: 18; anchors.verticalCenter: parent.verticalCenter
-                    width: 10; height: 10; radius: 5
-                    color: Theme.danger
-                    SequentialAnimation on opacity {
-                        running: page.recording; loops: Animation.Infinite
-                        OpacityAnimator { from: 1; to: 0.2; duration: 500 }
-                        OpacityAnimator { from: 0.2; to: 1; duration: 500 }
+                sourceComponent: Rectangle {
+                    radius: 22
+                    color: Theme.glass
+                    Rectangle {
+                        id: dot
+                        x: 18; anchors.verticalCenter: parent.verticalCenter
+                        width: 10; height: 10; radius: 5
+                        color: Theme.danger
+                        SequentialAnimation on opacity {
+                            running: page.recording; loops: Animation.Infinite
+                            OpacityAnimator { from: 1; to: 0.2; duration: 500 }
+                            OpacityAnimator { from: 0.2; to: 1; duration: 500 }
+                        }
                     }
-                }
-                Text {
-                    x: 36; anchors.verticalCenter: parent.verticalCenter
-                    readonly property int tenths: Math.floor(page.recordMs / 100)
-                    text: Math.floor(tenths / 600) + ":" + String(Math.floor(tenths / 10) % 60).padStart(2, "0") + "," + tenths % 10
-                    color: Theme.text
-                    font.family: Theme.font; font.pixelSize: 16; font.features: { "tnum": 1 }
-                }
-                Text {
-                    visible: !page.recordLocked
-                    anchors.verticalCenter: parent.verticalCenter
-                    x: parent.width - implicitWidth - 12 + Math.min(0, page.recordSlide)
-                    opacity: 1 - Math.min(0.8, -page.recordSlide / 150)
-                    text: page.recordSlide < -110 ? Tr.t("Qo'yib yuboring — bekor bo'ladi") : Tr.t("‹ bekor qilish uchun suring")
-                    color: page.recordSlide < -110 ? Theme.danger : Theme.grey
-                    font.family: Theme.font; font.pixelSize: 14
-                }
-                Text {           // locked: the hands are free, «Bekor qilish» throws it away (iOS's «Cancel»)
-                    visible: page.recordLocked
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.right: parent.right; anchors.rightMargin: 16
-                    text: Tr.t("Bekor qilish")
-                    color: Theme.accent
-                    font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
-                    MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.stopVoice(true) }
+                    Text {
+                        x: 36; anchors.verticalCenter: parent.verticalCenter
+                        readonly property int tenths: Math.floor(page.recordMs / 100)
+                        text: Math.floor(tenths / 600) + ":" + String(Math.floor(tenths / 10) % 60).padStart(2, "0") + "," + tenths % 10
+                        color: Theme.text
+                        font.family: Theme.font; font.pixelSize: 16; font.features: { "tnum": 1 }
+                    }
+                    Text {
+                        visible: !page.recordLocked
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: parent.width - implicitWidth - 12 + Math.min(0, page.recordSlide)
+                        opacity: 1 - Math.min(0.8, -page.recordSlide / 150)
+                        text: page.recordSlide < -110 ? Tr.t("Qo'yib yuboring — bekor bo'ladi") : Tr.t("‹ bekor qilish uchun suring")
+                        color: page.recordSlide < -110 ? Theme.danger : Theme.grey
+                        font.family: Theme.font; font.pixelSize: 14
+                    }
+                    Text {           // locked: the hands are free, «Bekor qilish» throws it away (iOS's «Cancel»)
+                        visible: page.recordLocked
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.right: parent.right; anchors.rightMargin: 16
+                        text: Tr.t("Bekor qilish")
+                        color: Theme.accent
+                        font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                        MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.stopVoice(true) }
+                    }
                 }
             }
-            Rectangle {          // the voice note stopped, before it goes: 🗑, ▶ and its waveform, its length
+            Loader {             // the voice note stopped, before it goes: 🗑, ▶ and its waveform, its length (loaded only when previewing)
                 id: previewBar
-                visible: page.preview !== null || page.roundPreview !== null || page.roundBusy
+                active: page.preview !== null || page.roundPreview !== null || page.roundBusy
                 x: 8; y: fieldBox.y + compose.height
                 width: parent.width - 66; height: fieldBox.height - compose.height
-                radius: 22
-                color: Theme.glass
-                MouseArea { anchors.fill: parent }      // (not through to the field under it)
-                Icon {
-                    id: bin
-                    x: 12; anchors.verticalCenter: parent.verticalCenter
-                    width: 24; height: 24
-                    name: "trash"
-                    color: Theme.danger
-                    MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.dropPreview() }
-                }
-                Text {           // a round video's: what and how long (it plays in its circle over the chat)
-                    visible: page.roundPreview !== null || page.roundBusy
-                    x: 48; anchors.verticalCenter: parent.verticalCenter
-                    text: page.roundBusy ? Tr.t("Video xabar tayyorlanmoqda…")
-                        : page.roundPreview ? Tr.t("Video xabar") + " · 0:" + String(page.roundPreview.dur).padStart(2, "0") : ""
-                    color: Theme.text
-                    font.family: Theme.font; font.pixelSize: 15
-                }
-                Rectangle {
-                    visible: page.preview !== null
-                    x: 48; anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - x - 6; height: parent.height - 8
-                    radius: height / 2
-                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
-                    clip: true
-                    AudioRow {
-                        x: -2; anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width
-                        scale: 0.8; transformOrigin: Item.Left
-                        kind: "voice"
-                        wave: page.preview ? page.preview.wave : ""
-                        dur: page.preview ? page.preview.dur : 0
-                        here: true
-                        current: hearing.position > 0 || playing     // (its length until it plays)
-                        playing: hearing.playbackState === MediaPlayer.PlayingState
-                        at: hearing.position
+                sourceComponent: Rectangle {
+                    radius: 22
+                    color: Theme.glass
+                    MouseArea { anchors.fill: parent }      // (not through to the field under it)
+                    Icon {
+                        id: bin
+                        x: 12; anchors.verticalCenter: parent.verticalCenter
+                        width: 24; height: 24
+                        name: "trash"
+                        color: Theme.danger
+                        MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.dropPreview() }
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        onClicked: hearing.playbackState === MediaPlayer.PlayingState ? hearing.pause() : hearing.play()
+                    Text {           // a round video's: what and how long (it plays in its circle over the chat)
+                        visible: page.roundPreview !== null || page.roundBusy
+                        x: 48; anchors.verticalCenter: parent.verticalCenter
+                        text: page.roundBusy ? Tr.t("Video xabar tayyorlanmoqda…")
+                            : page.roundPreview ? Tr.t("Video xabar") + " · 0:" + String(page.roundPreview.dur).padStart(2, "0") : ""
+                        color: Theme.text
+                        font.family: Theme.font; font.pixelSize: 15
+                    }
+                    Rectangle {
+                        visible: page.preview !== null
+                        x: 48; anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - x - 6; height: parent.height - 8
+                        radius: height / 2
+                        color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
+                        clip: true
+                        AudioRow {
+                            dpr: page.dpr
+                            x: -2; anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            scale: 0.8; transformOrigin: Item.Left
+                            kind: "voice"
+                            wave: page.preview ? page.preview.wave : ""
+                            dur: page.preview ? page.preview.dur : 0
+                            here: true
+                            current: hearing.position > 0 || playing     // (its length until it plays)
+                            playing: hearing.playbackState === MediaPlayer.PlayingState
+                            at: hearing.position
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: hearing.playbackState === MediaPlayer.PlayingState ? hearing.pause() : hearing.play()
+                        }
                     }
                 }
             }
@@ -4774,78 +4098,84 @@ Page {
         }
     }
 
-    Item {               // a round video: the camera's circle over the dimmed chat (VideoMessageCameraScreen)
-        id: roundView
+    Loader {             // a round video: the camera's circle over the dimmed chat (VideoMessageCameraScreen)
+        id: roundViewLoader
         z: 1.8
-        visible: (page.recording && page.roundMode) || page.roundPreview !== null || page.roundBusy
+        active: (page.recording && page.roundMode) || page.roundPreview !== null || page.roundBusy
         width: parent.width; height: parent.height - page.kb - page.foot
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.6) }
-        MouseArea { anchors.fill: parent }      // (nothing under it meanwhile)
-        RoundCamera {
-            id: roundCam
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: Math.max(70, (parent.height - height) / 2 - 20)
-            width: Math.min(parent.width - 60, 300); height: width
-            visible: roundView.visible
-            path: page.roundPreview ? page.roundPreview.path : td.fakeCamera
-            mirrored: page.roundPreview ? false : page.roundMirror
-            progress: page.roundPreview || page.roundBusy ? -1 : page.recordMs / 60000
-            sound: page.roundPreview !== null
-        }
-        Glass {          // the camera's flip (here: the file mirrored)
-            visible: page.recording
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: roundCam.bottom; anchors.topMargin: 22
-            width: 44; height: 44
-            Text { anchors.centerIn: parent; text: "⇄"; color: Theme.text; font.pixelSize: 22 }
-            MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: page.roundMirror = !page.roundMirror }
+        sourceComponent: Item {
+            id: roundView
+            readonly property alias cam: roundCam
+            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.6) }
+            MouseArea { anchors.fill: parent }      // (nothing under it meanwhile)
+            RoundCamera {
+                id: roundCam
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.max(70, (parent.height - height) / 2 - 20)
+                width: Math.min(parent.width - 60, 300); height: width
+                visible: true
+                path: page.roundPreview ? page.roundPreview.path : td.fakeCamera
+                mirrored: page.roundPreview ? false : page.roundMirror
+                progress: page.roundPreview || page.roundBusy ? -1 : page.recordMs / 60000
+                sound: page.roundPreview !== null
+            }
+            Glass {          // the camera's flip (here: the file mirrored)
+                visible: page.recording
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: roundCam.bottom; anchors.topMargin: 22
+                width: 44; height: 44
+                Text { anchors.centerIn: parent; text: "⇄"; color: Theme.text; font.pixelSize: 22 }
+                MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: page.roundMirror = !page.roundMirror }
+            }
         }
     }
-    Glass {              // over the held mic: 🔒 and ⌃ (slide up to it); locked, ■ stops it for listening first
-        id: lockPill
+    Loader {             // over the held mic: 🔒 and ⌃ (slide up to it); locked, ■ stops it for listening first
+        id: lockPillLoader
         z: 2
-        visible: page.recording
+        active: page.recording
         anchors.right: parent.right; anchors.rightMargin: 12
         y: page.height - page.kb - 60 - height - 34 - (page.recordLocked ? 0 : Math.min(40, page.recordUp / 2))
         width: 36; height: page.recordLocked ? 40 : 64
-        radius: 18
         Behavior on height { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-        Icon {
-            visible: !page.recordLocked
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: 8
-            width: 20; height: 20
-            name: "lock"
-            color: page.recordUp > 80 ? Theme.accent : Theme.grey
-        }
-        Icon {
-            visible: !page.recordLocked
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: 34
-            width: 18; height: 18
-            rotation: 180
-            name: "chevron"
-            color: Theme.grey
-            SequentialAnimation on y {
-                running: lockPill.visible && !page.recordLocked; loops: Animation.Infinite
-                NumberAnimation { from: 36; to: 30; duration: 600; easing.type: Easing.InOutQuad }
-                NumberAnimation { from: 30; to: 36; duration: 600; easing.type: Easing.InOutQuad }
+        sourceComponent: Glass {
+            id: lockPill
+            anchors.fill: parent
+            radius: 18
+            Icon {
+                visible: !page.recordLocked
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 8
+                width: 20; height: 20
+                name: "lock"
+                color: page.recordUp > 80 ? Theme.accent : Theme.grey
+            }
+            Icon {
+                visible: !page.recordLocked
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 34
+                width: 18; height: 18
+                rotation: 180
+                name: "chevron"
+                color: Theme.grey
+                SequentialAnimation on y {
+                    running: lockPill.visible && !page.recordLocked; loops: Animation.Infinite
+                    NumberAnimation { from: 36; to: 30; duration: 600; easing.type: Easing.InOutQuad }
+                    NumberAnimation { from: 30; to: 36; duration: 600; easing.type: Easing.InOutQuad }
+                }
+            }
+            Rectangle {
+                visible: page.recordLocked
+                anchors.centerIn: parent
+                width: 14; height: 14; radius: 3
+                color: Theme.danger
+            }
+            MouseArea {
+                anchors.fill: parent; anchors.margins: -8
+                enabled: page.recordLocked
+                onClicked: page.stopVoice(false, true)
             }
         }
-        Rectangle {
-            visible: page.recordLocked
-            anchors.centerIn: parent
-            width: 14; height: 14; radius: 3
-            color: Theme.danger
-        }
-        MouseArea {
-            anchors.fill: parent; anchors.margins: -8
-            enabled: page.recordLocked
-            onClicked: page.stopVoice(false, true)
-        }
     }
-
-    Component { id: infoPage; ChatInfoPage {} }
 
     // ---- a place ---------------------------------------------------------------
     // a live location's time left, as Telegram-iOS's ring says it in words: «12 daq qoldi», «tugadi»
@@ -4855,69 +4185,73 @@ Page {
         const left = end - now
         return left <= 0 ? Tr.t("Tugadi") : left < 3600 ? Tr.f("Jonli · %1 daq", Math.ceil(left / 60)) : Tr.f("Jonli · %1 soat", Math.round(left / 3600))
     }
-    Item {               // a place tapped: its coordinates copied, or the map opened (as Telegram-iOS's sheet)
-        id: placeMenu
+    Loader {             // a place tapped: its coordinates copied, or the map opened (as Telegram-iOS's sheet)
+        id: placeMenuLoader
         z: 30
+        active: false
         anchors.fill: parent
-        visible: false
-        property var loc: null
-        property string name: ""
-        readonly property string coords: loc ? loc.latitude.toFixed(6) + ", " + loc.longitude.toFixed(6) : ""
-        function show(l, n) {
-            loc = l
-            name = n.split("\n")[0]
-            visible = true
-            placeCard.scale = 0.01
-            placeGrow.start()
-        }
-        MouseArea { anchors.fill: parent; onClicked: placeMenu.visible = false }
-        Rectangle {
-            id: placeCard
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
-            width: parent.width - 32; height: placeChoices.height
-            radius: 16
-            color: Theme.menu
-            transformOrigin: Item.Bottom
-            layer.enabled: true
-            ScaleAnimator { id: placeGrow; target: placeCard; from: 0.01; to: 1; duration: 420
-                            easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring }
-            Column {
-                id: placeChoices
-                width: parent.width
-                Text {
-                    x: 16; width: parent.width - 32
-                    topPadding: 12; bottomPadding: 8
-                    wrapMode: Text.Wrap
-                    horizontalAlignment: Text.AlignHCenter
-                    text: (placeMenu.name && placeMenu.name !== Tr.t("Jonli joylashuv") ? placeMenu.name + "\n" : "") + placeMenu.coords
-                    color: Theme.grey
-                    font.family: Theme.font; font.pixelSize: 13
-                }
-                Repeater {
-                    model: [{ t: Tr.t("Koordinatalarni nusxalash"), run: () => { page.copy(placeMenu.coords); page.toast(Tr.f("Nusxalandi: %1", placeMenu.coords)) } },
-                            { t: Tr.t("Xaritada ochish (OpenStreetMap)"), run: () => Qt.openUrlExternally(
-                                  "https://www.openstreetmap.org/?mlat=" + placeMenu.loc.latitude + "&mlon=" + placeMenu.loc.longitude
-                                  + "#map=17/" + placeMenu.loc.latitude + "/" + placeMenu.loc.longitude) },
-                            { t: Tr.t("Bekor qilish"), bold: true, run: () => {} }]
-                    Rectangle {
-                        required property var modelData
-                        width: placeChoices.width; height: 50
-                        color: placeHit.pressed ? Theme.highlight : "transparent"
-                        Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
-                        Text {
-                            anchors.centerIn: parent
-                            text: parent.modelData.t
-                            color: Theme.accent
-                            font.family: Theme.font; font.pixelSize: 17; font.weight: parent.modelData.bold ? Font.DemiBold : Font.Normal
-                        }
-                        MouseArea {
-                            id: placeHit
-                            anchors.fill: parent
-                            onClicked: {
-                                const run = parent.modelData.run
-                                placeMenu.visible = false
-                                run()
+        sourceComponent: Item {
+            id: placeMenuItem
+            visible: false
+            property var loc: null
+            property string name: ""
+            readonly property string coords: loc ? loc.latitude.toFixed(6) + ", " + loc.longitude.toFixed(6) : ""
+            function show(l, n) {
+                loc = l
+                name = n.split("\n")[0]
+                visible = true
+                placeCard.scale = 0.01
+                placeGrow.start()
+            }
+            MouseArea { anchors.fill: parent; onClicked: placeMenuItem.visible = false }
+            Rectangle {
+                id: placeCard
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
+                width: parent.width - 32; height: placeChoices.height
+                radius: 16
+                color: Theme.menu
+                transformOrigin: Item.Bottom
+                layer.enabled: true
+                ScaleAnimator { id: placeGrow; target: placeCard; from: 0.01; to: 1; duration: 420
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring }
+                Column {
+                    id: placeChoices
+                    width: parent.width
+                    Text {
+                        x: 16; width: parent.width - 32
+                        topPadding: 12; bottomPadding: 8
+                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignHCenter
+                        text: (placeMenuItem.name && placeMenuItem.name !== Tr.t("Jonli joylashuv") ? placeMenuItem.name + "\n" : "") + placeMenuItem.coords
+                        color: Theme.grey
+                        font.family: Theme.font; font.pixelSize: 13
+                    }
+                    Repeater {
+                        model: [{ t: Tr.t("Koordinatalarni nusxalash"), run: () => { page.copy(placeMenuItem.coords); page.toast(Tr.f("Nusxalandi: %1", placeMenuItem.coords)) } },
+                                { t: Tr.t("Xaritada ochish (OpenStreetMap)"), run: () => Qt.openUrlExternally(
+                                      "https://www.openstreetmap.org/?mlat=" + placeMenuItem.loc.latitude + "&mlon=" + placeMenuItem.loc.longitude
+                                      + "#map=17/" + placeMenuItem.loc.latitude + "/" + placeMenuItem.loc.longitude) },
+                                { t: Tr.t("Bekor qilish"), bold: true, run: () => {} }]
+                        Rectangle {
+                            required property var modelData
+                            width: placeChoices.width; height: 50
+                            color: placeHit.pressed ? Theme.highlight : "transparent"
+                            Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+                            Text {
+                                anchors.centerIn: parent
+                                text: parent.modelData.t
+                                color: Theme.accent
+                                font.family: Theme.font; font.pixelSize: 17; font.weight: parent.modelData.bold ? Font.DemiBold : Font.Normal
+                            }
+                            MouseArea {
+                                id: placeHit
+                                anchors.fill: parent
+                                onClicked: {
+                                    const run = parent.modelData.run
+                                    placeMenuItem.visible = false
+                                    run()
+                                }
                             }
                         }
                     }
@@ -4935,6 +4269,7 @@ Page {
     }
     // «Natijalarni ko'rish»: who chose what, each answer with its voters (getPollVoters, 50 each)
     function showVoters(id, poll) {
+        votersLoader.active = true
         voters.title = poll.question.text
         voters.rows = []
         voters.visible = true
@@ -4953,153 +4288,209 @@ Page {
             store.send({ "@type": "getPollVoters", chat_id: chatId, message_id: id, option_id: k, offset: 0, limit: 50 }, (r) => {
                 got[k] = (r.voters || []).map((v) => store.me && v.voter_id.user_id === store.me.id ? Tr.t("Siz")
                                                    : store.senderName(v.voter_id, false) || Tr.t("Noma'lum"))
-                if (--left === 0 && page)
+                if (--left === 0 && page && voters)
                     voters.fill(order, poll, got)
             })
         }
     }
-    Item {               // the voters, a card from the foot (as the ⏱'s choices, over the chat)
-        id: voters
+    Loader {             // the voters, a card from the foot (as the ⏱'s choices, over the chat)
+        id: votersLoader
         z: 30
+        active: false
         anchors.fill: parent
-        visible: false
-        property string title: ""
-        property var rows: []           // [{ head, n } or { name }]
-        function fill(order, poll, got) {
-            const out = []
-            for (const k of order) {
-                const o = poll.options[k]
-                out.push({ head: o.text.text, n: o.voter_count, pc: o.vote_percentage })
-                for (const name of got[k] || [])
-                    out.push({ name: name })
+        sourceComponent: Item {
+            id: votersItem
+            visible: false
+            property string title: ""
+            property var rows: []           // [{ head, n } or { name }]
+            function fill(order, poll, got) {
+                const out = []
+                for (const k of order) {
+                    const o = poll.options[k]
+                    out.push({ head: o.text.text, n: o.voter_count, pc: o.vote_percentage })
+                    for (const name of got[k] || [])
+                        out.push({ name: name })
+                }
+                rows = out
             }
-            rows = out
-        }
-        MouseArea { anchors.fill: parent; onClicked: voters.visible = false }
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.35) }
-        Rectangle {
-            anchors.bottom: parent.bottom
-            width: parent.width; height: Math.min(parent.height * 0.7, voterList.contentHeight + 60)
-            radius: 16
-            color: Theme.card
-            MouseArea { anchors.fill: parent }
-            Text {
-                x: 16; y: 14
-                width: parent.width - 32
-                elide: Text.ElideRight
-                text: voters.title
-                color: Theme.text
-                font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
-            }
-            ListView {
-                id: voterList
-                y: 46
-                width: parent.width; height: parent.height - y - 8
-                clip: true
-                model: voters.rows
-                delegate: Item {
-                    required property var modelData
-                    width: voterList.width; height: modelData.head !== undefined ? 40 : 36
-                    Text {
-                        x: 16; anchors.bottom: parent.bottom; anchors.bottomMargin: 6
-                        width: parent.width - 32
-                        elide: Text.ElideRight
-                        text: modelData.head !== undefined ? modelData.head + " — " + modelData.pc + "%, " + Tr.n("%1 ta ovoz", modelData.n)
-                                                           : modelData.name
-                        color: modelData.head !== undefined ? Theme.grey : Theme.text
-                        font.family: Theme.font; font.pixelSize: modelData.head !== undefined ? 13 : 16
-                        font.weight: modelData.head !== undefined ? Font.DemiBold : Font.Normal
+            MouseArea { anchors.fill: parent; onClicked: votersItem.visible = false }
+            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.35) }
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: Math.min(parent.height * 0.7, voterList.contentHeight + 60)
+                radius: 16
+                color: Theme.card
+                MouseArea { anchors.fill: parent }
+                Text {
+                    x: 16; y: 14
+                    width: parent.width - 32
+                    elide: Text.ElideRight
+                    text: votersItem.title
+                    color: Theme.text
+                    font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
+                }
+                ListView {
+                    id: voterList
+                    y: 46
+                    width: parent.width; height: parent.height - y - 8
+                    clip: true
+                    model: votersItem.rows
+                    delegate: Item {
+                        required property var modelData
+                        width: voterList.width; height: modelData.head !== undefined ? 40 : 36
+                        Text {
+                            x: 16; anchors.bottom: parent.bottom; anchors.bottomMargin: 6
+                            width: parent.width - 32
+                            elide: Text.ElideRight
+                            text: modelData.head !== undefined ? modelData.head + " — " + modelData.pc + "%, " + Tr.n("%1 ta ovoz", modelData.n)
+                                                               : modelData.name
+                            color: modelData.head !== undefined ? Theme.grey : Theme.text
+                            font.family: Theme.font; font.pixelSize: modelData.head !== undefined ? 13 : 16
+                            font.weight: modelData.head !== undefined ? Font.DemiBold : Font.Normal
+                        }
                     }
                 }
             }
         }
     }
-    Component { id: joinPage; JoinRequestsPage {} }
-    PhotoViewer {
-        id: viewer
-        store: page.store
-        chatId: page.chatId
-        thread: page.thread
-        locate: (id) => {           // a paged-to message's picture, when its bubble is on the page
-            const it = page.shownAt(id)
-            return it && it.media ? it.picFace : null
+    Loader {
+        id: viewerLoader
+        z: 15
+        active: false
+        anchors.fill: parent
+        sourceComponent: PhotoViewer {
+            id: viewerItem
+            store: page.store
+            chatId: page.chatId
+            thread: page.thread
+            locate: (id) => {           // a paged-to message's picture, when its bubble is on the page
+                const it = page.shownAt(id)
+                return it && it.media ? it.picFace : null
+            }
+            onPaged: (id) => page.unveil(id)        // (seen there, a spoiler is off here too, as on iOS)
+            onSave: {
+                const s = viewerItem.current
+                if (s && s.file)
+                    store.saveFile(s.file, s.name, (text) => { if (page) page.toast(text) })
+                else if (page.viewing)
+                    page.save(page.viewing)
+            }
         }
-        onPaged: (id) => page.unveil(id)        // (seen there, a spoiler is off here too, as on iOS)
-        onSave: {
-            const s = viewer.current
-            if (s && s.file)
-                store.saveFile(s.file, s.name, (text) => { if (page) page.toast(text) })
-            else if (page.viewing)
-                page.save(page.viewing)
+    }
+
+    Loader {
+        id: forwardSheetLoader
+        z: 15
+        active: false
+        anchors.fill: parent
+        sourceComponent: ForwardSheet {
+            store: page.store
+            onPicked: (to, title) => store.forward(to, page.chatId, page.forwarding, page.copying, (ok) => {
+                if (page && ok)
+                    page.toast(Tr.f("Uzatildi: %1", title))
+            })
         }
     }
 
-    ForwardSheet {
-        id: forwardSheet
-        store: page.store
-        onPicked: (to, title) => store.forward(to, page.chatId, page.forwarding, page.copying, (ok) => {
-            if (page && ok)
-                page.toast(Tr.f("Uzatildi: %1", title))
-        })
+    Loader {
+        id: giftSheetLoader
+        z: 15
+        active: false
+        anchors.fill: parent
+        sourceComponent: GiftSheet {
+            store: page.store
+            chatId: page.chatId
+            onSay: (text) => page.toast(text)
+        }
     }
 
-    GiftSheet {
-        id: giftSheet
-        store: page.store
-        chatId: page.chatId
-        onSay: (text) => page.toast(text)
-    }
-
-    PaidReactionSheet {
+    QtObject {
         id: paidSheet
-        store: page.store
-        chatId: page.chatId
-        onSay: (text) => page.toast(text)
+        readonly property bool open: paidSheetLoader.item ? paidSheetLoader.item.open : false
+        function show(id, reactors, mine) {
+            paidSheetLoader.active = true
+            paidSheetLoader.item.show(id, reactors, mine)
+        }
+        function close() {
+            if (paidSheetLoader.item)
+                paidSheetLoader.item.close()
+        }
+        function backOne() {
+            if (paidSheetLoader.item)
+                paidSheetLoader.item.backOne()
+        }
+    }
+    Loader {
+        id: paidSheetLoader
+        z: 15
+        active: false
+        anchors.fill: parent
+        sourceComponent: PaidReactionSheet {
+            store: page.store
+            chatId: page.chatId
+            onSay: (text) => page.toast(text)
+        }
     }
     function askPaid(cost, run) {
+        paidAlertLoader.active = true
         paidAlert.title = Tr.t("Pullik xabar")
         paidAlert.text = Tr.f("Ushbu xabarni yuborish uchun ⭐ %1 yulduz yechiladi. Davom etilsinmi?", store.count(cost))
         paidAlert.answers = [{ t: Tr.t("Bekor qilish") }, { t: Tr.t("Yuborish"), run: run }]
         paidAlert.open = true
     }
-    Alert { id: paidAlert; z: 32; anchors.fill: parent }
+    Loader {
+        id: paidAlertLoader
+        z: 32
+        active: false
+        anchors.fill: parent
+        sourceComponent: Alert { anchors.fill: parent }
+    }
 
-    AttachSheet {
-        id: sheet
-        rights: page.rights
-        onRefused: (text) => page.toast(text)
-        onSend: (picked, asFiles, apart) => {
-            const doSend = () => {
-                if (page.gap)
-                    page.fresh()
-                store.sendFiles(page.chatId, picked, page.textBarred ? null : page.fieldWords(), page.replying ? page.replying.id : 0,
-                                asFiles, page.thread, page.silent, apart, page.directTopic, page.paidMessageStars)
-                field.text = ""
-                page.replying = null
-                list.down = true
-                list.positionViewAtBeginning()
+    Loader {
+        id: sheetLoader
+        z: 15
+        active: false
+        anchors.fill: parent
+        sourceComponent: AttachSheet {
+            rights: page.rights
+            onRefused: (text) => page.toast(text)
+            onSend: (picked, asFiles, apart) => {
+                const doSend = () => {
+                    if (page.gap)
+                        page.fresh()
+                    store.sendFiles(page.chatId, picked, page.textBarred ? null : page.fieldWords(), page.replying ? page.replying.id : 0,
+                                    asFiles, page.thread, page.silent, apart, page.directTopic, page.paidMessageStars)
+                    field.text = ""
+                    page.replying = null
+                    list.down = true
+                    list.positionViewAtBeginning()
+                }
+                if (page.paidMessageStars > 0)
+                    page.askPaid(page.paidMessageStars * Math.max(1, picked.length), doSend)
+                else
+                    doSend()
             }
-            if (page.paidMessageStars > 0)
-                page.askPaid(page.paidMessageStars * Math.max(1, picked.length), doSend)
-            else
-                doSend()
         }
     }
 
-    StickerPanel {
-        id: emojiPanel
+    Loader {
+        id: emojiPanelLoader
         z: 1
-        store: page.store
-        visible: page.panelOpen || (page.kb > 1 && !page.panelHold && osk.h === 0 && y < page.height)
+        active: false
         y: page.height - (page.panelOpen ? page.kb : Math.min(page.kb, page.panelH))
         width: page.width; height: page.panelH
-        emojiOk: !page.textBarred
-        stickersOk: !page.rights || page.rights.other
-        barredText: page.allowedText
-        onEmoji: (e) => page.putEmoji(e)
-        onBackspace: page.eraseBack()
-        onSticker: (st) => page.sendSticker(st)
-        onGif: (a) => page.sendGif(a)
+        visible: active && (page.panelOpen || (page.kb > 1 && !page.panelHold && osk.h === 0 && y < page.height))
+        sourceComponent: StickerPanel {
+            anchors.fill: parent
+            store: page.store
+            emojiOk: !page.textBarred
+            stickersOk: !page.rights || page.rights.other
+            barredText: page.allowedText
+            onEmoji: (e) => page.putEmoji(e)
+            onBackspace: page.eraseBack()
+            onSticker: (st) => page.sendSticker(st)
+            onGif: (a) => page.sendGif(a)
+        }
     }
     // an emoji where the cursor is (the field keeps its cursor when it has no focus)
     function putEmoji(e) {
@@ -5286,12 +4677,32 @@ Page {
                 page.sendRound(path, secs)
         }
     }
-    MediaPlayer { id: hearing; audioOutput: AudioOutput {} }
+    QtObject {
+        id: hearing
+        property url source: ""
+        readonly property int playbackState: hearingLoader.item ? hearingLoader.item.playbackState : MediaPlayer.StoppedState
+        readonly property int position: hearingLoader.item ? hearingLoader.item.position : 0
+        onSourceChanged: {
+            if (String(source) !== "") {
+                hearingLoader.active = true
+                hearingLoader.item.source = source
+            } else if (hearingLoader.item) {
+                hearingLoader.item.source = ""
+            }
+        }
+        function play() { hearingLoader.active = true; hearingLoader.item.source = source; hearingLoader.item.play() }
+        function pause() { if (hearingLoader.item) hearingLoader.item.pause() }
+        function stop() { if (hearingLoader.item) hearingLoader.item.stop() }
+    }
+    Loader {
+        id: hearingLoader
+        active: false
+        sourceComponent: MediaPlayer { audioOutput: AudioOutput {} }
+    }
     property real recordMs: 0
     property real recordSlide: 0
     property bool recordCancel: false
     property real recordFrom: 0
-    MediaDevices { id: devices }
     Timer {
         interval: 100; repeat: true; running: page.recording
         onTriggered: page.recordMs = Date.now() - page.recordFrom
@@ -5308,6 +4719,7 @@ Page {
             toast(Tr.t("Kamera topilmadi — telefonning kamerasi hali ulanmagan"))
             return
         }
+        voiceRecLoader.active = true
         if (devices.audioInputs.length === 0 && !roundMode) {      // (a round video goes without its sound)
             toast(Tr.t("Mikrofon topilmadi — telefonning mikrofoni hali ulanmagan"))
             return
@@ -5321,7 +4733,7 @@ Page {
         recordSlide = 0
         recordMs = 0
         recordFrom = Date.now()
-        roundStart = roundMode ? roundCam.position : 0
+        roundStart = roundMode && roundCam ? roundCam.position : 0
         roundAudio = devices.audioInputs.length > 0
         recording = true
         if (roundAudio) {
@@ -5420,336 +4832,363 @@ Page {
         roundPreview = null
         sendRound(p.path, p.dur)
     }
-    CaptureSession {
-        audioInput: AudioInput { id: mic }
-        recorder: MediaRecorder {
-            id: recorder
-            mediaFormat {
-                fileFormat: MediaFormat.Ogg
-                audioCodec: MediaFormat.AudioCodec.Opus
-            }
-            audioChannelCount: 1
-            audioSampleRate: 48000
-            audioBitRate: 32000
-            encodingMode: MediaRecorder.ConstantBitRateEncoding
-            onRecorderStateChanged: if (recorderState === MediaRecorder.StoppedState) page.recorded()
-            onErrorOccurred: (error, text) => {
-                page.recording = false
-                page.toast(Tr.f("Yozib bo'lmadi: %1", text))
-            }
-        }
-    }
-
-    Item {               // ⏱'s choices, over the field as Telegram-iOS's context menu
-        id: timerMenu
-        z: 30
-        anchors.fill: parent
-        visible: false
-        function show() {
-            page.keyboardDown()
-            visible = true
-            card.scale = 0.01
-            grow.start()
-        }
-        MouseArea { anchors.fill: parent; onClicked: timerMenu.visible = false }
-        Rectangle {
-            id: card
-            anchors.right: parent.right; anchors.rightMargin: 16
-            anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
-            width: 230; height: choices.height
-            radius: 16
-            color: Theme.menu
-            transformOrigin: Item.BottomRight
-            layer.enabled: true
-            ScaleAnimator { id: grow; target: card; from: 0.01; to: 1; duration: 420
-                            easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring }
-            Column {
-                id: choices
-                width: parent.width
-                Text {
-                    x: 16; width: parent.width - 32
-                    topPadding: 10; bottomPadding: 6
-                    wrapMode: Text.Wrap
-                    text: Tr.t("Yangi xabarlar shuncha vaqtdan keyin o'chadi")
-                    color: Theme.grey
-                    font.family: Theme.font; font.pixelSize: 13
-                }
-                Repeater {
-                    model: [0, 86400, 604800, 2678400]
-                    Rectangle {
-                        required property int modelData
-                        width: choices.width; height: 44
-                        color: choiceHit.pressed ? Theme.highlight : "transparent"
-                        Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
-                        Text {
-                            x: 16; anchors.verticalCenter: parent.verticalCenter
-                            text: parent.modelData ? store.lasting(parent.modelData) : Tr.t("O'chirilgan")
-                            color: Theme.text
-                            font.family: Theme.font; font.pixelSize: 16
-                        }
-                        Text {
-                            visible: page.autoDelete === parent.modelData
-                            anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter
-                            text: "✓"
-                            color: Theme.accent
-                            font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
-                        }
-                        MouseArea {
-                            id: choiceHit
-                            anchors.fill: parent
-                            onClicked: {
-                                timerMenu.visible = false
-                                if (parent.modelData !== page.autoDelete)
-                                    page.setAutoDelete(parent.modelData)
-                            }
-                        }
+    Loader {
+        id: voiceRecLoader
+        active: false
+        sourceComponent: Item {
+            readonly property alias devices: devicesItem
+            readonly property alias mic: micItem
+            readonly property alias recorder: recorderItem
+            MediaDevices { id: devicesItem }
+            CaptureSession {
+                audioInput: AudioInput { id: micItem }
+                recorder: MediaRecorder {
+                    id: recorderItem
+                    mediaFormat {
+                        fileFormat: MediaFormat.Ogg
+                        audioCodec: MediaFormat.AudioCodec.Opus
+                    }
+                    audioChannelCount: 1
+                    audioSampleRate: 48000
+                    audioBitRate: 32000
+                    encodingMode: MediaRecorder.ConstantBitRateEncoding
+                    onRecorderStateChanged: if (recorderState === MediaRecorder.StoppedState) page.recorded()
+                    onErrorOccurred: (error, text) => {
+                        page.recording = false
+                        page.toast(Tr.f("Yozib bo'lmadi: %1", text))
                     }
                 }
             }
         }
     }
 
-    Item {               // the picked ones deleted: for us, or for everyone too (as the ⏱'s choices)
-        id: deleteMenu
+    Loader {             // ⏱'s choices, over the field as Telegram-iOS's context menu
+        id: timerMenuLoader
         z: 30
+        active: false
         anchors.fill: parent
-        visible: false
-        // what TDLib lets with all of them: both, or only one of the two
-        readonly property var choices: {
-            const all = page.pickedCan("can_be_deleted_for_all_users"), self = page.pickedCan("can_be_deleted_only_for_self")
-            return all && self ? [{ t: Tr.t("Hamma uchun o'chirish"), everyone: true }, { t: Tr.t("Men uchun o'chirish"), everyone: false }]
-                 : all ? [{ t: Tr.t("O'chirish"), everyone: true }] : [{ t: Tr.t("Men uchun o'chirish"), everyone: false }]
-        }
-        function show() {
-            visible = true
-            delCard.scale = 0.01
-            delGrow.start()
-        }
-        MouseArea { anchors.fill: parent; onClicked: deleteMenu.visible = false }
-        Rectangle {
-            id: delCard
-            x: 10
-            anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
-            width: 250; height: delChoices.height
-            radius: 16
-            color: Theme.menu
-            transformOrigin: Item.BottomLeft
-            layer.enabled: true
-            ScaleAnimator { id: delGrow; target: delCard; from: 0.01; to: 1; duration: 420
-                            easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring }
-            Column {
-                id: delChoices
-                width: parent.width
-                Text {
-                    x: 16; width: parent.width - 32
-                    topPadding: 10; bottomPadding: 6
-                    wrapMode: Text.Wrap
-                    text: page.pickedIds.length > 1 ? Tr.n("%1 ta xabar o'chirilsinmi?", page.pickedIds.length) : Tr.t("Xabar o'chirilsinmi?")
-                    color: Theme.grey
-                    font.family: Theme.font; font.pixelSize: 13
-                }
-                Repeater {
-                    model: deleteMenu.choices
-                    Rectangle {
-                        required property var modelData
-                        width: delChoices.width; height: 44
-                        color: delHit.pressed ? Theme.highlight : "transparent"
-                        Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
-                        Text {
-                            x: 16; anchors.verticalCenter: parent.verticalCenter
-                            text: parent.modelData.t
-                            color: Theme.danger
-                            font.family: Theme.font; font.pixelSize: 16
-                        }
-                        MouseArea {
-                            id: delHit
-                            anchors.fill: parent
-                            onClicked: {
-                                deleteMenu.visible = false
-                                page.deletePicked(parent.modelData.everyone)
-                            }
-                        }
-                    }
-                }
+        sourceComponent: Item {
+            id: timerMenuItem
+            visible: false
+            function show() {
+                page.keyboardDown()
+                visible = true
+                card.scale = 0.01
+                grow.start()
             }
-        }
-    }
-
-    Item {               // Shikoyat qilish: why (Telegram's options), or a few words, a step at a time
-        id: reportMenu
-        z: 30
-        anchors.fill: parent
-        visible: false
-        property var step: null         // { ids, title, options } or { ids, option, optional }
-        function ask(st) {
-            step = st
-            why.text = ""
-            visible = true
-            reportCard.scale = 0.01
-            reportGrow.start()
-            if (!st.options)
-                why.forceActiveFocus()
-        }
-        function close() {
-            visible = false
-            why.focus = false
-        }
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.25) }
-        MouseArea { anchors.fill: parent; onClicked: reportMenu.close() }
-        Rectangle {
-            id: reportCard
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: Math.max(60, (parent.height - page.kb - height) / 2)
-            width: Math.min(parent.width - 48, 300); height: Math.min(steps.height + 48, parent.height - page.kb - 120)
-            radius: 16
-            clip: true
-            color: Theme.menu
-            layer.enabled: true
-            ScaleAnimator { id: reportGrow; target: reportCard; from: 0.01; to: 1; duration: 420
-                            easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring }
-            MouseArea { anchors.fill: parent }      // (not through to the shade, which closes it)
-            Flickable {          // (a long list of reasons scrolls; «Bekor qilish» stays under it)
-                anchors { left: parent.left; right: parent.right; top: parent.top; bottom: reportCancel.top }
-                contentHeight: steps.height
-                boundsBehavior: Flickable.StopAtBounds
-                clip: true
+            MouseArea { anchors.fill: parent; onClicked: timerMenuItem.visible = false }
+            Rectangle {
+                id: card
+                anchors.right: parent.right; anchors.rightMargin: 16
+                anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
+                width: 230; height: choices.height
+                radius: 16
+                color: Theme.menu
+                transformOrigin: Item.BottomRight
+                layer.enabled: true
+                ScaleAnimator { id: grow; target: card; from: 0.01; to: 1; duration: 420
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring }
                 Column {
-                    id: steps
-                    width: reportCard.width
-                    readonly property var st: reportMenu.step || {}
+                    id: choices
+                    width: parent.width
                     Text {
                         x: 16; width: parent.width - 32
-                        topPadding: 14; bottomPadding: 8
+                        topPadding: 10; bottomPadding: 6
                         wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
-                        text: steps.st.options ? (steps.st.title || Tr.t("Shikoyat sababi")) : Tr.t(steps.st.optional ? "Batafsil yozing (ixtiyoriy)" : "Batafsil yozing")
-                        color: Theme.text
-                        font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                        text: Tr.t("Yangi xabarlar shuncha vaqtdan keyin o'chadi")
+                        color: Theme.grey
+                        font.family: Theme.font; font.pixelSize: 13
                     }
                     Repeater {
-                        model: steps.st.options || []
+                        model: [0, 86400, 604800, 2678400]
                         Rectangle {
-                            required property var modelData
-                            width: steps.width; height: Math.max(44, optText.implicitHeight + 20)
-                            color: optHit.pressed ? Theme.highlight : "transparent"
+                            required property int modelData
+                            width: choices.width; height: 44
+                            color: choiceHit.pressed ? Theme.highlight : "transparent"
                             Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
                             Text {
-                                id: optText
-                                x: 16; width: parent.width - 48
-                                anchors.verticalCenter: parent.verticalCenter
-                                wrapMode: Text.Wrap
-                                text: parent.modelData.text
+                                x: 16; anchors.verticalCenter: parent.verticalCenter
+                                text: parent.modelData ? store.lasting(parent.modelData) : Tr.t("O'chirilgan")
                                 color: Theme.text
                                 font.family: Theme.font; font.pixelSize: 16
                             }
                             Text {
-                                anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
-                                text: "›"; color: Theme.grey; font.pixelSize: 20
+                                visible: page.autoDelete === parent.modelData
+                                anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter
+                                text: "✓"
+                                color: Theme.accent
+                                font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
                             }
                             MouseArea {
-                                id: optHit
+                                id: choiceHit
                                 anchors.fill: parent
                                 onClicked: {
-                                    const ids = steps.st.ids
-                                    reportMenu.close()
-                                    page.report(ids, parent.modelData.id, "")
+                                    timerMenuItem.visible = false
+                                    if (parent.modelData !== page.autoDelete)
+                                        page.setAutoDelete(parent.modelData)
                                 }
                             }
                         }
                     }
-                    Rectangle {          // the words, when Telegram asks for them
-                        visible: !steps.st.options
+                }
+            }
+        }
+    }
+
+    Loader {             // the picked ones deleted: for us, or for everyone too (as the ⏱'s choices)
+        id: deleteMenuLoader
+        z: 30
+        active: false
+        anchors.fill: parent
+        sourceComponent: Item {
+            id: deleteMenuItem
+            visible: false
+            // what TDLib lets with all of them: both, or only one of the two
+            readonly property var choices: {
+                const all = page.pickedCan("can_be_deleted_for_all_users"), self = page.pickedCan("can_be_deleted_only_for_self")
+                return all && self ? [{ t: Tr.t("Hamma uchun o'chirish"), everyone: true }, { t: Tr.t("Men uchun o'chirish"), everyone: false }]
+                     : all ? [{ t: Tr.t("O'chirish"), everyone: true }] : [{ t: Tr.t("Men uchun o'chirish"), everyone: false }]
+            }
+            function show() {
+                visible = true
+                delCard.scale = 0.01
+                delGrow.start()
+            }
+            MouseArea { anchors.fill: parent; onClicked: deleteMenuItem.visible = false }
+            Rectangle {
+                id: delCard
+                x: 10
+                anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
+                width: 250; height: delChoices.height
+                radius: 16
+                color: Theme.menu
+                transformOrigin: Item.BottomLeft
+                layer.enabled: true
+                ScaleAnimator { id: delGrow; target: delCard; from: 0.01; to: 1; duration: 420
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring }
+                Column {
+                    id: delChoices
+                    width: parent.width
+                    Text {
                         x: 16; width: parent.width - 32
-                        height: visible ? Math.max(44, why.contentHeight + 20) : 0
-                        radius: 10
-                        color: Theme.field
-                        TextEdit {
-                            id: why
-                            x: 10; y: 10; width: parent.width - 20
-                            wrapMode: TextEdit.Wrap
-                            color: Theme.text
-                            font.family: Theme.font; font.pixelSize: 16
-                        }
+                        topPadding: 10; bottomPadding: 6
+                        wrapMode: Text.Wrap
+                        text: page.pickedIds.length > 1 ? Tr.n("%1 ta xabar o'chirilsinmi?", page.pickedIds.length) : Tr.t("Xabar o'chirilsinmi?")
+                        color: Theme.grey
+                        font.family: Theme.font; font.pixelSize: 13
                     }
-                    Rectangle {
-                        visible: !steps.st.options
-                        width: steps.width; height: visible ? 52 : 0
-                        color: "transparent"
-                        Text {
-                            anchors.centerIn: parent
-                            text: Tr.t("Yuborish")
-                            color: steps.st.optional || why.text.trim() ? Theme.accent : Theme.grey
-                            font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: {
-                                if (!steps.st.optional && !why.text.trim())
-                                    return
-                                const st = steps.st
-                                reportMenu.close()
-                                page.report(st.ids, st.option, why.text.trim())
+                    Repeater {
+                        model: deleteMenuItem.choices
+                        Rectangle {
+                            required property var modelData
+                            width: delChoices.width; height: 44
+                            color: delHit.pressed ? Theme.highlight : "transparent"
+                            Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+                            Text {
+                                x: 16; anchors.verticalCenter: parent.verticalCenter
+                                text: parent.modelData.t
+                                color: Theme.danger
+                                font.family: Theme.font; font.pixelSize: 16
+                            }
+                            MouseArea {
+                                id: delHit
+                                anchors.fill: parent
+                                onClicked: {
+                                    deleteMenuItem.visible = false
+                                    page.deletePicked(parent.modelData.everyone)
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    Loader {             // Shikoyat qilish: why (Telegram's options), or a few words, a step at a time
+        id: reportMenuLoader
+        z: 30
+        active: false
+        anchors.fill: parent
+        sourceComponent: Item {
+            id: reportMenuItem
+            visible: false
+            property var step: null         // { ids, title, options } or { ids, option, optional }
+            readonly property alias whyField: whyInput
+            function ask(st) {
+                step = st
+                whyInput.text = ""
+                visible = true
+                reportCard.scale = 0.01
+                reportGrow.start()
+                if (!st.options)
+                    whyInput.forceActiveFocus()
+            }
+            function close() {
+                visible = false
+                whyInput.focus = false
+            }
+            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.25) }
+            MouseArea { anchors.fill: parent; onClicked: reportMenuItem.close() }
             Rectangle {
-                id: reportCancel
-                anchors.bottom: parent.bottom
-                width: parent.width; height: 48
-                color: cancelHit.pressed ? Theme.highlight : Theme.menu
-                Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
-                Text {
-                    anchors.centerIn: parent
-                    text: Tr.t("Bekor qilish")
-                    color: Theme.accent
-                    font.family: Theme.font; font.pixelSize: 17
+                id: reportCard
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.max(60, (parent.height - page.kb - height) / 2)
+                width: Math.min(parent.width - 48, 300); height: Math.min(steps.height + 48, parent.height - page.kb - 120)
+                radius: 16
+                clip: true
+                color: Theme.menu
+                layer.enabled: true
+                ScaleAnimator { id: reportGrow; target: reportCard; from: 0.01; to: 1; duration: 420
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring }
+                MouseArea { anchors.fill: parent }      // (not through to the shade, which closes it)
+                Flickable {          // (a long list of reasons scrolls; «Bekor qilish» stays under it)
+                    anchors { left: parent.left; right: parent.right; top: parent.top; bottom: reportCancel.top }
+                    contentHeight: steps.height
+                    boundsBehavior: Flickable.StopAtBounds
+                    clip: true
+                    Column {
+                        id: steps
+                        width: reportCard.width
+                        readonly property var st: reportMenuItem.step || {}
+                        Text {
+                            x: 16; width: parent.width - 32
+                            topPadding: 14; bottomPadding: 8
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            text: steps.st.options ? (steps.st.title || Tr.t("Shikoyat sababi")) : Tr.t(steps.st.optional ? "Batafsil yozing (ixtiyoriy)" : "Batafsil yozing")
+                            color: Theme.text
+                            font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                        }
+                        Repeater {
+                            model: steps.st.options || []
+                            Rectangle {
+                                required property var modelData
+                                width: steps.width; height: Math.max(44, optText.implicitHeight + 20)
+                                color: optHit.pressed ? Theme.highlight : "transparent"
+                                Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+                                Text {
+                                    id: optText
+                                    x: 16; width: parent.width - 48
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    wrapMode: Text.Wrap
+                                    text: parent.modelData.text
+                                    color: Theme.text
+                                    font.family: Theme.font; font.pixelSize: 16
+                                }
+                                Text {
+                                    anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
+                                    text: "›"; color: Theme.grey; font.pixelSize: 20
+                                }
+                                MouseArea {
+                                    id: optHit
+                                    anchors.fill: parent
+                                    onClicked: {
+                                        const ids = steps.st.ids
+                                        reportMenuItem.close()
+                                        page.report(ids, parent.modelData.id, "")
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {          // the words, when Telegram asks for them
+                            visible: !steps.st.options
+                            x: 16; width: parent.width - 32
+                            height: visible ? Math.max(44, whyInput.contentHeight + 20) : 0
+                            radius: 10
+                            color: Theme.field
+                            TextEdit {
+                                id: whyInput
+                                x: 10; y: 10; width: parent.width - 20
+                                wrapMode: TextEdit.Wrap
+                                color: Theme.text
+                                font.family: Theme.font; font.pixelSize: 16
+                            }
+                        }
+                        Rectangle {
+                            visible: !steps.st.options
+                            width: steps.width; height: visible ? 52 : 0
+                            color: "transparent"
+                            Text {
+                                anchors.centerIn: parent
+                                text: Tr.t("Yuborish")
+                                color: steps.st.optional || whyInput.text.trim() ? Theme.accent : Theme.grey
+                                font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    if (!steps.st.optional && !whyInput.text.trim())
+                                        return
+                                    const st = steps.st
+                                    reportMenuItem.close()
+                                    page.report(st.ids, st.option, whyInput.text.trim())
+                                }
+                            }
+                        }
+                    }
                 }
-                MouseArea { id: cancelHit; anchors.fill: parent; onClicked: reportMenu.close() }
+                Rectangle {
+                    id: reportCancel
+                    anchors.bottom: parent.bottom
+                    width: parent.width; height: 48
+                    color: cancelHit.pressed ? Theme.highlight : Theme.menu
+                    Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+                    Text {
+                        anchors.centerIn: parent
+                        text: Tr.t("Bekor qilish")
+                        color: Theme.accent
+                        font.family: Theme.font; font.pixelSize: 17
+                    }
+                    MouseArea { id: cancelHit; anchors.fill: parent; onClicked: reportMenuItem.close() }
+                }
             }
         }
     }
 
-    Item {               // ⋯ of the translation row: hide it for this chat (Telegram-iOS: "Tarjima qilmaslik")
-        id: transMenu
+    Loader {             // ⋯ of the translation row: hide it for this chat (Telegram-iOS: "Tarjima qilmaslik")
+        id: transMenuLoader
         z: 30
+        active: false
         anchors.fill: parent
-        visible: false
-        function show() {
-            visible = true
-            transCard.scale = 0.01
-            transGrow.start()
-        }
-        MouseArea { anchors.fill: parent; onClicked: transMenu.visible = false }
-        Rectangle {
-            id: transCard
-            anchors.right: parent.right; anchors.rightMargin: 16
-            y: pinBar.y + pinBar.height
-            width: 250; height: 44
-            radius: 16
-            color: Theme.menu
-            transformOrigin: Item.TopRight
-            layer.enabled: true
-            ScaleAnimator { id: transGrow; target: transCard; from: 0.01; to: 1; duration: 420
-                            easing.type: Easing.BezierSpline; easing.bezierCurve: menu.spring }
+        sourceComponent: Item {
+            id: transMenuItem
+            visible: false
+            function show() {
+                visible = true
+                transCard.scale = 0.01
+                transGrow.start()
+            }
+            MouseArea { anchors.fill: parent; onClicked: transMenuItem.visible = false }
             Rectangle {
-                anchors.fill: parent; radius: parent.radius
-                color: hideHit.pressed ? Theme.highlight : "transparent"
-            }
-            Text {
-                x: 16; anchors.verticalCenter: parent.verticalCenter
-                text: Tr.t("Bu chatni tarjima qilmaslik")
-                color: Theme.text
-                font.family: Theme.font; font.pixelSize: 16
-            }
-            MouseArea {
-                id: hideHit
-                anchors.fill: parent
-                onClicked: {
-                    transMenu.visible = false
-                    page.setTranslating(false)
-                    store.send({ "@type": "toggleChatIsTranslatable", chat_id: page.chatId, is_translatable: false })
+                id: transCard
+                anchors.right: parent.right; anchors.rightMargin: 16
+                y: pinBar.y + pinBar.height
+                width: 250; height: 44
+                radius: 16
+                color: Theme.menu
+                transformOrigin: Item.TopRight
+                layer.enabled: true
+                ScaleAnimator { id: transGrow; target: transCard; from: 0.01; to: 1; duration: 420
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring }
+                Rectangle {
+                    anchors.fill: parent; radius: parent.radius
+                    color: hideHit.pressed ? Theme.highlight : "transparent"
+                }
+                Text {
+                    x: 16; anchors.verticalCenter: parent.verticalCenter
+                    text: Tr.t("Bu chatni tarjima qilmaslik")
+                    color: Theme.text
+                    font.family: Theme.font; font.pixelSize: 16
+                }
+                MouseArea {
+                    id: hideHit
+                    anchors.fill: parent
+                    onClicked: {
+                        transMenuItem.visible = false
+                        page.setTranslating(false)
+                        store.send({ "@type": "toggleChatIsTranslatable", chat_id: page.chatId, is_translatable: false })
+                    }
                 }
             }
         }
@@ -5759,24 +5198,2067 @@ Page {
         id: chipMetrics
         font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
     }
+    // a quote's two lines at their own font's height: a name in a script whose font stands taller (𒐫𒐫𒐫,
+    // cuneiform, a real nickname) laid its line out that much lower, over the text under it. Lifted back by
+    // what it grew (more than an emoji picture's few pixels), its tall letters cut at the quote's top.
+    FontMetrics { id: quoteWhoMetrics; font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold }
+    FontMetrics { id: quoteWhatMetrics; font.family: Theme.font; font.pixelSize: 14 }
+    function tallBy(text, metrics) {
+        const d = text.baselineOffset - metrics.ascent
+        return d > 4 ? Math.round(d) : 0
+    }
 
-    MessageMenu {
-        id: menu
-        behind: content
-        ceiling: bar.height
-        floor: page.height
-        onReacted: (emoji) => {
-            if (emoji === "⭐") {
-                const i = page.indexOf(page.reacting)
-                let paid = null
-                if (i >= 0) {
-                    const list = JSON.parse(messages.get(i).reacts || "[]")
-                    paid = list.find((r) => r.paid)
-                }
-                paidSheet.show(page.reacting, paid ? (paid.reactors || []) : [], !!(paid && paid.mine))
-                return
+    // Shared page-level components for message rows (instantiated once per page instead of per row)
+    Component {
+        id: dayPillComp
+        Rectangle {
+            readonly property Item msg: parent.msg
+            width: dayText.implicitWidth + 16; height: 22; radius: 11
+            color: Theme.dayPill
+            Text {
+                id: dayText
+                anchors.centerIn: parent
+                text: page.dayName(parent.msg.shell.date)
+                color: "white"
+                font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
             }
-            store.react(page.chatId, page.reacting, emoji, menu.chosen.indexOf(emoji) < 0)
+        }
+    }
+    Component {
+        id: unreadBarComp
+        Rectangle {
+            color: Theme.bar
+            Text {
+                anchors.centerIn: parent
+                text: Tr.t("O'qilmagan xabarlar")
+                color: Theme.grey
+                font.family: Theme.font; font.pixelSize: 13
+            }
+        }
+    }
+    Component {
+        id: faceComp
+        Avatar {
+            id: msgFace
+            readonly property Item host: parent
+            // its Loader's size from the start: made at Avatar's own 56 and shrunk, its initials were laid out
+            // at two sizes (a name in a rare script: its fallback fonts opened for both)
+            width: 34; height: 34
+            letters: store.letters(host.name)
+            tint: host.tint
+            Component.onCompleted: {
+                const s = JSON.parse(host.key)
+                const u = s.user_id && store.users[s.user_id]
+                if (u && u.type && u.type["@type"] === "userTypeDeleted")
+                    msgFace.ghost = true
+                else if (s.user_id)
+                    store.userPhoto(store.users[s.user_id], (path) => msgFace.source = path)
+                else if (store.chats[s.chat_id]) {
+                    store.watchPhoto(store.chats[s.chat_id])
+                    msgFace.source = store.photoPath(store.chats[s.chat_id])
+                }
+            }
+        }
+    }
+    Component {
+        id: headNameComp
+        Text {
+            readonly property Item host: parent
+            readonly property real wants: implicitWidth
+            width: Math.min(implicitWidth, host.room)
+            elide: Text.ElideRight
+            text: host.msg.shell.sender
+            color: host.msg.shell.tint
+            font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+        }
+    }
+    Component {
+        id: headRankComp
+        Item {
+            readonly property Item host: parent
+            readonly property Item sh: host.msg.shell
+            readonly property real wants: whoT.implicitWidth + rankT.implicitWidth + 11
+            width: host.bubW - 24
+            height: whoT.height
+            Text {
+                id: whoT
+                width: Math.min(implicitWidth, parent.host.room - (rankT.implicitWidth + 11))
+                elide: Text.ElideRight
+                text: parent.sh.sender
+                color: parent.sh.tint
+                font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+            }
+            Rectangle {
+                visible: parent.sh.rankKind > 0
+                x: rankT.x - 5; y: rankT.y + rankT.height / 2 - 8.5
+                width: rankT.width + 10; height: 17; radius: 8.5
+                color: rankT.color
+                opacity: 0.1
+            }
+            Text {
+                id: rankT
+                x: parent.width - width; y: 1
+                width: Math.min(implicitWidth, parent.host.room / 2)
+                elide: Text.ElideRight
+                text: parent.sh.rank
+                color: parent.sh.rankKind === 2 ? "#956ac8" : parent.sh.rankKind === 1 ? "#49a355" : (parent.sh.out ? Theme.outMeta : Theme.inMeta)
+                font.family: Theme.font; font.pixelSize: 13
+            }
+        }
+    }
+    Component {
+        id: headFwdComp
+        Item {
+            readonly property Item host: parent
+            readonly property Item msg: host.msg
+            readonly property Item sh: msg.shell
+            readonly property bool showWho: sh.sender !== "" && msg.first && !msg.bare
+            readonly property bool showRank: showWho && sh.rank !== ""
+            readonly property real wants: Math.max(showWho ? whoF.implicitWidth + (showRank ? rankF.implicitWidth + 11 : 0) : 0, fwdCol.implicitWidth)
+            width: host.bubW - 24
+            height: fwdCol.y + fwdCol.height
+            Text {
+                id: whoF
+                visible: parent.showWho
+                width: Math.min(implicitWidth, parent.host.room - (parent.showRank ? rankF.implicitWidth + 11 : 0))
+                elide: Text.ElideRight
+                text: parent.sh.sender
+                color: parent.sh.tint
+                font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+            }
+            Rectangle {
+                visible: parent.showRank && parent.sh.rankKind > 0
+                x: rankF.x - 5; y: rankF.y + rankF.height / 2 - 8.5
+                width: rankF.width + 10; height: 17; radius: 8.5
+                color: rankF.color
+                opacity: 0.1
+            }
+            Text {
+                id: rankF
+                visible: parent.showRank
+                x: parent.width - width; y: 1
+                width: Math.min(implicitWidth, parent.host.room / 2)
+                elide: Text.ElideRight
+                text: parent.sh.rank
+                color: parent.sh.rankKind === 2 ? "#956ac8" : parent.sh.rankKind === 1 ? "#49a355" : (parent.sh.out ? Theme.outMeta : Theme.inMeta)
+                font.family: Theme.font; font.pixelSize: 13
+            }
+            Column {
+                id: fwdCol
+                y: parent.showWho ? whoF.height + 1 : 0
+                Text {
+                    width: Math.min(implicitWidth, parent.parent.host.room)
+                    elide: Text.ElideRight
+                    text: Tr.t("Uzatilgan xabar")
+                    color: parent.parent.sh.out ? Theme.check : Theme.accent
+                    lineHeight: 0.95
+                    font.family: Theme.font; font.pixelSize: 14
+                }
+                Text {
+                    width: Math.min(implicitWidth, parent.parent.host.room)
+                    elide: Text.ElideRight
+                    text: parent.parent.sh.fwd
+                    color: parent.parent.sh.out ? Theme.check : Theme.accent
+                    lineHeight: 0.95
+                    font.family: Theme.font; font.pixelSize: 14
+                }
+            }
+        }
+    }
+    Component {
+        id: quoteComp
+        Rectangle {
+            id: answer
+            readonly property Item item: parent.msg
+            readonly property Item sh: item.shell
+            readonly property color ink: item.bare ? "white" : sh.out ? Theme.check : Theme.accent
+            readonly property real wants: Math.max(quoteWho.implicitWidth, Math.min(quoteWhat.implicitWidth, 220)) + 22
+            radius: 6
+            // (by a sticker: on the wallpaper, as the time by it)
+            color: item.bare ? Qt.rgba(0, 0, 0, 0.4) : Qt.rgba(ink.r, ink.g, ink.b, 0.12)
+            clip: true
+            Rectangle { width: 3; height: parent.height; color: answer.ink }
+            Text {
+                id: quoteWho
+                x: 11; y: 3 - page.tallBy(quoteWho, quoteWhoMetrics)
+                width: parent.width - 16
+                elide: Text.ElideRight
+                text: answer.sh.quoteName
+                color: answer.ink
+                font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
+            }
+            Text {
+                id: quoteWhat
+                x: 11; y: 20 - page.tallBy(quoteWhat, quoteWhatMetrics)
+                width: parent.width - 16
+                elide: Text.ElideRight
+                maximumLineCount: 1
+                // (its emoji as pictures, the text's size: the font's came out small and low)
+                textFormat: Text.StyledText
+                text: Emo.emojify(page.store.escaped(answer.sh.quoteText.replace(/\s+/g, " ")), 16)
+                color: answer.item.bare ? "white" : answer.sh.out ? Theme.outText : Theme.inText
+                font.family: Theme.font; font.pixelSize: 14
+            }
+            MouseArea { anchors.fill: parent; onClicked: page.openReply(answer.sh.msgId, answer.sh.replyId, answer.sh.replyChat) }
+        }
+    }
+    Component {
+        id: reactRowComp
+        Item {
+            id: reactWrap
+            readonly property Item host: parent
+            readonly property Item item: host.msg
+            height: reactFlow.height
+            Flow {
+                id: reactFlow
+                width: parent.width
+                // the time by the last line, or under it when that line has no room
+                property bool stampBelow: false
+                onPositioningComplete: {
+                    const last = children.length > 1 ? children[children.length - 2] : null     // (the Repeater is last)
+                    stampBelow = !!last && last.x + last.width + reactWrap.host.stampW + 12 > reactWrap.host.bubW - reactWrap.host.x - 10
+                }
+                height: implicitHeight + (stampBelow ? 18 : 0)
+                spacing: 4
+                Repeater {
+                    model: reactWrap.item.reactList
+                    Rectangle {
+                        id: chip
+                        required property var modelData
+                        readonly property bool isPaid: !!modelData.paid
+                        readonly property var who: modelData.who || []
+                        width: page.chipWidth(modelData); height: 28; radius: 14
+                        readonly property color ink: reactWrap.item.bare ? "white" : reactWrap.item.out ? Theme.check : Theme.accent
+                        readonly property color goldInk: Theme.dark ? "#ffc337" : "#c87000"
+                        // paid star reaction chip: gold translucent (unchosen) or solid warm gold (chosen)
+                        // regular chip: accent translucent or solid; standalone over wallpaper on dayPill
+                        color: isPaid ? (modelData.mine ? "#f59300" : Qt.rgba(1, 0.72, 0.05, reactWrap.item.bare ? 0.45 : 0.22))
+                             : modelData.mine ? ink : reactWrap.item.bare ? Theme.dayPill : Qt.rgba(ink.r, ink.g, ink.b, 0.15)
+                        border.width: isPaid && modelData.mine ? 1 : 0
+                        border.color: "#ffd43b"
+                        Icon {
+                            id: starGlyph
+                            visible: chip.isPaid
+                            x: 8; anchors.verticalCenter: parent.verticalCenter
+                            width: 16; height: 16
+                            name: "star"
+                            color: chip.modelData.mine ? "white" : "#ffb10a"
+                        }
+                        Text {
+                            id: chipText
+                            visible: !chip.isPaid
+                            anchors.centerIn: chip.who.length ? undefined : parent
+                            x: 8; anchors.verticalCenter: parent.verticalCenter
+                            text: chip.who.length ? chip.modelData.e : chip.modelData.e + " " + chip.modelData.n
+                            color: chip.modelData.mine ? (reactWrap.item.bare ? "#1c1c1e" : Theme.dark && reactWrap.item.out ? Theme.bubbleOut : "white") : chip.ink
+                            font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+                        }
+                        // top paid reactors (20 pt) OR regular reactors (24 pt)
+                        Repeater {
+                            model: chip.who
+                            Rectangle {
+                                required property var modelData
+                                required property int index
+                                readonly property int sz: chip.isPaid ? 20 : 24
+                                readonly property int step: chip.isPaid ? 10 : 12
+                                x: (chip.isPaid ? starGlyph.x + starGlyph.width + 4 : chipText.x + chipText.implicitWidth + 4) + index * step - 1.5
+                                anchors.verticalCenter: parent.verticalCenter
+                                z: chip.who.length - index      // (over the chip: below 0 it went under its colour)
+                                width: sz + 3; height: sz + 3; radius: width / 2
+                                // (the chip's colour over the bubble's, whole: a see-through ring would show the face under it)
+                                color: chip.modelData.mine || reactWrap.item.bare ? chip.color
+                                     : Qt.tint(reactWrap.item.out ? Theme.bubbleOut : Theme.bubbleIn, chip.color)
+                                Avatar {
+                                    id: reactor
+                                    anchors.centerIn: parent
+                                    width: parent.sz; height: parent.sz
+                                    Component.onCompleted: store.faceOn(reactor, parent.modelData)
+                                }
+                            }
+                        }
+                        Text {
+                            visible: chip.isPaid
+                            x: starGlyph.x + starGlyph.width + (chip.who.length ? 4 + 20 + (chip.who.length - 1) * 10 : 0) + 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: store.short(chip.modelData.n)
+                            color: chip.modelData.mine ? "white" : chip.goldInk
+                            font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+                        }
+                    }
+                }
+            }
+            MouseArea {     // one for all the chips: the one under the finger
+                anchors.fill: parent
+                onClicked: (mouse) => {
+                    const c = reactFlow.childAt(mouse.x, mouse.y)
+                    if (!c || !c.modelData)
+                        return
+                    if (c.modelData.paid)
+                        paidSheet.show(reactWrap.item.reactId, c.modelData.reactors || [], !!c.modelData.mine)
+                    else
+                        store.react(page.chatId, reactWrap.item.reactId, c.modelData.e, !c.modelData.mine)
+                }
+            }
+        }
+    }
+    Component {
+        id: countsComp
+        Row {
+            readonly property Item host: parent
+            readonly property Item sh: host.msg.shell
+            spacing: 2
+            Icon {
+                visible: parent.sh.views > 0
+                anchors.verticalCenter: parent.verticalCenter
+                width: 14; height: 14
+                name: "eye"; color: parent.host.ink
+            }
+            Text {
+                visible: parent.sh.views > 0
+                text: store.short(parent.sh.views) + " "
+                color: parent.host.ink
+                font.family: Theme.font; font.pixelSize: 12
+            }
+            Icon {
+                visible: parent.sh.replies > 0
+                anchors.verticalCenter: parent.verticalCenter
+                width: 13; height: 13
+                name: "reply"; color: parent.host.ink
+            }
+            Text {
+                visible: parent.sh.replies > 0
+                text: parent.sh.replies + " "
+                color: parent.host.ink
+                font.family: Theme.font; font.pixelSize: 12
+            }
+        }
+    }
+    Component {
+        id: talkRowComp
+        Item {
+            readonly property Item item: parent.msg
+            Rectangle { x: 12; width: parent.width - 24; height: 1; color: Theme.fieldBorder }
+            Icon {
+                x: 10; anchors.verticalCenter: parent.verticalCenter
+                name: "chats"; color: Theme.accent; scale: 0.8
+            }
+            Text {
+                x: 40; anchors.verticalCenter: parent.verticalCenter
+                text: parent.item.talk > 0 ? Tr.n("%1 ta izoh", parent.item.talk) : Tr.t("Izoh qoldirish")
+                color: Theme.accent
+                font.family: Theme.font; font.pixelSize: 15
+            }
+            Text {
+                anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter
+                text: "›"
+                color: Theme.accent
+                font.family: Theme.font; font.pixelSize: 22
+            }
+            MouseArea { anchors.fill: parent; onClicked: page.openComments(parent.item.talkId) }
+        }
+    }
+    Component {
+        id: shareComp
+        Rectangle {
+            readonly property Item item: parent.msg
+            radius: 16
+            color: Qt.rgba(0, 0, 0, 0.22)
+            Icon { anchors.centerIn: parent; name: "forward"; color: "white"; scale: 0.72 }
+            MouseArea {
+                anchors.fill: parent; anchors.margins: -6
+                onClicked: { page.forwarding = parent.item.ids; page.openForward() }
+            }
+        }
+    }
+    // Shared page-level animators and dynamic row overlays (one per page instead of per row)
+    ScaleAnimator { id: bubbleSink; to: 0.96; duration: 350; easing.type: Easing.OutQuad }
+    ScaleAnimator { id: bubbleRise; to: 1; duration: 150; easing.type: Easing.OutQuad }
+    function pressBubble(b) {
+        if (bubbleRise.running && bubbleRise.target && bubbleRise.target !== b) {
+            bubbleRise.stop()
+            bubbleRise.target.scale = 1
+        }
+        if (bubbleSink.running && bubbleSink.target && bubbleSink.target !== b) {
+            bubbleSink.stop()
+            bubbleSink.target.scale = 1
+        }
+        bubbleRise.stop()
+        bubbleSink.target = b
+        bubbleSink.restart()
+    }
+    function releaseBubble(b) {
+        if (bubbleSink.target === b)
+            bubbleSink.stop()
+        if (bubbleRise.running && bubbleRise.target && bubbleRise.target !== b) {
+            bubbleRise.stop()
+            bubbleRise.target.scale = 1
+        }
+        if (b) {
+            bubbleRise.target = b
+            bubbleRise.restart()
+        }
+    }
+    function clearBubbleAnim(b) {
+        if (bubbleSink.target === b) { bubbleSink.stop(); bubbleSink.target = null }
+        if (bubbleRise.target === b) { bubbleRise.stop(); bubbleRise.target = null }
+    }
+
+    XAnimator { id: rowFlyX; to: 0; duration: 300; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.23, 1.0, 0.32, 1.0, 1.0, 1.0] }
+    YAnimator { id: rowFlyY; to: 0; duration: 300; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.19919, 0.01064, 0.27921, 0.91025, 1.0, 1.0] }
+    function flyMover(m) {
+        if (rowFlyX.running && rowFlyX.target && rowFlyX.target !== m) { rowFlyX.stop(); rowFlyX.target.x = 0 }
+        if (rowFlyY.running && rowFlyY.target && rowFlyY.target !== m) { rowFlyY.stop(); rowFlyY.target.y = 0 }
+        rowFlyX.target = m
+        rowFlyY.target = m
+        rowFlyX.restart()
+        rowFlyY.restart()
+    }
+    function clearFlyAnim(m) {
+        if (rowFlyX.target === m) { rowFlyX.stop(); rowFlyX.target = null }
+        if (rowFlyY.target === m) { rowFlyY.stop(); rowFlyY.target = null }
+    }
+
+    NumberAnimation { id: roundGrow; property: "roundK"; to: 1; duration: 300; easing.type: Easing.OutCubic }
+    NumberAnimation { id: roundShrink; property: "roundK"; to: 0; duration: 300; easing.type: Easing.OutCubic }
+    function animateRound(it, grow) {
+        if (grow) {
+            if (roundShrink.target === it) roundShrink.stop()
+            if (roundGrow.running && roundGrow.target && roundGrow.target !== it) { roundGrow.stop(); roundGrow.target.roundK = 1 }
+            roundGrow.target = it
+            roundGrow.restart()
+        } else {
+            if (roundGrow.target === it) roundGrow.stop()
+            if (roundShrink.running && roundShrink.target && roundShrink.target !== it) { roundShrink.stop(); roundShrink.target.roundK = 0 }
+            roundShrink.target = it
+            roundShrink.restart()
+        }
+    }
+    function clearRoundAnim(it) {
+        if (roundGrow.target === it) { roundGrow.stop(); roundGrow.target = null }
+        if (roundShrink.target === it) { roundShrink.stop(); roundShrink.target = null }
+    }
+
+    Component {
+        id: flashComp
+        Rectangle {
+            id: fl
+            required property Item row
+            property Item shape: null       // the bubble's: tinted too (as Telegram-iOS), seen over any wallpaper
+            z: -1
+            y: row ? row.above - 2 : 0
+            width: row ? row.width : 0
+            height: row ? row.height - y + 2 : 0
+            color: Theme.accent
+            opacity: 0
+            readonly property bool lit: !!row && row.ids.indexOf(page.flashId) >= 0
+            onLitChanged: {
+                if (lit) {
+                    fadeOut.stop()
+                    fadeIn.restart()
+                } else {
+                    fadeIn.stop()
+                    fadeOut.restart()
+                }
+            }
+            Component.onCompleted: if (lit) fadeIn.restart()
+            // the band alone was lost by day: the accent over the light wallpaper's own colours
+            BorderImage {
+                parent: fl.shape        // over the bubble's picture, under its text (a child paints right after it)
+                visible: !!fl.shape && String(fl.shape.source) !== ""
+                width: parent ? parent.width : 0; height: parent ? parent.height : 0
+                border { left: fl.shape ? fl.shape.border.left : 0; right: fl.shape ? fl.shape.border.right : 0
+                         top: fl.shape ? fl.shape.border.top : 0; bottom: fl.shape ? fl.shape.border.bottom : 0 }
+                source: {
+                    if (!fl.shape || String(fl.shape.source) === "")
+                        return ""
+                    const p = String(fl.shape.source).split("/")      // image://bubble/out/b/t/<colour>/...
+                    p[6] = String(Theme.accent).slice(1)
+                    return p.join("/")
+                }
+                smooth: true
+                opacity: fl.opacity
+            }
+            NumberAnimation { id: fadeIn; target: fl; property: "opacity"; to: 0.38; duration: 700; easing.type: Easing.OutQuad }
+            NumberAnimation {
+                id: fadeOut; target: fl; property: "opacity"; to: 0; duration: 700; easing.type: Easing.OutQuad
+                onFinished: {
+                    if (fl.row && fl.row.flashRect === fl)
+                        fl.row.flashRect = null
+                    fl.destroy()
+                }
+            }
+        }
+    }
+    Component {
+        id: burstComp
+        Lottie {
+            required property Item row
+            required property Item bub
+            required property Item pic
+            required property string file
+            required property real dx
+            required property real dy
+            readonly property real w: pic ? pic.width : 0
+            readonly property real h: pic ? pic.height : 0
+            z: 10
+            width: 3 * w; height: 3 * h
+            x: (bub && pic && row) ? bub.x + pic.x - w + (row.out ? 10 - w : w - 10) + dx : 0
+            y: (bub && pic) ? bub.y + pic.y - h + dy : 0
+            path: file
+            once: true
+            most: 512
+            running: page.visible
+            transform: Scale { origin.x: 1.5 * parent.w; xScale: parent.row && parent.row.out ? 1 : -1 }
+            function done() {
+                if (row)
+                    row.burstCount = Math.max(0, row.burstCount - 1)
+                destroy()
+            }
+            onEnded: done()
+            onFailedChanged: if (failed) done()
+        }
+    }
+    Component {
+        id: stampBgComp
+        Rectangle {
+            required property Item target
+            z: 0.5
+            anchors.fill: target
+            anchors.margins: -3; anchors.leftMargin: -6; anchors.rightMargin: -6
+            radius: height / 2
+            color: Qt.rgba(0, 0, 0, 0.4)
+        }
+    }
+
+    Component {
+        id: circleComp
+        Item {
+            id: circleWrap
+            readonly property Item host: parent
+            readonly property Item item: host.msg
+            readonly property Item mover: host.moverItem
+            property bool shown: false
+            property real slideX: shown && item && !item.out ? 40 : 0
+            Behavior on slideX { NumberAnimation { duration: 420; easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring } }
+            onSlideXChanged: if (mover && item && !item.out) mover.x = slideX
+            Component.onCompleted: Qt.callLater(() => shown = Qt.binding(() => !!circleWrap.item && circleWrap.item.pickable))
+            Component.onDestruction: if (mover && item && !item.out) mover.x = 0
+            Rectangle {
+                visible: opacity > 0
+                opacity: circleWrap.shown ? 1 : 0
+                x: circleWrap.shown ? 12 : -16
+                y: circleWrap.item.above + (circleWrap.host.bubH - height) / 2
+                width: 26; height: 26; radius: 13
+                color: circleWrap.item.isPicked ? Theme.accent : Qt.rgba(0, 0, 0, 0.12)
+                border.color: circleWrap.item.isPicked ? Theme.accent : "white"; border.width: 1.5
+                Behavior on x { NumberAnimation { duration: 420; easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring } }
+                Behavior on opacity { NumberAnimation { duration: 200 } }
+                Icon { visible: circleWrap.item.isPicked; anchors.centerIn: parent; width: 18; height: 18; name: "check"; color: "white" }
+            }
+            MouseArea {          // while picking a tap anywhere on its row picks it (or puts it back);
+                anchors.fill: parent    // on one of an album's pictures or files, that one alone
+                visible: circleWrap.item.pickable
+                onClicked: (mouse) => {
+                    const one = circleWrap.item.oneAt(mouse.x, mouse.y)
+                    page.pick(one ? [one] : circleWrap.item.ids)
+                }
+            }
+        }
+    }
+    Component {
+        id: videoPlayerComp
+        InlineVideo {
+            id: clip
+            readonly property Item host: parent
+            path: host.file
+            running: host.round ? host.msg.roundShown && !page.player.roundPaused : host.playing
+            resumeFrom: host.round ? (() => page.player.roundPos) : null
+            radius: Number(host.corner)
+            sound: host.round
+            loop: !host.round
+            rate: host.round ? page.player.rate : 1
+            onEnded: if (host.round && page.roundId === host.msgId) page.player.step(false)
+            // (how far it is: the mini player's line, the ring, the time)
+            Binding { when: clip.host.round && clip.running; target: page.player; property: "roundPos"; value: clip.position }
+            Binding { when: clip.host.round && clip.duration > 0; target: page.player; property: "roundDur"; value: clip.duration }
+        }
+    }
+    Component {
+        id: lottiePlayerComp
+        Lottie {
+            readonly property Item host: parent
+            path: host.file
+            running: host.playing
+            once: host.emo
+            fitz: host.msg.shell.fitz
+            // (played once already in this chat: on its last frame, as on iOS)
+            atEnd: host.emo && !!page.seenEmo[host.msgId]
+            onEnded: page.seenEmo[host.msgId] = true
+        }
+    }
+    Component {
+        id: roundRingComp
+        Shape {
+            id: rrShape
+            preferredRendererType: Shape.CurveRenderer
+            opacity: 0
+            SequentialAnimation on opacity {
+                PauseAnimation { duration: 150 }
+                NumberAnimation { to: 1; duration: 200 }
+            }
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: Qt.rgba(1, 1, 1, 0.6)
+                strokeWidth: 4
+                capStyle: ShapePath.RoundCap
+                PathAngleArc {
+                    centerX: rrShape.width / 2; centerY: rrShape.height / 2
+                    radiusX: (rrShape.width - 15) / 2; radiusY: radiusX
+                    startAngle: -90
+                    sweepAngle: page.player.duration > 0 ? 360 * Math.min(1, page.player.position / page.player.duration) : 0
+                }
+            }
+        }
+    }
+    Component {
+        id: veilComp
+        Veil {
+            readonly property Item host: parent
+            corner: host.corner
+            mini: host.msg.mini
+            pic: host.msg.pic
+            live: host.msg.onScreen
+            onGone: page.unveil(host.msg.msgId)
+        }
+    }
+    Component {
+        id: playOverlayComp
+        Rectangle {
+            readonly property Item item: parent.msg
+            radius: 24
+            color: Qt.rgba(0, 0, 0, 0.45)
+            Icon {
+                visible: parent.item.got < 0
+                anchors.centerIn: parent
+                anchors.horizontalCenterOffset: name === "play" ? 1.5 : 0
+                width: 24; height: 24
+                name: parent.item.path || parent.item.picKind === "video" ? "play" : "down"
+                color: "white"
+            }
+            Ring {
+                visible: parent.item.got >= 0
+                anchors.fill: parent
+                value: parent.item.got
+            }
+        }
+    }
+    Component {
+        id: pinComp
+        Item {
+            readonly property Item item: parent.msg
+            readonly property Item sh: item.shell
+            readonly property bool live: sh.dur > 0 && (sh.dur === 0x7FFFFFFF || sh.dur > page.now)
+            Icon {
+                visible: !parent.live
+                x: (parent.width - width) / 2; y: parent.height / 2 - height + 3
+                width: 40; height: 40
+                name: "place"
+                color: Theme.danger
+            }
+            Rectangle {
+                visible: parent.live
+                anchors.centerIn: parent
+                width: 44; height: 44; radius: 22
+                color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.25)
+                SequentialAnimation on scale {
+                    running: parent.visible && parent.parent.item.onScreen; loops: Animation.Infinite
+                    ScaleAnimator { from: 0.6; to: 1.2; duration: 1000; easing.type: Easing.OutQuad }
+                    ScaleAnimator { from: 1.2; to: 0.6; duration: 1000; easing.type: Easing.InQuad }
+                }
+            }
+            Rectangle {
+                visible: parent.live
+                anchors.centerIn: parent
+                width: 16; height: 16; radius: 8
+                color: Theme.accent
+                border.color: "white"; border.width: 2.5
+            }
+        }
+    }
+    Component {
+        id: lenTagComp
+        Rectangle {
+            readonly property Item item: parent.msg
+            readonly property Item sh: item.shell
+            // a round video not yet watched: a dot after its length (Telegram-iOS)
+            readonly property bool fresh: sh.picKind === "round" && !sh.heard
+            width: len.implicitWidth + 12 + (fresh ? 9 : 0); height: 20; radius: 10
+            color: Qt.rgba(0, 0, 0, 0.45)
+            Rectangle {
+                visible: parent.fresh
+                x: len.x + len.implicitWidth + 4; anchors.verticalCenter: parent.verticalCenter
+                width: 5; height: 5; radius: 2.5
+                color: "white"
+            }
+            Text {
+                id: len
+                x: 6; anchors.verticalCenter: parent.verticalCenter
+                text: parent.sh.picKind === "map" ? page.liveLeft(parent.sh.dur)
+                    : parent.sh.picKind === "gif" ? "GIF" : page.clock(parent.item.roundBig ? Math.floor(page.player.position / 1000) : parent.sh.dur)
+                      + (parent.sh.picKind === "video" && !parent.sh.path && parent.sh.fileSize ? " · " + store.size(parent.sh.fileSize) : "")
+                color: "white"
+                font.family: Theme.font; font.pixelSize: 12
+            }
+        }
+    }
+    Component {
+        id: albumTilesComp
+        Item {
+            id: tilesView
+            readonly property Item item: parent.msg
+            function tileOf(id) {
+                for (let k = 0; k < tileRep.count; k++)
+                    if (tileRep.itemAt(k) && tileRep.itemAt(k).msgId === id)
+                        return tileRep.itemAt(k)
+                return null
+            }
+            function tileAt(x, y) {         // the album's picture there
+                const t = tilesView.childAt(x, y)
+                return t && t.msgId ? t : null
+            }
+            Repeater {
+                id: tileRep
+                model: tilesView.item && tilesView.item.tiles ? tilesView.item.tiles.items : []
+                AlbumTile {
+                    required property var modelData
+                    x: modelData.x; y: modelData.y; width: modelData.w; height: modelData.h
+                    msgId: modelData.id
+                    corner: modelData.corner
+                    cell: {
+                        void page.albumTick
+                        void page.albumRev
+                        return page.cellOf(modelData.id)
+                    }
+                    live: tilesView.item.onScreen
+                    inSight: tilesView.item.inSight
+                    lowRes: list.lowRes
+                    onUnveiled: page.unveil(msgId)
+                    marks: page.picking
+                    picking: tilesView.item.pickable
+                    picked: page.picked[modelData.id] !== undefined
+                    Component.onCompleted: if (!pic) page.loadPic(msgId)
+                }
+            }
+        }
+    }
+    Component {
+        id: picSingleComp
+        Item {
+            id: block
+            readonly property Item host: parent
+            readonly property Item item: host.msg
+            readonly property string corner: host.corner
+            // pictures born during drag/flick load at 1/4 size, then upgrade once
+            // settled and inSight; already-sharp pictures never downgrade
+            property bool readyInit: false
+            property bool startedFast: false
+            property bool sharp: false
+            readonly property bool wantSharp: !list.lowRes && item.inSight
+            onWantSharpChanged: if (readyInit && wantSharp) sharp = true
+            Component.onCompleted: {
+                if (list.lowRes) {
+                    startedFast = true
+                    sharp = false
+                } else {
+                    sharp = true
+                }
+                readyInit = true
+            }
+            function replay(gently) {
+                if (moving.item && moving.lottie)
+                    moving.item.replay(gently)
+            }
+            function blow(x, y) {
+                if (veil.item)
+                    veil.item.blow(x, y)
+            }
+            Image {
+                anchors.fill: parent
+                visible: block.item.mini !== "" && full.status !== Image.Ready && low.status !== Image.Ready
+                asynchronous: true
+                // (in points: Qt asks the provider for these times the pixel ratio)
+                sourceSize: Qt.size(12, 12 * block.item.ph / block.item.pw)     // blurred: small is enough
+                source: block.item.mini ? "image://pic/" + block.corner + "/" + Math.round(block.item.pw) + "/mini/" + block.item.mini : ""
+                smooth: true
+            }
+            Image {
+                id: low
+                anchors.fill: parent
+                visible: block.startedFast && full.status !== Image.Ready
+                asynchronous: true
+                sourceSize: Qt.size(Math.max(16, Math.round(block.item.pw / 4)), Math.max(16, Math.round(block.item.ph / 4)))
+                source: block.readyInit && block.startedFast && (!block.sharp || status === Image.Ready) && full.status !== Image.Ready && block.item.pic
+                        ? "image://pic/" + block.corner + "/" + Math.round(block.item.pw) + "/" + block.item.pic : ""
+                opacity: status === Image.Ready && !moving.covers ? 1 : 0
+                smooth: true
+            }
+            Image {
+                id: full
+                anchors.fill: parent
+                asynchronous: true
+                sourceSize: Qt.size(Math.round(block.item.pw), Math.round(block.item.ph))
+                source: block.readyInit && block.sharp && block.item.pic
+                        ? "image://pic/" + block.corner + "/" + Math.round(block.item.pw) + "/" + block.item.pic : ""
+                opacity: status === Image.Ready && !moving.covers ? 1 : 0
+                Behavior on opacity { enabled: low.status !== Image.Ready; OpacityAnimator { duration: 150 } }
+            }
+            Loader {        // a GIF (or a video sticker) over and over; a round video tapped, once with sound
+                id: moving
+                anchors.fill: parent
+                readonly property Item msg: block.item
+                readonly property string corner: block.corner
+                readonly property bool round: block.item.picKind === "round"
+                readonly property var msgId: block.item.msgId
+                active: block.item.path !== "" && page.visible && block.item.inSight && !block.item.veiled &&
+                        ((block.item.picKind === "gif" && Prefs.gifs) || (round && page.roundId === block.item.msgId) ||
+                         (block.item.shell.anim && (block.item.emo !== "" ? Prefs.emoji : Prefs.stickers)))
+                readonly property string file: block.item.path
+                readonly property bool playing: !(viewer && viewer.open) && (round || block.item.onScreen)
+                readonly property bool lottie: /\.tgs$/i.test(file)
+                readonly property bool emo: block.item.emo !== ""
+                readonly property bool covers: lottie && !!item && item.shown === true
+                sourceComponent: lottie ? lottiePlayerComp : videoPlayerComp
+            }
+            Loader {        // a round video playing: how far, an arc round its edge
+                id: roundRing
+                anchors.fill: parent
+                active: block.item.roundBig
+                sourceComponent: roundRingComp
+            }
+            Loader {        // a spoiler: blurred under its dust until tapped
+                id: veil
+                anchors.fill: parent
+                active: block.item.veiled
+                readonly property Item msg: block.item
+                readonly property string corner: block.corner
+                sourceComponent: veilComp
+            }
+            Loader {        // a video: play over it (the ring while it comes); a GIF: the ring
+                anchors.centerIn: parent
+                width: 48; height: 48
+                active: block.item.got >= 0 || block.item.picKind === "video" || (block.item.picKind === "gif" && !block.item.path)
+                        || (block.item.picKind === "round" && (page.roundId !== block.item.msgId || page.player.roundPaused))
+                readonly property Item msg: block.item
+                sourceComponent: playOverlayComp
+            }
+            Loader {        // a place: the pin at the map's middle (its point there); live: a dot, pulsing
+                anchors.fill: parent
+                active: block.item.picKind === "map"
+                readonly property Item msg: block.item
+                sourceComponent: pinComp
+            }
+            Loader {        // (made only for a video's, a GIF's: not for every photo's)
+                active: block.item.picKind === "video" || block.item.picKind === "gif" || block.item.picKind === "round"
+                        || (block.item.picKind === "map" && block.item.shell.dur > 0)
+                x: 6 + (block.item.picKind === "round" ? block.item.roundK * (parent.width / 2 - 87) : 0)
+                y: block.item.picKind === "round" ? parent.height - 26 : 6
+                readonly property Item msg: block.item
+                sourceComponent: lenTagComp
+            }
+        }
+    }
+    Component {
+        id: audioRowComp
+        AudioRow {
+            dpr: page.dpr
+            readonly property Item sh: parent.msg.shell
+            kind: sh.rowKind === "audio" ? "audio" : "voice"
+            out: sh.out
+            wave: sh.wave
+            dur: sh.dur
+            title: sh.title
+            sub: sh.sub
+            got: sh.got
+            here: sh.path !== ""
+            current: page.soundId === sh.msgId
+            playing: current && page.player.playing
+            at: current ? page.player.position : 0
+            fresh: !sh.heard
+        }
+    }
+    Component {
+        id: pollRowComp
+        PollView {
+            readonly property Item msg: parent.msg
+            readonly property Item sh: msg.shell
+            width: Math.min(msg.most - 24, 300)
+            out: sh.out
+            poll: JSON.parse(sh.poll)
+            onVote: (ids) => page.vote(sh.msgId, ids)
+            onVoters: page.showVoters(sh.msgId, poll)
+            onExplain: (t) => page.toast(t)
+            onHeld: page.openMenu(msg)
+        }
+    }
+    Component {
+        id: fileRowComp
+        FileRow {
+            readonly property Item sh: parent.msg.shell
+            out: sh.out
+            name: sh.fileName
+            size: sh.fileSize
+            got: sh.got
+            here: sh.path !== ""
+            thumb: sh.pic
+        }
+    }
+    Component {
+        id: stackSongComp
+        AudioRow {
+            dpr: page.dpr
+            readonly property Item mem: parent.mem
+            kind: "audio"
+            out: mem.cell.out
+            dur: mem.cell.dur
+            title: mem.cell.title
+            sub: mem.cell.sub
+            got: mem.cell.got
+            here: mem.cell.path !== ""
+            current: page.soundId === mem.msgId
+            playing: current && page.player.playing
+            at: current ? page.player.position : 0
+        }
+    }
+    Component {
+        id: stackFileComp
+        FileRow {
+            readonly property Item mem: parent.mem
+            out: mem.cell.out
+            name: mem.cell.fileName
+            size: mem.cell.fileSize
+            got: mem.cell.got
+            here: mem.cell.path !== ""
+            thumb: mem.cell.pic
+        }
+    }
+    Component {
+        id: stackCheckComp
+        Check {
+            readonly property Item host: parent
+            width: 20; height: 20
+            on: host.msg.pickable
+            checked: page.picked[host.mem.msgId] !== undefined
+            hollow: host.msg.out ? Theme.bubbleOut : Theme.bubbleIn
+            ring: Theme.grey
+            ringChecked: host.msg.out ? Theme.bubbleOut : Theme.bubbleIn
+        }
+    }
+    Component {
+        id: stackComp
+        Column {
+            id: files
+            readonly property Item item: parent.msg
+            spacing: 6
+            // the last caption's last line (0: the last has none): the time goes by it
+            readonly property real last: {
+                const f = members.count ? members.itemAt(members.count - 1) : null
+                return f ? f.lastLine : 0
+            }
+            function memberOf(id) {
+                for (let k = 0; k < members.count; k++)
+                    if (members.itemAt(k) && members.itemAt(k).msgId === id)
+                        return members.itemAt(k)
+                return null
+            }
+            function memberAt(x, y) {
+                const f = childAt(x, y)
+                return f && f.msgId ? f : null
+            }
+            Repeater {
+                id: members
+                model: files.item.group ? files.item.group.ids : []     // (oldest first: the top)
+                Item {
+                    id: member
+                    required property var modelData
+                    readonly property var msgId: modelData
+                    readonly property var cell: {
+                        void page.albumTick
+                        void page.albumRev
+                        return page.cellOf(modelData)
+                    }
+                    // what tapMedia and openMedia ask of a message's file
+                    readonly property string rowKind: cell ? cell.rowKind : ""
+                    readonly property string picKind: ""
+                    readonly property bool media: false
+                    readonly property bool veiled: false
+                    readonly property real got: cell ? cell.got : -1
+                    readonly property string path: cell ? cell.path : ""
+                    readonly property bool sending: cell ? cell.sending : false
+                    readonly property Item face: member
+                    readonly property bool worded: !!cell && (cell.text !== "" || cell.rich !== "")
+                    readonly property real lastLine: worded ? caption.last : 0
+                    width: Math.max(rowKind === "file" ? (rowOne.item ? rowOne.item.width : 200) : 230,
+                                    worded ? caption.width : 0)
+                    height: 50 + (worded ? caption.height + 4 : 0)
+                    Loader {
+                        id: rowOne
+                        active: member.rowKind === "audio" || member.rowKind === "file"
+                        readonly property Item mem: member
+                        sourceComponent: member.rowKind === "audio" ? stackSongComp : stackFileComp
+                    }
+                    Loader {        // «Tanlash»'s mark over the icon's corner (iOS: 20 pt at 29, 26)
+                        active: page.picking
+                        x: 29; y: 26
+                        readonly property Item msg: files.item
+                        readonly property Item mem: member
+                        sourceComponent: stackCheckComp
+                    }
+                    Words {
+                        id: caption
+                        richComponent: wordsRichComp
+                        visible: member.worded
+                        y: 54
+                        width: Math.min(implicitWidth, files.item.most - 24)
+                        room: files.item.most - 24
+                        size: Prefs.chatSize
+                        live: files.item.onScreen
+                        text: member.worded ? member.cell.text : ""
+                        parts: member.worded ? member.cell.rich : ""
+                        ink: files.item.out ? Theme.outText : Theme.inText
+                        tint: files.item.out ? Theme.check : Theme.accent
+                        open: !!page.unfolded[member.msgId]
+                        onLink: (url) => page.follow(url, member.msgId)
+                        onTouched: (down) => files.item.touchBubble(down)
+                        onHeld: page.openMenu(files.item, member.msgId)
+                        onTapped: page.tapMedia(member)
+                        onFold: page.unfold(member.msgId)
+                    }
+                }
+            }
+        }
+    }
+    Component {
+        id: saidRowComp
+        Item {
+            id: saidItem
+            readonly property Item shell: parent.rowShell
+            readonly property int index: shell.index
+            readonly property var msgId: shell.msgId
+            readonly property int date: shell.date
+            readonly property int edge: shell.edge
+            readonly property string senderKey: shell.senderKey
+            readonly property string said: shell.said
+            readonly property var ids: [msgId]
+            readonly property bool bursting: false
+            readonly property bool first: {
+                void edge
+                return page.apart(messages.get(index + 1), senderKey, date)
+            }
+            readonly property bool newDay: {
+                void edge
+                return page.otherDay(messages.get(index + 1), date)
+            }
+            readonly property bool unreadBar: msgId === page.firstUnread
+            readonly property real above: (newDay ? 38 : 0) + (unreadBar ? 36 : 0) + (first ? 8 : 2)
+            property Item flashRect: null
+            readonly property bool flashed: page.flashId !== 0 && msgId === page.flashId
+            function syncFlash() { if (flashed && !flashRect) flashRect = flashComp.createObject(saidItem, { row: saidItem }) }
+            onFlashedChanged: syncFlash()
+            function initRow() { syncFlash() }
+            width: shell.width
+            height: pillRect.height + 4 + above
+
+            Loader {
+                active: saidItem.newDay
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 10
+                readonly property Item msg: saidItem
+                sourceComponent: dayPillComp
+            }
+            Loader {
+                active: saidItem.unreadBar
+                y: (saidItem.newDay ? 38 : 0) + 6
+                width: parent.width; height: 28
+                sourceComponent: unreadBarComp
+            }
+            Rectangle {
+                id: pillRect
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: saidItem.above + 2
+                width: Math.min(saidText.implicitWidth, saidItem.width - 80) + 20
+                height: saidText.height + 8; radius: Math.min(11, height / 2)
+                color: Theme.dayPill
+                Text {
+                    id: saidText
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, saidItem.width - 80)
+                    text: saidItem.said
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText
+                    color: "white"
+                    font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
+                }
+            }
+        }
+    }
+    Component {
+        id: simpleTextRowComp
+        Item {
+            id: item
+            readonly property Item shell: parent.rowShell
+            readonly property var msgId: shell.msgId
+            readonly property bool out: shell.out
+            readonly property string text: shell.text
+            readonly property string kind: ""
+            readonly property string sender: shell.sender
+            readonly property string picKind: ""
+            readonly property string rowKind: ""
+            readonly property string emo: ""
+            readonly property bool sending: shell.sending
+            readonly property bool grouped: false
+            readonly property bool stacked: false
+            readonly property bool media: false
+            readonly property bool bare: false
+            readonly property bool veiled: false
+            readonly property var ids: [msgId]
+            // what page.openMenu/showMenu ask of any row: without reactId the menu asked TDLib for no message's
+            // reactions (no strip over it) and a reaction picked went nowhere
+            readonly property var reactId: msgId
+            readonly property bool isPinned: shell.isPinned
+            readonly property string said: ""
+            readonly property var reactList: []
+            readonly property bool bursting: false
+            readonly property Item face: bubble
+            function oneAt(x, y) { return 0 }
+            function tileOf(id) { return null }
+            function replay(gently) {}
+            function blow(x, y) {}
+            function burst(path) {}
+            readonly property bool first: {
+                void shell.edge
+                return page.apart(messages.get(shell.index + 1), shell.senderKey, shell.date)
+            }
+            readonly property bool last: page.apart(messages.get(shell.index - 1), shell.senderKey, shell.date)
+            readonly property bool newDay: {
+                void shell.edge
+                return page.otherDay(messages.get(shell.index + 1), shell.date)
+            }
+            readonly property bool faced: sender !== ""
+            readonly property real most: width * 0.78
+            readonly property real above: (newDay ? 38 : 0) + (first ? 8 : 2)
+            property Item flashRect: null
+            readonly property bool flashed: page.flashId !== 0 && msgId === page.flashId
+            function syncFlash() { if (flashed && !flashRect) flashRect = flashComp.createObject(item, { row: item, shape: shape }) }
+            onFlashedChanged: syncFlash()
+            function initRow() { syncFlash() }
+            // its own going, not only the shell's: the Loader swaps rows (a reaction on a plain text one) with the
+            // shell kept, and a held one left page.holding on: the list stuck, taps still working
+            Component.onDestruction: cleanup()
+            function cleanup() {
+                if (page) {
+                    page.clearBubbleAnim(bubble)
+                    page.clearFlyAnim(mover)
+                    if (hold.held) page.holding = false
+                }
+            }
+            function flyFrom(from) {
+                const here = body.mapToItem(page, 0, 0)
+                mover.x = from.x - here.x
+                mover.y = from.y - here.y
+                page.lift = true
+                landed.restart()
+                page.flyMover(mover)
+            }
+            width: shell.width
+            height: bubble.height + above
+
+            Loader {
+                active: item.newDay
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 10
+                readonly property Item msg: item
+                sourceComponent: dayPillComp
+            }
+            Item {
+                id: mover
+                width: item.width; height: item.height
+                Loader {
+                    active: item.faced && item.last
+                    x: 8; y: bubble.y + bubble.height - 34
+                    width: 34; height: 34
+                    readonly property string name: item.sender
+                    readonly property string key: item.shell.senderKey
+                    readonly property string tint: item.shell.tint
+                    sourceComponent: faceComp
+                }
+                Item {
+                    id: bubble
+                    y: item.above
+                    x: item.out ? item.width - width - 14 : 14 + (item.faced ? 40 : 0)
+                    readonly property real room: item.most - 24
+                    readonly property real bodyW: body.lineCount > body.paragraphs ? room : body.contentWidth
+                    readonly property real stampRoom: stamp.implicitWidth + 8
+                    readonly property bool stampUnder: body.last + stampRoom > room
+                    width: Math.min(item.most, Math.max(bodyW, who.visible ? who.implicitWidth : 0, quote.visible ? quote.wants : 0,
+                                                        stampUnder ? stamp.implicitWidth : body.last + stampRoom) + 24)
+                    height: body.y + body.implicitHeight + (stampUnder ? 24 : 8)
+
+                    BorderImage {
+                        id: shape
+                        readonly property real d: page.dpr
+                        x: item.out ? 0 : -6
+                        width: (parent.width + 6) * d; height: parent.height * d
+                        scale: 1 / d; transformOrigin: Item.TopLeft
+                        readonly property int r: Prefs.bubbleR
+                        readonly property int b: Prefs.bubbleB
+                        border { left: (item.out ? r : b + 6) * d; right: (item.out ? b + 6 : r) * d; top: r * d; bottom: b * d }
+                        source: "image://bubble/" + (item.out ? "out/" : "in/") + (item.first ? "b/" : "s/") + (item.last ? "t/" : "s/")
+                              + String(item.out ? Theme.bubbleOut : Theme.bubbleIn).slice(1) + "/" + d
+                              + "/" + r + "/" + Prefs.bubbleS
+                        smooth: true
+                    }
+                    MouseArea {
+                        id: hold
+                        anchors.fill: parent
+                        pressAndHoldInterval: 350
+                        property bool held: false
+                        property bool slid: false
+                        property point heldAt
+                        onHeldChanged: page.holding = held
+                        onPressed: { held = false; page.pressBubble(bubble) }
+                        onReleased: (mouse) => {
+                            page.releaseBubble(bubble)
+                            if (held && slid && menu) {
+                                const at = hold.mapToItem(menu, mouse.x, mouse.y)
+                                menu.lift(at.x, at.y)
+                            }
+                            held = false
+                        }
+                        onCanceled: { held = false; page.releaseBubble(bubble) }
+                        onPositionChanged: (mouse) => {
+                            if (!held)
+                                return
+                            slid = slid || Math.hypot(mouse.x - heldAt.x, mouse.y - heldAt.y) > 10
+                            if (slid && menu) {
+                                const at = hold.mapToItem(menu, mouse.x, mouse.y)
+                                menu.track(at.x, at.y)
+                            }
+                        }
+                        onPressAndHold: (mouse) => {
+                            held = true
+                            slid = false
+                            heldAt = Qt.point(mouse.x, mouse.y)
+                            page.openMenu(item, 0)
+                        }
+                    }
+                    Text {
+                        id: who
+                        visible: item.faced && item.first
+                        x: 12; y: 7
+                        width: Math.min(implicitWidth, bubble.room)
+                        elide: Text.ElideRight
+                        text: visible ? item.sender : ""
+                        color: item.shell.tint
+                        font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+                    }
+                    Loader {        // what it answers, as in a full row (most of a busy group's are answers)
+                        id: quote
+                        active: item.shell.replyId !== 0
+                        visible: active
+                        readonly property real wants: quote.item ? quote.item.wants : 0
+                        x: 8
+                        y: who.visible ? who.y + who.height + 4 : 8
+                        width: bubble.width - 16
+                        height: visible ? 40 : 0
+                        readonly property Item msg: item
+                        sourceComponent: quoteComp
+                    }
+                    Text {
+                        id: body
+                        readonly property real boxW: Math.min(bubble.bodyW, bubble.room)
+                        x: 12 + (effectiveHorizontalAlignment === Text.AlignRight ? boxW - width : 0)
+                        y: quote.visible ? quote.y + quote.height + 4 : who.visible ? who.y + who.height + 2 : 8
+                        width: bubble.room
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                        property real last: 0
+                        onLineLaidOut: (line) => { if (line.isLast) last = line.implicitWidth }
+                        text: item.text
+                        readonly property int paragraphs: text.indexOf("\n") < 0 && text.indexOf("\u2028") < 0 ? 1 : text.split(/[\n\u2028]/).length
+                        color: item.out ? Theme.outText : Theme.inText
+                        font.family: Theme.font; font.pixelSize: Prefs.chatSize
+                    }
+                    Text {
+                        id: stamp
+                        anchors.right: parent.right; anchors.rightMargin: 10
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: 6
+                        textFormat: item.out && !item.sending ? Text.StyledText : Text.PlainText
+                        text: (item.shell.isPinned ? "📌 " : "") + (item.shell.edited ? Tr.t("tahrirlandi") + " " : "") + item.shell.time +
+                              (item.out ? (item.sending ? " ◷" : " <font color='" + Theme.check + "'>" + (item.msgId <= page.readUpTo ? "✓✓" : "✓") + "</font>") : "")
+                        color: item.out ? Theme.outMeta : Theme.inMeta
+                        font.family: Theme.font; font.pixelSize: 12
+                    }
+                }
+            }
+        }
+    }
+    Component {
+        id: msgRowComp
+        Item {
+            id: item
+            readonly property Item shell: parent.rowShell
+            // External interface kept on `item` (read by page.openMenu/tapMedia/openMedia/view/burst)
+            readonly property var msgId: shell.msgId
+            readonly property bool out: shell.out
+            readonly property string text: shell.text
+            readonly property string kind: shell.kind
+            readonly property string sender: shell.sender
+            readonly property string picKind: shell.picKind
+            readonly property string mini: shell.mini
+            readonly property string pic: shell.pic
+            readonly property string rowKind: shell.rowKind
+            readonly property string emo: shell.emo
+            readonly property real got: shell.got
+            readonly property string path: shell.path
+            readonly property bool sending: shell.sending
+            readonly property bool veiled: shell.veiled
+            readonly property var group: shell.group
+            readonly property bool grouped: shell.grouped
+            readonly property bool mosaic: grouped && group.main === msgId && rowKind === ""
+            readonly property bool stacked: grouped && group.main === msgId && rowKind !== ""     // files or songs
+            readonly property var tiles: mosaic ? page.tilesOf(group, wide) : null
+            readonly property var ids: grouped ? group.ids : [msgId]
+            function tileOf(id) {       // an album's picture, or its file
+                return mosaic && picture.item ? picture.item.tileOf(id) : stacked && attach.item ? attach.item.memberOf(id) : null
+            }
+            function oneAt(x, y) {      // the album's picture or file at (x, y) on the row: its message (0: none)
+                if (mosaic && picture.item) {
+                    const at = item.mapToItem(picture, x, y)
+                    const t = picture.item.tileAt(at.x, at.y)
+                    return t ? t.msgId : 0
+                }
+                if (stacked && attach.item) {
+                    const at = item.mapToItem(attach, x, y)
+                    const f = attach.item.memberAt(at.x, at.y)
+                    return f ? f.msgId : 0
+                }
+                return 0
+            }
+            function replay(gently) {   // an animated emoji: played again (tapped; gently: if it has stopped)
+                if (!mosaic && picture.item)
+                    picture.item.replay(gently)
+            }
+            property int burstCount: 0
+            readonly property bool bursting: burstCount > 0      // its effects (a tap on the emoji): below
+            function burst(path) {
+                if (Prefs.fx && burstCount < 4) {      // (not with the Quvvat tejash page's effects off)
+                    burstCount++
+                    burstComp.createObject(mover, {
+                        row: item, bub: bubble, pic: picture, file: path,
+                        dx: Math.random() * 60 - 30, dy: Math.random() * 60 - 30
+                    })
+                }
+            }
+            function blow(x, y) {       // its spoiler off, from (x, y) on the picture (its middle when not given)
+                if (!mosaic && picture.item)
+                    picture.item.blow(x === undefined ? picture.width / 2 : x, y === undefined ? picture.height / 2 : y)
+            }
+            function touchBubble(down) {
+                if (down) page.pressBubble(bubble)
+                else page.releaseBubble(bubble)
+            }
+            readonly property int talk: mosaic || stacked ? group.talk : shell.comments          // the comments, an album's on one of them
+            readonly property var talkId: mosaic || stacked ? group.talkId : msgId
+            // the last line of what is last in the bubble: the time goes by it when it fits
+            readonly property real lastLine: stacked ? (attach.item ? attach.item.last : 0) : body.last
+            readonly property Item face: bubble
+            readonly property Item picFace: picture
+            // a picture: photo, video or GIF in the bubble; sticker and round video without one
+            readonly property bool media: picKind !== ""
+            readonly property bool bare: picKind === "sticker" || picKind === "round" || shell.jumbo > 0
+            // nearly on the screen: a GIF's player is made ready; on it: only then it plays (one
+            // playing just off the screen kept the whole window redrawn at the video's 30 fps)
+            // (the shell's y: this item stands at 0 in it)
+            // Only a row something reads them in follows the flick (a picture, an album, files, a live
+            // place, rich text's spoiler dust): a binding that stops at `watched` reads no y, so a plain
+            // row is not asked again every step of a flick (~11600 times in one run through a group)
+            readonly property bool watched: media || rowKind !== "" || grouped || shell.rich !== ""
+            readonly property bool inSight: watched && shell.y + height > list.seen - 300 && shell.y < list.seen + list.height + 300
+            readonly property bool onScreen: watched && shell.y + height > list.seen - 100 && shell.y < list.seen + list.height + 100
+            readonly property real aspect: shell.picH / shell.picW
+            // a sticker's side (Telegram-iOS's 180 on its wider screen); an emoji alone's that times the
+            // server's emojies_animated_zoom (iOS: animatedEmojiScale)
+            readonly property real side: emo !== "" ? Math.round(160 * page.store.emojiZoom) : 160
+            // a round video playing: from 200 to the width but 10 on each side (404 at most), its avatar
+            // gone (Telegram-iOS's ChatMessageInstantVideoItemNode: maximumDisplaySize, avatarOffset)
+            readonly property bool roundBig: picKind === "round" && page.roundId === msgId
+            property real roundK: 0
+            readonly property real roundSide: 200 + (Math.min(404, width - 20) - 200) * roundK
+            // its middle on the screen, between the header and the field: else it goes on in the corner (PiP)
+            readonly property bool roundShown: roundBig && (shell.y + bubble.y + bubble.height / 2 - list.contentY - page.kb > bar.height + pinBar.height
+                                                            && shell.y + bubble.y + bubble.height / 2 - list.contentY - page.kb < page.height - page.kb - page.foot)
+            onRoundShownChanged: if (roundBig) page.roundSeen = roundShown
+            onRoundBigChanged: {
+                if (roundBig) page.roundSeen = roundShown
+                if (picKind === "round") page.animateRound(item, roundBig)
+            }
+            property Item flashRect: null
+            readonly property bool flashed: page.flashId !== 0 && (grouped ? ids.indexOf(page.flashId) >= 0 : msgId === page.flashId)
+            function syncFlash() { if (flashed && !flashRect) flashRect = flashComp.createObject(item, { row: item, shape: shape }) }
+            onFlashedChanged: syncFlash()
+            property Item stampBgRect: null
+            readonly property bool needStampBg: overlaid || shell.jumbo > 0 || bare
+            function syncStampBg() {
+                if (needStampBg) {
+                    if (!stampBgRect)
+                        stampBgRect = stampBgComp.createObject(bubble, { target: stamp })
+                } else if (stampBgRect) {
+                    stampBgRect.destroy()
+                    stampBgRect = null
+                }
+            }
+            onNeedStampBgChanged: syncStampBg()
+            function initRow() {
+                if (roundBig) { roundK = 1; page.roundSeen = roundShown }
+                syncFlash()
+                syncStampBg()
+            }
+            Component.onDestruction: cleanup()      // (as the plain text row's)
+            function cleanup() {
+                if (page) {
+                    if (page.roundId === msgId) page.roundSeen = false
+                    page.clearRoundAnim(item)
+                    page.clearBubbleAnim(bubble)
+                    page.clearFlyAnim(mover)
+                    if (hold.held) page.holding = false
+                }
+            }
+            readonly property real pw: mosaic ? tiles.width : picKind === "round" ? roundSide : picKind === "sticker" ? side * Math.min(1, 1 / aspect)
+                                     : aspect * wide > 360 ? Math.max(150, 360 / aspect) : wide
+            readonly property real ph: mosaic ? tiles.height : picKind === "round" ? roundSide : picKind === "sticker" ? side * Math.min(1, aspect)
+                                     : Math.max(110, Math.min(360, aspect * wide))
+            readonly property real wide: Math.min(width * 0.72, 270) - moved
+            readonly property bool overlaid: media && text === "" && !reacted     // the time over the picture
+            // an album's reactions are its first message's, as Telegram-iOS shows them and puts them on (topMessage)
+            readonly property var reactId: grouped ? group.ids[0] : msgId
+            readonly property string reactsShown: {
+                if (reactId === msgId)
+                    return shell.reacts
+                void page.albumTick
+                return page.reactsOf(reactId)
+            }
+            readonly property var reactList: reactsShown.length > 2 ? JSON.parse(reactsShown) : []
+            readonly property bool reacted: reactList.length > 0
+            // a run: one sender's messages within 10 minutes of each other. Its first (the
+            // top) has the name and more space over it, its last (the bottom) the tail.
+            readonly property bool first: {
+                void shell.edge
+                return grouped ? page.apart(page.beyond(shell.index, 1, shell.album), shell.senderKey, shell.date)
+                               : page.apart(messages.get(shell.index + 1), shell.senderKey, shell.date)
+            }
+            readonly property bool last: grouped ? page.apart(page.beyond(shell.index, -1, shell.album), shell.senderKey, shell.date)
+                                         : page.apart(messages.get(shell.index - 1), shell.senderKey, shell.date)
+            readonly property real most: width * 0.78 - moved
+            // a group's incoming messages leave room on the left for their sender's picture,
+            // which stands by the last of a run (Telegram-iOS)
+            readonly property bool faced: sender !== ""
+            // the first message of a day has the day over it
+            readonly property bool newDay: {
+                void shell.edge
+                return grouped ? page.otherDay(page.beyond(shell.index, 1, shell.album), shell.date)
+                               : page.otherDay(messages.get(shell.index + 1), shell.date)
+            }
+            readonly property bool unreadBar: page.firstUnread !== 0 && (msgId === page.firstUnread || (grouped && ids.indexOf(page.firstUnread) >= 0))
+            // «Tanlash»: a circle on its left, the incoming ones moved over for it (iOS)
+            readonly property bool pickable: page.selecting && !sending
+            readonly property bool isPicked: page.picking && ids.every((id) => page.picked[id] !== undefined)
+            readonly property real moved: pickable && !out ? 40 : 0       // (and narrower by as much)
+            readonly property real above: (newDay ? 38 : 0) + (unreadBar ? 36 : 0) + (first ? 8 : 2)
+            width: shell.width
+            height: bubble.height + above
+
+            Loader {
+                id: dayPill
+                active: item.newDay
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 10
+                readonly property Item msg: item
+                sourceComponent: dayPillComp
+            }
+            Loader {             // Telegram-iOS's unread bar, over the first unread message
+                active: item.unreadBar
+                y: (item.newDay ? 38 : 0) + 6
+                width: parent.width; height: 28
+                sourceComponent: unreadBarComp
+            }
+
+            // a message just sent flies here from where its text was in the field: it starts
+            // there (moved by mover's x, y) and comes to rest on Telegram-iOS's two curves
+            // (ChatMessageTransitionNode.swift), on the render thread
+            Item {
+                id: mover
+                width: item.width; height: item.height
+                Loader {
+                    id: faceAt
+                    active: item.faced && item.last
+                    opacity: 1 - item.roundK
+                    x: 8 - 100 * item.roundK; y: bubble.y + bubble.height - 34
+                    width: 34; height: 34
+                    readonly property string name: item.sender
+                    readonly property string key: item.shell.senderKey
+                    readonly property string tint: item.shell.tint
+                    sourceComponent: faceComp
+                }
+                Item {
+                    id: bubble
+                    y: item.above
+                    x: item.out ? item.width - width - 14 + 4 * item.roundK : (14 + (item.faced ? 40 : 0)) * (1 - item.roundK) + 10 * item.roundK
+                    // the time goes in the last line's corner when it fits there, else under it
+                    readonly property real stampRoom: stamp.implicitWidth + 8
+                    readonly property real tail: item.talk >= 0 && !item.bare ? 42 : 0     // the comments row
+
+                    readonly property bool stampUnder: !item.overlaid && item.lastLine + stampRoom > (item.media ? width : item.most) - 24
+                    width: item.shell.jumbo ? Math.max(body.implicitWidth, stamp.implicitWidth + 12) + 8
+                         : item.bare ? item.pw : item.media ? item.pw + 6
+                         : Math.min(item.most, Math.max(body.implicitWidth, headLoad.visible ? headLoad.wants : 0, quote.visible ? quote.wants : 0,
+                                                        attach.visible ? attach.attW : 0,
+                                                        item.reacted ? reactRow.wants + stamp.implicitWidth + 6 : 0,
+                                                        stampUnder ? stamp.implicitWidth : item.lastLine + stampRoom, tail ? 196 : 0) + 24)
+                    height: tail + (item.shell.jumbo ? body.y + body.height + 26
+                          : item.overlaid ? picture.y + item.ph + (item.bare ? 0 : 3)
+                          : item.reacted ? reactRow.y + reactRow.height + 6
+                          : body.y + body.height + (stampUnder ? 24 : 8))
+
+                    BorderImage {   // the bubble, stretched from a small picture (nullgram_app.py Bubble), drawn
+                        id: shape       // in device pixels and scaled down: then its borders come out right
+                        readonly property real d: page.dpr
+                        x: item.out ? 0 : -6
+                        width: (parent.width + 6) * d; height: parent.height * d
+                        scale: 1 / d; transformOrigin: Item.TopLeft
+                        readonly property int r: Prefs.bubbleR
+                        readonly property int b: Prefs.bubbleB
+                        border { left: (item.out ? r : b + 6) * d; right: (item.out ? b + 6 : r) * d; top: r * d; bottom: b * d }
+                        source: item.bare ? ""
+                              : "image://bubble/" + (item.out ? "out/" : "in/") + (item.first ? "b/" : "s/") + (item.last ? "t/" : "s/")
+                                + String(item.out ? Theme.bubbleOut : Theme.bubbleIn).slice(1) + "/" + d
+                                + "/" + r + "/" + Prefs.bubbleS
+                        smooth: true
+                        visible: !item.bare
+                    }
+
+                    // a long press lifts it into the menu; while pressed it sinks a little (iOS)
+                    MouseArea {
+                        id: hold
+                        anchors.fill: parent
+                        pressAndHoldInterval: 350
+                        // held: the menu is coming or open and this finger still down -- the list keeps
+                        // still (page.holding; preventStealing instead left an action lit, pressed, as the
+                        // menu came), and where it goes and is lifted is the menu's (MessageMenu.track)
+                        // Only once it has moved: the actions may come up right under a finger that stays.
+                        property bool held: false
+                        property bool slid: false
+                        property point heldAt
+                        onHeldChanged: page.holding = held
+                        onPressed: { held = false; page.pressBubble(bubble) }
+                        onReleased: (mouse) => {
+                            page.releaseBubble(bubble)
+                            if (held && slid && menu) {
+                                const at = hold.mapToItem(menu, mouse.x, mouse.y)
+                                menu.lift(at.x, at.y)
+                            }
+                            held = false
+                        }
+                        onCanceled: { held = false; page.releaseBubble(bubble) }
+                        onPositionChanged: (mouse) => {
+                            if (!held)
+                                return
+                            slid = slid || Math.hypot(mouse.x - heldAt.x, mouse.y - heldAt.y) > 10
+                            if (slid && menu) {
+                                const at = hold.mapToItem(menu, mouse.x, mouse.y)
+                                menu.track(at.x, at.y)
+                            }
+                        }
+                        onPressAndHold: (mouse) => {
+                            held = true
+                            slid = false
+                            heldAt = Qt.point(mouse.x, mouse.y)
+                            const at = hold.mapToItem(item, mouse.x, mouse.y)
+                            page.openMenu(item, item.oneAt(at.x, at.y))
+                        }
+                        onClicked: (mouse) => {
+                            if (item.mosaic) {          // the album's picture under the finger
+                                const at = hold.mapToItem(picture, mouse.x, mouse.y)
+                                const t = picture.item ? picture.item.tileAt(at.x, at.y) : null
+                                if (t)
+                                    page.tapMedia(t, at.x - t.x, at.y - t.y)
+                            } else if (item.stacked) {  // the album's file under the finger
+                                const at = hold.mapToItem(attach, mouse.x, mouse.y)
+                                const f = attach.item ? attach.item.memberAt(at.x, at.y) : null
+                                if (f)
+                                    page.tapMedia(f)
+                            } else if (item.media || item.rowKind) {
+                                const at = hold.mapToItem(picture, mouse.x, mouse.y)
+                                page.tapMedia(item, at.x, at.y)
+                            }
+                        }
+                    }
+
+                    // how wide the name and the forward line may be: a picture's bubble is as wide as
+                    // the picture, they are cut to it (Telegram-iOS: maximumNodeWidth, the media's);
+                    // a text's grows to them up to `most` (not bubble.width: that is made of them)
+                    readonly property real headRoom: (item.media ? item.pw + 6 : item.most) - 24
+                    readonly property bool hasWho: item.sender !== "" && item.first && !item.bare
+                    readonly property bool hasFwd: item.shell.fwd !== "" && !item.bare
+                    Loader {
+                        id: headLoad
+                        active: bubble.hasWho || bubble.hasFwd
+                        visible: active
+                        x: 12; y: 7
+                        readonly property Item msg: item
+                        readonly property real room: bubble.headRoom
+                        readonly property real bubW: bubble.width
+                        readonly property real wants: headLoad.item ? headLoad.item.wants : 0
+                        sourceComponent: bubble.hasFwd ? headFwdComp
+                                       : item.shell.rank !== "" ? headRankComp
+                                       : headNameComp
+                    }
+                    Loader {        // what it answers: a bar, the name, a line of the text; a tap goes there
+                        id: quote
+                        active: item.shell.replyId !== 0
+                        visible: active
+                        readonly property real wants: quote.item ? quote.item.wants : 0
+                        readonly property real side: item.out ? bubble.x - 22 : item.width - bubble.x - bubble.width - 22
+                        x: item.bare ? (item.out ? 14 - bubble.x : item.width - 14 - width - bubble.x) : 8
+                        y: item.bare ? 8 : headLoad.visible ? headLoad.y + headLoad.height + 4 : 8
+                        width: item.bare ? Math.max(60, Math.min(wants, 200, side)) : bubble.width - 16
+                        height: visible ? 40 : 0
+                        readonly property Item msg: item
+                        sourceComponent: quoteComp
+                    }
+                    Loader {        // the picture: Telegram's blurred preview at once, the picture over it when here
+                        id: picture
+                        visible: item.media
+                        active: item.media && !item.shell.tucked      // (an album's others: shown by its main)
+                        asynchronous: true
+                        x: item.bare ? 0 : 3
+                        y: item.bare ? 0 : quote.visible ? quote.y + quote.height + 4 : headLoad.visible ? headLoad.y + headLoad.height + 4 : 3
+                        width: item.pw; height: visible ? item.ph : 0
+                        readonly property string corner: item.picKind === "round" ? "-1" : item.bare ? "0" : String(Math.max(1, Prefs.bubbleR - 3))
+                        readonly property Item msg: item
+                        sourceComponent: item.mosaic ? albumTilesComp : picSingleComp
+                    }
+                    Loader {        // a voice note, a song, a poll, a file, or stacked files/songs
+                        id: attach
+                        visible: item.rowKind !== ""
+                        active: !item.shell.tucked && item.rowKind !== "" && (item.rowKind !== "poll" || item.shell.poll !== "")
+                        x: 12
+                        y: quote.visible ? quote.y + quote.height + 6 : headLoad.visible ? headLoad.y + headLoad.height + 4 : 6
+                        readonly property Item msg: item
+                        readonly property real attW: attach.item ? attach.item.width : 0
+                        readonly property real attH: attach.item ? attach.item.height : 0
+                        sourceComponent: item.stacked ? stackComp
+                                       : item.rowKind === "voice" || item.rowKind === "audio" ? audioRowComp
+                                       : item.rowKind === "poll" ? pollRowComp
+                                       : item.rowKind === "file" ? fileRowComp : null
+                    }
+                    Words {
+                        id: body
+                        richComponent: wordsRichComp
+                        visible: !item.overlaid
+                        x: item.shell.jumbo ? 4 : 12
+                        y: item.media ? picture.y + picture.height + 5 : attach.visible ? attach.y + attach.attH + (text || parts ? 4 : 0)
+                         : quote.visible && !item.bare ? quote.y + quote.height + 4 : headLoad.visible ? headLoad.y + headLoad.height + 2 : item.shell.jumbo ? 0 : 8
+                        height: (attach.visible || item.media) && !text && !parts ? 0 : implicitHeight
+                        width: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.attW, Math.min(implicitWidth, item.most - 24))
+                             : Math.min(implicitWidth, item.most - 24)
+                        live: item.onScreen
+                        room: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.attW, item.most - 24) : item.most - 24
+                        text: item.stacked ? "" : (item.kind ? "[" + item.kind + "] " : "") + item.text     // (a stack has each caption under its file)
+                        parts: item.kind || item.stacked ? "" : item.shell.rich
+                        ink: item.out ? Theme.outText : Theme.inText
+                        tint: item.out ? Theme.check : Theme.accent
+                        size: item.shell.jumbo === 1 ? 94 : item.shell.jumbo === 2 ? 79 : item.shell.jumbo === 3 ? 65 : Prefs.chatSize    // (Telegram-iOS: 94 × 1, 0.84, 0.69; words: Matn o'lchami)
+                        open: !!page.unfolded[item.msgId]
+                        onLink: (url) => page.follow(url, item.msgId)
+                        onTouched: (down) => item.touchBubble(down)
+                        onHeld: page.openMenu(item)
+                        onTapped: if (!item.mosaic && (item.media || item.rowKind)) page.tapMedia(item)
+                        onFold: page.unfold(item.msgId)
+                    }
+                    Loader {        // the reactions: emoji and how many, ours lit; a tap puts ours on or off.
+                        id: reactRow    // More than a line holds go on to the next, the time by the last (Telegram-iOS)
+                        active: item.reacted        // (made only when there are; its height is the Flow's)
+                        visible: active
+                        x: item.bare ? 0 : 10
+                        y: body.y + body.height + (body.height ? 6 : 4)
+                        readonly property real wants: item.reacted ? item.reactList.reduce((w, r, k) =>
+                            w + page.chipWidth(r) + (k ? 4 : 0), 0) : 0
+                        width: Math.min(wants + 1, bubble.width - x - 10)
+                        readonly property Item msg: item
+                        readonly property real bubW: bubble.width
+                        readonly property real stampW: stamp.implicitWidth
+                        sourceComponent: reactRowComp
+                    }
+                    Row {           // the time: 📌, 👁 views, ↩ answers, edited, when, ✓ (Telegram-iOS's order)
+                        id: stamp
+                        z: 1
+                        anchors.right: parent.right; anchors.rightMargin: item.overlaid || item.shell.jumbo ? (item.bare ? 8 : 12) : 10
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: bubble.tail + (item.overlaid || item.shell.jumbo ? (item.bare ? 6 : 10) : 6)
+                        spacing: 2
+                        readonly property color ink: item.overlaid || item.shell.jumbo || item.bare ? "white" : item.out ? Theme.outMeta : Theme.inMeta
+                        Loader {        // (made only when there are any)
+                            id: counts
+                            active: item.shell.views > 0 || item.shell.replies > 0
+                            visible: active
+                            readonly property Item msg: item
+                            readonly property color ink: stamp.ink
+                            sourceComponent: countsComp
+                        }
+                        Text {
+                            textFormat: item.out && !item.sending ? Text.StyledText : Text.PlainText
+                            text: (item.shell.isPinned ? "📌 " : "") + (item.shell.edited ? Tr.t("tahrirlandi") + " " : "") + item.shell.time +
+                                  (item.out ? (item.sending ? " ◷" : " <font color='" + (item.overlaid || item.shell.jumbo ? "white" : Theme.check) + "'>" + (item.msgId <= page.readUpTo ? "✓✓" : "✓") + "</font>") : "")
+                            color: stamp.ink
+                            font.family: Theme.font; font.pixelSize: 12
+                        }
+                    }
+                    Loader {        // a channel post's comments: how many, a tap opens them (made only for such a post)
+                        id: talkRow
+                        active: bubble.tail > 0
+                        anchors.bottom: parent.bottom
+                        width: parent.width; height: bubble.tail
+                        readonly property Item msg: item
+                        sourceComponent: talkRowComp
+                    }
+                }
+                Loader {            // beside a channel's post: send it on (as Telegram has it; made only in a channel)
+                    id: share
+                    active: page.channel && !item.out
+                    x: bubble.x + bubble.width + 8
+                    y: bubble.y + bubble.height - bubble.tail - height
+                    width: 32; height: 32
+                    readonly property Item msg: item
+                    sourceComponent: shareComp
+                }
+            }
+            Loader {             // «Tanlash»: its circle, filled and ticked once picked (made while picking and as it goes)
+                id: circle
+                active: page.picking
+                anchors.fill: parent
+                readonly property Item msg: item
+                readonly property Item moverItem: mover
+                readonly property real bubH: bubble.height
+                sourceComponent: circleComp
+            }
+            // start where the text was in the field. Called before the list scrolls to this on
+            // the same vertical curve: the two together make one path from there to rest.
+            function flyFrom(from) {
+                const here = body.mapToItem(page, 0, 0)
+                mover.x = from.x - here.x
+                mover.y = from.y - here.y
+                page.lift = true
+                landed.restart()
+                page.flyMover(mover)
+            }
+        }
+    }
+
+    // Shared page-level components for Words.qml (created once per page, instantiated only for rich text)
+    Component {
+        id: wordsProberComp
+        TextEdit {
+            required property real textWidth
+            required property int textWrap
+            required property font textFont
+            required property string richText
+            visible: false
+            readOnly: true
+            width: textWidth
+            wrapMode: textWrap
+            textFormat: TextEdit.RichText
+            font: textFont
+            text: richText
+        }
+    }
+    Component {
+        id: wordsBlownComp
+        Timer {
+            required property Item words
+            interval: 340
+            onTriggered: {
+                if (words)
+                    words.link("spoiler")
+                destroy()
+            }
+        }
+    }
+    Component {
+        id: wordsTouchComp
+        MouseArea {
+            readonly property Item wrap: parent.wrap
+            readonly property Item words: wrap.words
+            pressAndHoldInterval: 350
+            onPressed: words.touched(true)
+            onReleased: words.touched(false)
+            onCanceled: words.touched(false)
+            onPressAndHold: words.held()
+            onClicked: (mouse) => {
+                const what = wrap.hit(mouse.x, mouse.y)
+                if (what === "fold")
+                    words.fold()
+                else if (what === "spoiler") {
+                    if (!words.shown) {
+                        words.shown = true
+                        const tm = wordsBlownComp.createObject(wrap, { words: words })
+                        tm.start()
+                    }
+                } else if (what)
+                    words.link(what)
+                else
+                    words.tapped()
+            }
+        }
+    }
+    Component {
+        id: wordsBlockBgComp
+        Rectangle {
+            readonly property Item part: parent.partItem
+            readonly property Item words: part ? part.words : null
+            radius: 6
+            color: words ? Qt.rgba(words.tint.r, words.tint.g, words.tint.b, 0.12) : "transparent"
+            clip: true
+            Rectangle { visible: !!parent.part && parent.part.q !== "pre"; width: 3; height: parent.height; color: parent.words ? parent.words.tint : Theme.accent }
+            Icon {
+                visible: !!parent.part && (parent.part.q === "quote" || (parent.part.q === "fold" && !parent.part.folds))
+                anchors.right: parent.right; anchors.rightMargin: 4; y: 4
+                width: 14; height: 14
+                name: "quote"; color: parent.words ? parent.words.tint : Theme.accent
+            }
+            Icon {
+                visible: !!parent.part && parent.part.folds
+                anchors.right: parent.right; anchors.rightMargin: 3; anchors.bottom: parent.bottom; anchors.bottomMargin: 3
+                width: 18; height: 18
+                rotation: parent.words && parent.words.open ? 180 : 0
+                name: "chevron"; color: parent.words ? parent.words.tint : Theme.accent
+            }
+        }
+    }
+    Component {
+        id: wordsSpoilerComp
+        Item {
+            readonly property Item part: parent.partItem
+            readonly property Item words: part ? part.words : null
+            TextEdit {
+                id: spyEdit
+                visible: false
+                readOnly: true
+                width: parent.part ? parent.part.textItem.width : 0
+                wrapMode: parent.part ? parent.part.textItem.wrapMode : TextEdit.Wrap
+                textFormat: TextEdit.RichText
+                font: parent.part ? parent.part.textItem.font : Qt.font({ family: Theme.font })
+                text: parent.part ? parent.part.rich : ""
+                readonly property var rects: {
+                    void contentHeight
+                    void width
+                    return places()
+                }
+                function places() {
+                    const out = []
+                    let cur = null
+                    for (let p = 0; p < length; p++) {
+                        const r = positionToRectangle(p)
+                        if (linkAt(r.x + 1, r.y + r.height / 2) !== "spoiler") {
+                            cur = null
+                            continue
+                        }
+                        const n = positionToRectangle(p + 1)
+                        const right = n.y === r.y && n.x > r.x ? n.x : r.x + font.pixelSize * 0.5
+                        if (cur && cur.y === r.y && Math.abs(cur.x + cur.w - r.x) < 1)
+                            cur.w = right - cur.x
+                        else {
+                            cur = { x: r.x, y: r.y, w: right - r.x, h: r.height }
+                            out.push(cur)
+                        }
+                    }
+                    return out
+                }
+            }
+            Dust {
+                x: parent.part ? parent.part.textItem.x : 0; y: parent.part ? parent.part.textItem.y : 0
+                width: parent.part ? parent.part.textItem.width : 0; height: parent.part ? parent.part.textItem.height : 0
+                rects: spyEdit.rects
+                ink: parent.words ? parent.words.ink : Theme.text
+                gone: !!parent.words && parent.words.shown
+                live: !!parent.words && parent.words.live
+            }
+        }
+    }
+    Component {
+        id: wordsTwinComp
+        TextEdit {
+            readonly property Item part: parent.partItem
+            visible: false
+            readOnly: true
+            width: part ? part.textItem.width : 0
+            wrapMode: part ? part.textItem.wrapMode : TextEdit.Wrap
+            textFormat: TextEdit.RichText
+            font: part ? part.textItem.font : Qt.font({ family: Theme.font })
+            text: part ? part.textItem.text : ""
+            readonly property real laid: {
+                void length
+                void contentWidth
+                return positionToRectangle(length).x
+            }
+        }
+    }
+    Component {
+        id: wordsRichComp
+        Item {
+            id: richWrap
+            required property Item words
+            width: words ? words.width : 0
+            height: col.height
+            readonly property real wants: col.wants
+            readonly property real last: col.last
+            readonly property bool hasInteractive: !!words && words.list.some((p) => p.q === "fold" || p.h.indexOf("<a ") >= 0)
+            function hit(x, y) { return col.hit(x, y) }
+
+            Loader {
+                z: 1
+                anchors.fill: parent
+                active: richWrap.hasInteractive
+                readonly property Item wrap: richWrap
+                sourceComponent: wordsTouchComp
+            }
+
+            Column {
+                id: col
+                width: parent.width
+                spacing: 5
+                property real wants: 0
+                readonly property real last: {
+                    const it = partsRep.count ? partsRep.itemAt(partsRep.count - 1) : null
+                    return it ? it.last : 0
+                }
+                function hit(x, y) {
+                    for (let i = 0; i < partsRep.count; i++) {
+                        const it = partsRep.itemAt(i)
+                        if (it && y >= it.y && y < it.y + it.height)
+                            return it.hit(x, y - it.y)
+                    }
+                    return ""
+                }
+                function measure() {
+                    let w = 0
+                    for (let i = 0; i < partsRep.count; i++)
+                        if (partsRep.itemAt(i))
+                            w = Math.max(w, partsRep.itemAt(i).wants)
+                    wants = w
+                }
+                Repeater {
+                    id: partsRep
+                    model: richWrap.words ? richWrap.words.list : []
+                    onItemAdded: col.measure()
+                    Item {
+                        id: part
+                        required property var modelData
+                        required property int index
+                        readonly property Item words: richWrap.words
+                        readonly property Item textItem: t
+                        readonly property string q: modelData.q
+                        readonly property bool block: q !== ""
+                        readonly property bool folds: q === "fold" && (words && words.open ? true : t.truncated)
+                        readonly property real padL: block ? 10 : 0
+                        readonly property real padR: q === "pre" ? 8 : block ? 22 : 0
+                        readonly property real wants: t.implicitWidth + padL + padR
+                        onWantsChanged: if (col) col.measure()
+                        readonly property real last: block ? width : t.last
+                        width: words ? words.width : 0
+                        height: t.height + (block ? 8 : 0)
+                        readonly property string rich: words ? modelData.h
+                            .replace(/<a href="spoiler"/g, "<a style='color:" + (words.shown ? words.ink : "transparent") + ";text-decoration:none' href=\"spoiler\"")
+                            .replace(/<a href=/g, "<a style='color:" + words.tint + ";text-decoration:none' href=") : ""
+                        function hit(x, y) {
+                            let url = ""
+                            if (t.fancy)
+                                url = t.linkAt(x - t.x, y - t.y)
+                            else if (modelData.h.indexOf("<a ") >= 0) {
+                                const probe = wordsProberComp.createObject(part, {
+                                    textWidth: t.width, textWrap: t.wrapMode, textFont: t.font, richText: part.rich
+                                })
+                                url = probe.linkAt(x - t.x, y - t.y)
+                                probe.destroy()
+                            }
+                            return url ? url : q === "fold" ? "fold" : ""
+                        }
+                        Loader {
+                            active: part.block
+                            anchors.fill: parent
+                            readonly property Item partItem: part
+                            sourceComponent: wordsBlockBgComp
+                        }
+                        Text {
+                            id: t
+                            x: part.padL; y: part.block ? 4 : 0
+                            width: Math.max(part.words ? part.words.room : 1, 1) - part.padL - part.padR
+                            wrapMode: part.q === "pre" ? Text.WrapAnywhere : Text.Wrap
+                            maximumLineCount: part.q === "fold" && !(part.words && part.words.open) ? 3 : 100000
+                            elide: Text.ElideRight
+                            readonly property bool fancy: part.modelData.h.indexOf("monospace") >= 0
+                            textFormat: fancy ? Text.RichText : Text.StyledText
+                            property real laid: 0
+                            readonly property real last: !fancy ? laid : twin.item ? twin.item.laid : width
+                            onLineLaidOut: (line) => { if (line.isLast) laid = line.implicitWidth }
+                            text: !part.words ? "" : fancy ? part.rich
+                                : part.modelData.h.replace(/<a href="spoiler">/g, "<font color='" + (part.words.shown ? part.words.ink : "transparent") + "'>")
+                                                  .replace(/<a href="[^"]*">/g, "<font color='" + part.words.tint + "'>").replace(/<\/a>/g, "</font>")
+                            color: part.words ? part.words.ink : Theme.text
+                            linkColor: part.words ? part.words.tint : Theme.accent
+                            font.family: part.q === "pre" ? "monospace" : Theme.font
+                            font.pixelSize: part.words ? (part.q === "pre" ? part.words.size - 2 : part.words.size) : 16
+                        }
+                        Loader {
+                            active: part.modelData.h.indexOf("href=\"spoiler\"") >= 0
+                            anchors.fill: parent
+                            readonly property Item partItem: part
+                            sourceComponent: wordsSpoilerComp
+                        }
+                        Loader {
+                            id: twin
+                            active: t.fancy && !!part.words && part.index === part.words.list.length - 1
+                            readonly property Item partItem: part
+                            sourceComponent: wordsTwinComp
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Loader {
+        id: menuLoader
+        z: 10
+        active: false
+        anchors.fill: parent
+        sourceComponent: MessageMenu {
+            id: menuItem
+            behind: content
+            ceiling: bar.height
+            floor: page.height
+            onReacted: (emoji) => {
+                if (emoji === "⭐") {
+                    const i = page.indexOf(page.reacting)
+                    let paid = null
+                    if (i >= 0) {
+                        const list = JSON.parse(messages.get(i).reacts || "[]")
+                        paid = list.find((r) => r.paid)
+                    }
+                    paidSheet.show(page.reacting, paid ? (paid.reactors || []) : [], !!(paid && paid.mine))
+                    return
+                }
+                store.react(page.chatId, page.reacting, emoji, menuItem.chosen.indexOf(emoji) < 0)
+            }
         }
     }
 }

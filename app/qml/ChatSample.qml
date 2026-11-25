@@ -1,6 +1,6 @@
 // A few messages to show a background and the bubbles over it, as Telegram-iOS's ThemeSettingsChatPreviewItem and
 // the wallpaper gallery's: [{ out, text, time, name, colors, reply: { name, text }, link: { site, title, text } }], one
-// under another, last at the bottom; the bubbles nullgram.py's (Bubble), their colours the theme's. `name` over the
+// under another, last at the bottom; the bubbles nullgram_app.py's (Bubble), their colours the theme's. `name` over the
 // words, and `colors` (Your Color: "#rrggbb" one to three) its, the quote's and the link's — the bar striped by the others.
 import QtQuick
 import QtQuick.Window
@@ -39,7 +39,7 @@ Column {
                     width: (parent.width + 6) * d; height: parent.height * d
                     scale: 1 / d; transformOrigin: Item.TopLeft
                     readonly property int r: sample.radius
-                    readonly property int b: Math.max(r, 10)    // (nullgram.py Bubble: the tail's room)
+                    readonly property int b: Math.max(r, 10)    // (nullgram_app.py Bubble: the tail's room)
                     border { left: (msg.out ? r : b + 6) * d; right: (msg.out ? b + 6 : r) * d; top: r * d; bottom: b * d }
                     source: "image://bubble/" + (msg.out ? "out/" : "in/") + (msg.first ? "b/" : "s/") + (msg.last ? "t/" : "s/")
                             + String(msg.out ? Theme.bubbleOut : Theme.bubbleIn).slice(1) + "/" + d + "/" + r + "/" + sample.small

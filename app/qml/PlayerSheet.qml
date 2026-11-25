@@ -184,7 +184,7 @@ Item {
                 color: Theme.highlight
                 Text {
                     anchors.centerIn: parent
-                    visible: art.status !== Image.Ready
+                    visible: art.status !== Image.Ready && !(art.status === Image.Loading && art.retained)
                     text: "♪"
                     color: Theme.grey
                     font.pixelSize: 26
@@ -196,6 +196,11 @@ Item {
                     sourceSize: Qt.size(Math.ceil(48 * Screen.devicePixelRatio), Math.ceil(48 * Screen.devicePixelRatio))
                     asynchronous: true
                     cache: false
+                    // the song before's picture kept while the next one's loads (else a blank, then ♪, at ⏭)
+                    retainWhileLoading: true
+                    property bool retained: false
+                    onStatusChanged: if (status === Image.Ready) retained = true
+                    onSourceChanged: if (String(source) === "") retained = false
                 }
             }
             Column {

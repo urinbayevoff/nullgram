@@ -96,5 +96,5 @@ function uri(name, colour) {
     if (lines[name])
         svg += "<path d='" + lines[name] + "' fill='none' stroke='" + hex + "' stroke-opacity='" + a +
                "' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/>"
-    return made[key] = "image://svg/" + encodeURIComponent(svg + "</svg>")      // (nullgram.py's Svg: drawn at the size asked)
+    return made[key] = "image://svg/" + encodeURIComponent(svg + "</svg>")      // (nullgram_app.py's Svg: drawn at the size asked)
 }

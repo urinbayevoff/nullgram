@@ -196,17 +196,22 @@ Rectangle {
         function onMergeCornersChanged() { prefs.mergeCorners = Prefs.mergeCorners }
     }
 
-    // the first page: the sign-in until Telegram says we are in, then the chats
+    // the first page: the sign-in until Telegram says we are in, then the chats (none while TDLib opens its
+    // database: a signed-in start made the sign-in page there, for the ~0.3 s until Ready, for nothing)
     property string base: store.auth === "Ready" ? "chats"
                         : store.auth === "NeedApiKey" ? "apikey"
-                        : store.auth === "" || store.auth === "LoggingOut" || store.auth === "Closed" ? "" : "login"
+                        : store.auth === "" || store.auth === "LoggingOut" || store.auth === "Closed"
+                          || (store.auth === "WaitTdlibParameters" && store.error === "") ? "" : "login"
     onBaseChanged: {
         for (const p of pages)
             p.destroy()
         pages = []
+        dropSpare()
         if (base)
             pages = [(base === "chats" ? chatsPage : base === "apikey" ? apiKeyPage : loginPage)
                      .createObject(stack, { store: store, nav: root, player: player })]
+        if (base)
+            safe.ready()        // (the shell's "Loading..." off: Safe.ready)
     }
 
     Item { id: stack; anchors.fill: parent }
@@ -246,9 +251,119 @@ Rectangle {
         return p
     }
 
+    // A chat page made ahead while nothing moves (Telegram X keeps one MessagesController and reuses it):
+    // making ChatPage took ~60-100 ms of the tap's frame and its first layout as much again. It is made a
+    // bit at a time between frames (an asynchronous incubator: QQuickView's controller), hidden, without
+    // a chat; pushChat gives it the chat. One is made again a while after it was taken.
+    property var spare: null
+    property var spareIncubator: null
+    Component { id: spareMaker; ChatPage {} }
+    function makeSpare() {
+        if (spare || spareIncubator || base !== "chats" || moving)
+            return
+        const t0 = Date.now()
+        const inc = spareMaker.incubateObject(stack, { store: store, nav: root, player: player, chatId: 0,
+                                                       spare: true, x: root.width },
+                                              Qt.Asynchronous)
+        const took = () => {
+            if (spareIncubator !== inc)
+                return
+            spareIncubator = null
+            if (inc.status === Component.Ready) {
+                spare = inc.object
+                if (td.fps)
+                    console.warn("nullgram: spare chat page made in", Date.now() - t0, "ms")
+            } else if (inc.status === Component.Error) {
+                console.warn("nullgram: spare chat page:", spareMaker.errorString())
+            }
+        }
+        spareIncubator = inc
+        if (inc.status === Component.Loading)
+            inc.onStatusChanged = took
+        else
+            took()
+    }
+    function dropSpare() {
+        if (spareIncubator) {
+            spareIncubator.forceCompletion()
+            spareIncubator = null
+        }
+        if (spare) {
+            spare.destroy()
+            spare = null
+        }
+    }
+    Timer {             // a spare when nothing has moved and no finger has touched for a while (td.quietMs):
+        id: spareTimer  // its last step holds a frame (~25 ms of QML, the page's first drawing more)
+        interval: 1200
+        repeat: true
+        running: root.base === "chats" && !root.spare && !root.spareIncubator && !root.moving
+        onTriggered: if (td.quietMs() > 2500) root.makeSpare()
+    }
+
+    // Fonts made ready while nothing moves. The first name in a script not met yet at a size and weight
+    // (𝓐𝓵𝓲, ᗩᒪI, Arabic, Han...) had Qt open its fallback fonts one by one until one had it -- 𝓐 is in the
+    // 165th of ~180 here -- and one Text took 30-50 ms in a flick. A character no font has opens them all for
+    // the common script; one of each other script, its own list. Measured once each here (a few ms a step,
+    // only when no finger has touched for a while), the rows' Texts find them open. Nothing drawn: the same
+    // fonts as before, only opened earlier. (TextMetrics, not a hidden Text: that one in the scene had the
+    // window draw a frame for every step, ~13 a second for the first ~10 s after start.)
+    TextMetrics { id: fontWarm; font.family: Theme.font }
+    property int fontStep: 0
+    readonly property var fontKinds: [12, 13, 14, 15, 16, 17, Prefs.chatSize].map((px) => [px, Font.Normal])
+                                     .concat([13, 14, 15, 16, 17, 19, 23].map((px) => [px, Font.DemiBold]))   // (19, 23: the chat list's initials)
+    readonly property var fontChars: [String.fromCodePoint(0x10FFFD), "😀", "ب", "王", "한", "あ", "ש", "ह", "ก", "ব", "ᗷ"]
+    Timer {
+        interval: 60
+        repeat: true
+        running: root.fontStep < root.fontKinds.length * root.fontChars.length
+        onTriggered: {
+            if (root.moving || td.quietMs() < 800)
+                return
+            const kind = root.fontKinds[Math.floor(root.fontStep / root.fontChars.length)]
+            fontWarm.font.pixelSize = kind[0]
+            fontWarm.font.weight = kind[1]
+            fontWarm.text = "A" + root.fontChars[root.fontStep % root.fontChars.length]
+            void fontWarm.advanceWidth              // (shaped now: the fallback fonts opened)
+            root.fontStep++
+        }
+    }
+
+    // a chat, on the spare page when there is one (as push(component, props) does otherwise)
+    function pushChat(component, props) {
+        const p = spare
+        if (!p || moving)
+            return push(component, props)
+        spare = null
+        if (td.fps && store.tapAt)
+            console.warn("nullgram: open on the spare page")
+        const t0 = Date.now()
+        for (const k in props)
+            p[k] = props[k]
+        if (td.fps && store.tapAt)
+            console.warn("nullgram: open props set in", Date.now() - t0, "ms, tap +", Date.now() - store.tapAt)
+        p.z = 2
+        p.x = root.width
+        p.visible = true
+        if (underPage)
+            underPage.visible = false
+        topPage.z = 1
+        pages = pages.concat([p])
+        p.begin()
+        const go = () => { if (topPage === p && !p.started) { p.started = true; slide(1, 500, spring) } }
+        if (p.ready)
+            Qt.callLater(go)
+        else {
+            p.readyChanged.connect(go)
+            wait.callback = go
+            wait.restart()
+        }
+        return p
+    }
+
     // the shell's back: a menu or the like on the page closes first
     function back() {
-        if (storyView.open) {
+        if (storyView && storyView.open) {
             storyView.back()
             return
         }
@@ -421,8 +536,31 @@ Rectangle {
             }
         }
     }
-    StoryViewer { id: storyView; z: 900 }      // Hikoyalar (Q): over every page
-    readonly property alias storyView: storyView
+    // Hikoyalar (Q): over every page. Not made with the window: its ~200 ms (a hidden viewer's texts, field,
+    // sheets) held the first frame. Made in the background once the app is quiet after start, or at once
+    // when stories are opened sooner (stories()); null until then.
+    Loader {
+        id: storyLoader
+        z: 900
+        anchors.fill: parent
+        active: false
+        asynchronous: true
+        sourceComponent: Component { StoryViewer {} }
+    }
+    readonly property Item storyView: storyLoader.item
+    function stories() {
+        if (!storyLoader.item) {
+            storyLoader.asynchronous = false        // (one being made in the background: finished now)
+            storyLoader.active = true
+        }
+        return storyLoader.item
+    }
+    Timer {
+        interval: 1000
+        repeat: true
+        running: !storyLoader.active
+        onTriggered: if (td.quietMs() > 0 && !root.moving) storyLoader.active = true
+    }
     readonly property alias lockPad: lockPad
     PasscodePad {
         id: lockPad

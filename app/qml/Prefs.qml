@@ -43,7 +43,7 @@ QtObject {
     // span was too little to see on the phone (owner, 2026-11-11). Not above 17: a one-line bubble (~34 pt) is a capsule
     // at 17 already (and our corners are quadratic: 17 looks iOS's circle of 16). The small ones, where a sender's
     // messages run together, iOS's auxiliaryRadius (main / 2) — ours 6 at 17, kept at that share. `mergeCorners` off
-    // («Qo'shni burchaklarni moslash», iOS's «Adjust Adjacent Corners»): all big. `bubbleB`: nullgram.py Bubble's border
+    // («Qo'shni burchaklarni moslash», iOS's «Adjust Adjacent Corners»): all big. `bubbleB`: nullgram_app.py Bubble's border
     // on the bottom and the tail's side (the tail needs 10).
     readonly property var cornerStops: [3, 5, 7, 9, 11, 13, 15, 17]
     // Avtomatik tungi rejim (Telegram-iOS's AutomaticThemeSwitchSetting): 0 off, 1 by the schedule — from nightFrom to

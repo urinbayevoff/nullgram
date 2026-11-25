@@ -10,7 +10,7 @@ import QtQuick
 
 QtObject {
     id: emo
-    // the set's folder: nullgram.py's emoji_dir() (a checkout's app/emoji, or ~/.cache/nullgram-emoji)
+    // the set's folder: nullgram_app.py's emoji_dir() (a checkout's app/emoji, or ~/.cache/nullgram-emoji)
     readonly property string dir: typeof td !== "undefined" && td && td.emojiDir ? td.emojiDir : Qt.resolvedUrl("../emoji/")
     readonly property string base: dir + "apple/"
     property int px: 20                  // inline size in message text
@@ -24,6 +24,7 @@ QtObject {
             return              // (not read yet: the first load() will)
         map = null
         ready = false
+        cache = ({}); cacheN = 0
         load()
     }
     // a cheap pre-test: does the text hold a char that could begin an emoji (so plain text skips the walk)
@@ -75,6 +76,20 @@ QtObject {
         load()
         if (!ready)
             return s
+        // a row made again while scrolling back asks for the same text: answer from memory
+        const ck = (size || px) + "|" + s
+        const hit = cache[ck]
+        if (hit !== undefined)
+            return hit
+        const res = walk(s, size)
+        if (cacheN >= 3000) { cache = ({}); cacheN = 0 }     // a crude cap: start over rather than grow for ever
+        cache[ck] = res
+        cacheN++
+        return res
+    }
+    property var cache: ({})
+    property int cacheN: 0
+    function walk(s, size) {
         const cp = [], src = []
         for (let k = 0; k < s.length;) {
             const c = s.charCodeAt(k)
@@ -89,13 +104,21 @@ QtObject {
         let out = ""
         const n = cp.length
         for (let i = 0; i < n;) {
+            const c0 = cp[i]
+            // most chars cannot begin an emoji: letters (Latin, Cyrillic), digits' runs, spaces, punctuation.
+            // Every char used to build up to 12 keys of up to 12 code points (2026-11-23: a flick through a
+            // group spent about half of its rows' make time here with Apple emoji on)
+            if (c0 < 0x2000 && c0 !== 0x23 && c0 !== 0x2a && (c0 < 0x30 || c0 > 0x39) && c0 !== 0xa9 && c0 !== 0xae) {
+                out += src[i]; i++
+                continue
+            }
             let file = "", len = 0
             const hi = Math.min(12, n - i)
-            for (let L = hi; L >= 1; L--) {
-                let key = ""
-                for (let j = 0; j < L; j++)
-                    key += (j ? "-" : "") + cp[i + j].toString(16)
-                if (map[key]) { file = map[key]; len = L; break }
+            let key = ""
+            for (let L = 1; L <= hi; L++) {         // the keys grow one code point at a time; the longest known wins
+                key += (L > 1 ? "-" : "") + cp[i + L - 1].toString(16)
+                const f = map[key]
+                if (f) { file = f; len = L }
             }
             if (file) {
                 out += "<img src=\"" + base + file + "\" width=\"" + (size || px) + "\" height=\"" + (size || px) + "\">"

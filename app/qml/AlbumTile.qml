@@ -9,6 +9,22 @@ Item {
     property var cell: null             // ChatPage.cellOf: its row's media, copied
     property string corner: "14"        // Pic's radii: "tl,tr,br,bl"
     property bool live: true            // on the screen (a spoiler's dust moves only then)
+    property bool inSight: true         // near or on screen (eligible to upgrade from low-res to full)
+    property bool lowRes: false         // list is moving: start at 1/4 size, upgrade once settled
+    property bool readyInit: false
+    property bool startedFast: false
+    property bool sharp: false
+    readonly property bool wantSharp: !lowRes && inSight
+    onWantSharpChanged: if (readyInit && wantSharp) sharp = true
+    Component.onCompleted: {
+        if (lowRes) {
+            startedFast = true
+            sharp = false
+        } else {
+            sharp = true
+        }
+        readyInit = true
+    }
     signal unveiled()                   // its spoiler blown off (the page keeps it off)
     // «Tanlash»: a mark in its corner, each picture picked alone (Telegram-iOS)
     property bool marks: false          // the mark made (while picking, and as it goes)
@@ -37,10 +53,21 @@ Item {
 
     Image {
         anchors.fill: parent
-        visible: tile.mini !== "" && full.status !== Image.Ready
+        visible: tile.mini !== "" && full.status !== Image.Ready && low.status !== Image.Ready
         asynchronous: true
         sourceSize: Qt.size(12, 12 * tile.height / Math.max(tile.width, 1))
         source: tile.mini ? "image://pic/" + tile.corner + "/" + Math.round(tile.width) + "/mini/" + tile.mini : ""
+        smooth: true
+    }
+    Image {
+        id: low
+        anchors.fill: parent
+        visible: tile.startedFast && full.status !== Image.Ready
+        asynchronous: true
+        sourceSize: Qt.size(Math.max(16, Math.round(tile.width / 4)), Math.max(16, Math.round(tile.height / 4)))
+        source: tile.readyInit && tile.startedFast && (!tile.sharp || status === Image.Ready) && full.status !== Image.Ready && tile.pic
+                ? "image://pic/" + tile.corner + "/" + Math.round(tile.width) + "/" + tile.pic : ""
+        opacity: status === Image.Ready ? 1 : 0
         smooth: true
     }
     Image {
@@ -48,9 +75,10 @@ Item {
         anchors.fill: parent
         asynchronous: true
         sourceSize: Qt.size(Math.round(tile.width), Math.round(tile.height))
-        source: tile.pic ? "image://pic/" + tile.corner + "/" + Math.round(tile.width) + "/" + tile.pic : ""
+        source: tile.readyInit && tile.sharp && tile.pic
+                ? "image://pic/" + tile.corner + "/" + Math.round(tile.width) + "/" + tile.pic : ""
         opacity: status === Image.Ready ? 1 : 0
-        Behavior on opacity { OpacityAnimator { duration: 150 } }
+        Behavior on opacity { enabled: low.status !== Image.Ready; OpacityAnimator { duration: 150 } }
     }
     Loader {            // a spoiler: blurred under its dust until tapped, each picture its own
         id: veil

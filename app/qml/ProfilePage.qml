@@ -27,7 +27,7 @@ SubPage {
     Component.onCompleted: load()
     onVisibleChanged: if (visible && full) load()       // (back from editing: what was changed)
     Connections {
-        target: storyView
+        target: root.storyView
         function onMutated(chatId) {
             if (page.me && chatId === page.me.id)
                 page.load()
@@ -105,7 +105,7 @@ SubPage {
             MouseArea {
                 anchors.fill: parent
                 enabled: parent.parent.hasStory
-                onClicked: storyView.show([page.me.id], 0)
+                onClicked: root.stories().show([page.me.id], 0)
             }
         }
         Text {
@@ -290,7 +290,7 @@ SubPage {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: storyView.showOne(page.me.id, page.shown.map((s) => s.id), tile.index, page.pinned)
+                    onClicked: root.stories().showOne(page.me.id, page.shown.map((s) => s.id), tile.index, page.pinned)
                 }
             }
         }

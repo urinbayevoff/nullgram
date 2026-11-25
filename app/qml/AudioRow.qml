@@ -16,6 +16,7 @@ Item {
     property bool playing: false        // this one is the page's sound, playing
     property bool current: false        // this one is the page's sound (playing or paused)
     property real at: 0                 // where it is, ms (while current)
+    property real dpr: 1                // the screen's (ChatPage's page.dpr): the waveform drawn that sharp
     property bool fresh: false          // a voice note not yet played: a dot after its time (Telegram-iOS)
     width: 230; height: 50
 
@@ -82,20 +83,30 @@ Item {
     }
     readonly property real played: current && dur ? Math.min(1, at / (dur * 1000)) : 0
 
-    Row {
+    // the waveform as two pictures (nullgram_app.py Wave): the faint one, and the played part of the ink one over it --
+    // its bars as a Repeater of Rectangles were ~100 items a voice note (the profiler: 2.7 ms a row to bind)
+    Item {
         visible: row.kind === "voice"
         x: 56; y: 8
-        height: 18
-        spacing: 1.5
-        Repeater {
-            model: row.levels
-            Rectangle {
-                required property int index
-                required property var modelData
-                anchors.bottom: parent.bottom
-                width: 2.5; radius: 1.25
-                height: 2.5 + 15.5 * modelData / 31
-                color: index < row.played * row.levels.length ? row.ink : row.faint
+        width: row.levels.length * 4 - 1.5; height: 18
+        readonly property string code: row.kind === "voice" ? row.levels.map((v) => "0123456789abcdefghijklmnopqrstuv"[v]).join("") : ""
+        function src(c) {
+            return code === "" ? "" : "image://wave/" + code + "/" + String(c).slice(1) + "/" + row.dpr
+        }
+        Image {
+            width: parent.width; height: 18
+            source: parent.src(row.faint)
+            cache: true
+        }
+        Item {
+            width: Math.ceil(row.played * row.levels.length) * 4
+            height: 18
+            clip: true
+            visible: width > 0
+            Image {
+                width: parent.parent.width; height: 18
+                source: parent.visible ? parent.parent.src(row.ink) : ""
+                cache: true
             }
         }
     }

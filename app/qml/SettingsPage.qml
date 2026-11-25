@@ -43,7 +43,15 @@ Page {
     }
     function saved() {
         if (page.me)
-            store.chatWith(page.me.id, (id) => page.nav.push(chatPage, { chatId: id }))
+            store.chatWith(page.me.id, (id) => page.openQml("ChatPage.qml", { chatId: id }))
+    }
+    function openQr() {
+        qrLoader.active = true
+        qrLoader.item.show()
+    }
+    function openAlert(title, text, answers, stacked) {
+        alertLoader.active = true
+        alertLoader.item.show(title, text, answers, stacked)
     }
     function sendGift() {        // iOS: a person picked, then the gifts for them
         const p = nav.push(Qt.createComponent("FolderChatsPage.qml"), {
@@ -54,29 +62,30 @@ Page {
             p.done.connect((flags, ids) => {
                 if (!ids.length)
                     return
-                gift.chatId = ids[0]
-                Qt.callLater(() => gift.show())
+                giftLoader.active = true
+                giftLoader.item.chatId = ids[0]
+                Qt.callLater(() => giftLoader.item.show())
             })
     }
     function business() {
-        alert.show("Telegram Business", Tr.t("Biznes uchun imkoniyatlar (ish vaqti, joylashuv, tezkor javoblar, chat-botlar) Telegram Business obunasi bilan keladi. Uni Nullgram'da sotib olib bo'lmaydi — Telegram'ning boshqa ilovasidan oling."),
-                   [{ t: Tr.t("Yopish") }])
+        openAlert("Telegram Business", Tr.t("Biznes uchun imkoniyatlar (ish vaqti, joylashuv, tezkor javoblar, chat-botlar) Telegram Business obunasi bilan keladi. Uni Nullgram'da sotib olib bo'lmaydi — Telegram'ning boshqa ilovasidan oling."),
+                  [{ t: Tr.t("Yopish") }])
     }
     function ask() {             // iOS's alert before the support chat
-        alert.show(Tr.t("Savol berish"), Tr.t("Telegram yordami ko'ngillilar tomonidan amalga oshiriladi. Imkon qadar tez javob berishga harakat qilamiz, lekin bu biroz vaqt olishi mumkin.\n\nTelegram FAQ'ni ko'rib chiqing: unda ko'p savollarga javob va muammolarni hal qilish bo'yicha muhim maslahatlar bor."),
-                   [{ t: Tr.t("FAQ"), run: page.faq },
-                    { t: Tr.t("Ko'ngillidan so'rash"), run: () => store.send({ "@type": "getSupportUser" }, (u) => {
-                        if (u["@type"] === "user")
-                            store.chatWith(u.id, (id) => page.nav.push(chatPage, { chatId: id }))
-                        else
-                            page.nav.say(Tr.f("Bo'lmadi: %1", u.message || ""))
-                    }) }], true)
+        openAlert(Tr.t("Savol berish"), Tr.t("Telegram yordami ko'ngillilar tomonidan amalga oshiriladi. Imkon qadar tez javob berishga harakat qilamiz, lekin bu biroz vaqt olishi mumkin.\n\nTelegram FAQ'ni ko'rib chiqing: unda ko'p savollarga javob va muammolarni hal qilish bo'yicha muhim maslahatlar bor."),
+                  [{ t: Tr.t("FAQ"), run: page.faq },
+                   { t: Tr.t("Ko'ngillidan so'rash"), run: () => store.send({ "@type": "getSupportUser" }, (u) => {
+                       if (u["@type"] === "user")
+                           store.chatWith(u.id, (id) => page.openQml("ChatPage.qml", { chatId: id }))
+                       else
+                           page.nav.say(Tr.f("Bo'lmadi: %1", u.message || ""))
+                   }) }], true)
     }
     function faq() { Qt.openUrlExternally(Tr.en ? "https://telegram.org/faq" : "https://telegram.org/faq") }
     function features() {        // iOS: the @TelegramTips channel
         store.send({ "@type": "searchPublicChat", username: "TelegramTips" }, (c) => {
             if (c["@type"] === "chat")
-                page.nav.push(chatPage, { chatId: c.id })
+                page.openQml("ChatPage.qml", { chatId: c.id })
             else
                 page.nav.say(Tr.f("Bo'lmadi: %1", c.message || ""))
         })
@@ -85,30 +94,30 @@ Page {
 
     // what 🔍 finds: [words, icon, what it opens]; the rows and the pages under them people look for most
     readonly property var index: [
-        [Tr.t("Mening profilim"), "profile", () => page.open(profilePage)],
+        [Tr.t("Mening profilim"), "profile", () => page.openQml("ProfilePage.qml")],
         [Tr.t("Tahrirlash"), "profile", page.edit],
         [Tr.t("Foydalanuvchi nomi"), "profile", () => page.openQml("UsernamePage.qml")],
         [Tr.t("Saqlangan xabarlar"), "saved", page.saved],
         [Tr.t("So'nggi qo'ng'iroqlar"), "calls", () => page.openQml("CallsPage.qml")],
-        [Tr.t("Qurilmalar"), "devices", () => page.open(devicesPage)],
-        [Tr.t("Chat papkalari"), "folders", () => page.open(foldersPage)],
-        [Tr.t("Bildirishnomalar va ovozlar"), "notifications", () => page.open(notificationsPage)],
+        [Tr.t("Qurilmalar"), "devices", () => page.openQml("DevicesPage.qml")],
+        [Tr.t("Chat papkalari"), "folders", () => page.openQml("FoldersPage.qml")],
+        [Tr.t("Bildirishnomalar va ovozlar"), "notifications", () => page.openQml("NotificationsPage.qml")],
         [Tr.t("Maxfiylik va xavfsizlik"), "privacy", () => page.openQml("PrivacyPage.qml")],
         [Tr.t("Bloklangan foydalanuvchilar"), "block", () => page.openQml("BlockedPage.qml")],
         [Tr.t("Kod-parol"), "passcode", () => page.openQml("PasscodePage.qml")],
         [Tr.t("Ikki bosqichli tasdiqlash"), "privacy", () => page.openQml("TwoStepPage.qml")],
-        [Tr.t("Ma'lumotlar va xotira"), "data", () => page.open(storagePage)],
+        [Tr.t("Ma'lumotlar va xotira"), "data", () => page.openQml("StoragePage.qml")],
         [Tr.t("Xotira sarfi"), "storage", () => page.openQml("StorageUsagePage.qml")],
         [Tr.t("Trafik"), "traffic", () => page.openQml("DataUsagePage.qml")],
         [Tr.t("Proksi"), "proxy", () => page.openQml("ProxyPage.qml")],
-        [Tr.t("Ko'rinish"), "appearance", () => page.open(appearancePage)],
+        [Tr.t("Ko'rinish"), "appearance", () => page.openQml("AppearancePage.qml")],
         [Tr.t("Chat fon rasmi"), "appearance", () => page.openQml("WallpaperPage.qml")],
         [Tr.t("Chat mavzulari"), "appearance", () => page.openQml("ChatThemesPage.qml")],
         [Tr.t("Matn o'lchami"), "appearance", () => page.openQml("TextSizePage.qml")],
         [Tr.t("Sizning rangingiz"), "color", () => page.openQml("YourColorPage.qml")],
-        [Tr.t("Stikerlar va emoji"), "stickers", () => page.open(stickersPage)],
-        [Tr.t("Quvvat tejash"), "powersaving", () => page.open(powerPage)],
-        [Tr.t("Til"), "language", () => page.open(languagePage)],
+        [Tr.t("Stikerlar va emoji"), "stickers", () => page.openQml("StickersPage.qml")],
+        [Tr.t("Quvvat tejash"), "powersaving", () => page.openQml("PowerPage.qml")],
+        [Tr.t("Til"), "language", () => page.openQml("LanguagePage.qml")],
         ["Telegram Premium", "premium", () => page.openQml("PremiumPage.qml")],
         [Tr.t("Mening yulduzlarim"), "stars", () => page.openQml("StarsPage.qml")],
         ["Telegram Business", "business", page.business],
@@ -116,7 +125,7 @@ Page {
         [Tr.t("Savol berish"), "support", page.ask],
         ["Telegram FAQ", "faq", page.faq],
         [Tr.t("Telegram imkoniyatlari"), "tips", page.features],
-        [Tr.t("Chiqish"), "", () => leave.visible = true]
+        [Tr.t("Chiqish"), "", () => { leaveLoader.active = true; leaveLoader.item.visible = true }]
     ]
     readonly property var found: {
         const q = query.trim().toLowerCase()
@@ -161,21 +170,21 @@ Page {
             }
 
             SettingsGroup {
-                SettingsRow { art: "profile"; text: Tr.t("Mening profilim"); last: true; onClicked: page.open(profilePage) }
+                SettingsRow { art: "profile"; text: Tr.t("Mening profilim"); last: true; onClicked: page.openQml("ProfilePage.qml") }
             }
             SettingsGroup {
                 SettingsRow { art: "saved"; text: Tr.t("Saqlangan xabarlar"); onClicked: page.saved() }
                 SettingsRow { art: "calls"; text: Tr.t("So'nggi qo'ng'iroqlar"); onClicked: page.openQml("CallsPage.qml") }
-                SettingsRow { art: "devices"; text: Tr.t("Qurilmalar"); value: page.devices ? page.devices : ""; onClicked: page.open(devicesPage) }
-                SettingsRow { art: "folders"; text: Tr.t("Chat papkalari"); value: store.folders.length ? store.folders.length : ""; last: true; onClicked: page.open(foldersPage) }
+                SettingsRow { art: "devices"; text: Tr.t("Qurilmalar"); value: page.devices ? page.devices : ""; onClicked: page.openQml("DevicesPage.qml") }
+                SettingsRow { art: "folders"; text: Tr.t("Chat papkalari"); value: store.folders.length ? store.folders.length : ""; last: true; onClicked: page.openQml("FoldersPage.qml") }
             }
             SettingsGroup {
-                SettingsRow { art: "notifications"; text: Tr.t("Bildirishnomalar va ovozlar"); onClicked: page.open(notificationsPage) }
+                SettingsRow { art: "notifications"; text: Tr.t("Bildirishnomalar va ovozlar"); onClicked: page.openQml("NotificationsPage.qml") }
                 SettingsRow { art: "privacy"; text: Tr.t("Maxfiylik va xavfsizlik"); onClicked: page.openQml("PrivacyPage.qml") }
-                SettingsRow { art: "data"; text: Tr.t("Ma'lumotlar va xotira"); onClicked: page.open(storagePage) }
-                SettingsRow { art: "appearance"; text: Tr.t("Ko'rinish"); value: Theme.dark ? Tr.t("Tungi") : Tr.t("Kunduzgi"); onClicked: page.open(appearancePage) }
-                SettingsRow { art: "powersaving"; text: Tr.t("Quvvat tejash"); value: Prefs.saving ? Tr.t("Yoqilgan") : Tr.t("O'chiq"); onClicked: page.open(powerPage) }
-                SettingsRow { art: "language"; text: Tr.t("Til"); value: Tr.en ? "English" : Tr.t("O'zbekcha"); last: true; onClicked: page.open(languagePage) }
+                SettingsRow { art: "data"; text: Tr.t("Ma'lumotlar va xotira"); onClicked: page.openQml("StoragePage.qml") }
+                SettingsRow { art: "appearance"; text: Tr.t("Ko'rinish"); value: Theme.dark ? Tr.t("Tungi") : Tr.t("Kunduzgi"); onClicked: page.openQml("AppearancePage.qml") }
+                SettingsRow { art: "powersaving"; text: Tr.t("Quvvat tejash"); value: Prefs.saving ? Tr.t("Yoqilgan") : Tr.t("O'chiq"); onClicked: page.openQml("PowerPage.qml") }
+                SettingsRow { art: "language"; text: Tr.t("Til"); value: Tr.en ? "English" : Tr.t("O'zbekcha"); last: true; onClicked: page.openQml("LanguagePage.qml") }
             }
             SettingsGroup {
                 SettingsRow { art: "premium"; text: "Telegram Premium"; onClicked: page.openQml("PremiumPage.qml") }
@@ -200,7 +209,7 @@ Page {
                 }
             }
             SettingsGroup {
-                SettingsRow { text: Tr.t("Chiqish"); danger: true; chevron: false; last: true; onClicked: leave.visible = true }
+                SettingsRow { text: Tr.t("Chiqish"); danger: true; chevron: false; last: true; onClicked: { leaveLoader.active = true; leaveLoader.item.visible = true } }
             }
         }
     }
@@ -224,7 +233,7 @@ Page {
             width: 44; height: 44
             opacity: qrHit.pressed ? 0.7 : 1
             Icon { anchors.centerIn: parent; name: "qr"; color: Theme.text }
-            MouseArea { id: qrHit; anchors.fill: parent; onClicked: qr.show() }
+            MouseArea { id: qrHit; anchors.fill: parent; onClicked: page.openQr() }
         }
         Glass {
             visible: !page.searching
@@ -329,91 +338,96 @@ Page {
         }
     }
 
-    QrSheet {
-        id: qr
+    Loader {
+        id: qrLoader
+        active: false
         parent: page.nav || page
+        anchors.fill: parent
         z: 100
-        store: page.store
-        photo: page.photo
-        username: page.username
-        onWantName: page.openQml("UsernamePage.qml")
-        onCopied: page.nav.say(Tr.t("Havola nusxalandi"))
+        sourceComponent: QrSheet {
+            store: page.store
+            photo: page.photo
+            username: page.username
+            onWantName: page.openQml("UsernamePage.qml")
+            onCopied: page.nav.say(Tr.t("Havola nusxalandi"))
+        }
     }
-    Item {               // (the gift sheet over the whole window, as ChatInfoPage's overlay)
+    Loader {             // (the gift sheet over the whole window, as ChatInfoPage's overlay)
+        id: giftLoader
+        active: false
         parent: page.nav || page
         anchors.fill: parent
         z: 99
-        GiftSheet {
-            id: gift
+        sourceComponent: GiftSheet {
             store: page.store
             onSay: (text) => page.nav.say(text)
         }
     }
-    Alert { id: alert; parent: page.nav || page; anchors.fill: parent; z: 100 }
+    Loader {
+        id: alertLoader
+        active: false
+        parent: page.nav || page
+        anchors.fill: parent
+        z: 100
+        sourceComponent: Alert { anchors.fill: parent }
+    }
 
-    Item {               // «Chiqish»: asked first, as Telegram-iOS's alert
-        id: leave
+    Loader {             // «Chiqish»: asked first, as Telegram-iOS's alert
+        id: leaveLoader
+        active: false
         parent: page.nav || page         // (over the whole window: the tab bar too)
         anchors.fill: parent
         z: 100
-        visible: false
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.4) }
-        MouseArea { anchors.fill: parent; onClicked: leave.visible = false }
-        Rectangle {
-            anchors.centerIn: parent
-            width: 280; height: leaveText.height + 32 + 2 * 46
-            radius: 14
-            color: Theme.menu
-            MouseArea { anchors.fill: parent }
-            Text {
-                id: leaveText
-                x: 16; y: 18; width: parent.width - 32
-                wrapMode: Text.Wrap
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.StyledText
-                text: "<b>" + Tr.t("Hisobdan chiqasizmi?") + "</b><br>" + Tr.t("Kirish uchun raqamingiz yoki QR kod kerak bo'ladi.")
-                color: Theme.text
-                font.family: Theme.font; font.pixelSize: 15
-            }
-            Repeater {
-                model: [{ t: Tr.t("Chiqish"), go: true }, { t: Tr.t("Bekor qilish"), go: false }]
-                Rectangle {
-                    required property var modelData
-                    required property int index
-                    y: leaveText.y + leaveText.height + 14 + index * 46
-                    width: parent.width; height: 46
-                    color: leaveHit.pressed ? Theme.highlight : "transparent"
-                    radius: index === 1 ? 14 : 0
-                    Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
-                    Text {
-                        anchors.centerIn: parent
-                        text: parent.modelData.t
-                        color: parent.modelData.go ? Theme.danger : Theme.accent
-                        font.family: Theme.font; font.pixelSize: 17
-                        font.weight: parent.modelData.go ? Font.Normal : Font.DemiBold
-                    }
-                    MouseArea {
-                        id: leaveHit
-                        anchors.fill: parent
-                        onClicked: {
-                            leave.visible = false
-                            if (parent.modelData.go)
-                                store.logOut()
+        sourceComponent: Item {
+            id: leave
+            visible: false
+            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.4) }
+            MouseArea { anchors.fill: parent; onClicked: leave.visible = false }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 280; height: leaveText.height + 32 + 2 * 46
+                radius: 14
+                color: Theme.menu
+                MouseArea { anchors.fill: parent }
+                Text {
+                    id: leaveText
+                    x: 16; y: 18; width: parent.width - 32
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.StyledText
+                    text: "<b>" + Tr.t("Hisobdan chiqasizmi?") + "</b><br>" + Tr.t("Kirish uchun raqamingiz yoki QR kod kerak bo'ladi.")
+                    color: Theme.text
+                    font.family: Theme.font; font.pixelSize: 15
+                }
+                Repeater {
+                    model: [{ t: Tr.t("Chiqish"), go: true }, { t: Tr.t("Bekor qilish"), go: false }]
+                    Rectangle {
+                        required property var modelData
+                        required property int index
+                        y: leaveText.y + leaveText.height + 14 + index * 46
+                        width: parent.width; height: 46
+                        color: leaveHit.pressed ? Theme.highlight : "transparent"
+                        radius: index === 1 ? 14 : 0
+                        Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+                        Text {
+                            anchors.centerIn: parent
+                            text: parent.modelData.t
+                            color: parent.modelData.go ? Theme.danger : Theme.accent
+                            font.family: Theme.font; font.pixelSize: 17
+                            font.weight: parent.modelData.go ? Font.Normal : Font.DemiBold
+                        }
+                        MouseArea {
+                            id: leaveHit
+                            anchors.fill: parent
+                            onClicked: {
+                                leave.visible = false
+                                if (parent.modelData.go)
+                                    store.logOut()
+                            }
                         }
                     }
                 }
             }
         }
     }
-
-    Component { id: chatPage; ChatPage {} }
-    Component { id: profilePage; ProfilePage {} }
-    Component { id: devicesPage; DevicesPage {} }
-    Component { id: foldersPage; FoldersPage {} }
-    Component { id: notificationsPage; NotificationsPage {} }
-    Component { id: storagePage; StoragePage {} }
-    Component { id: appearancePage; AppearancePage {} }
-    Component { id: stickersPage; StickersPage {} }
-    Component { id: languagePage; LanguagePage {} }
-    Component { id: powerPage; PowerPage {} }
 }

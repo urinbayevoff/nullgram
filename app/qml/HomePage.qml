@@ -133,6 +133,8 @@ Page {
     }
     Component { id: devChat; ChatPage {} }
     function devPush(id) {
+        if (td.fps)
+            store.tapAt = Date.now()
         const c = store.chats[id]
         if (c && c.type.is_channel) {           // a channel: what to say goes to its newest post's comments
             nav.push(devChat, { chatId: id, say: td.devSay, findNow: td.devFind })

@@ -1,6 +1,6 @@
 // A chat's background, as Telegram-iOS's WallpaperBackgroundNode: its fill at once (a few pixels, drawn
 // large), then the whole of it (pattern or picture) at the size it is shown, drawn off the UI thread by
-// nullgram.py's Wallpaper provider. `spec`: "<fill>;<intensity>;<kind>;<path>" (Store.wallSpec), the
+// nullgram_app.py's Wallpaper provider. `spec`: "<fill>;<intensity>;<kind>;<path>" (Store.wallSpec), the
 // app's own by default; `radius`: its corners rounded (the grids' tiles).
 import QtQuick
 
@@ -16,6 +16,7 @@ Item {
         anchors.fill: parent
         source: "image://wallpaper/" + encodeURIComponent(wall.round + wall.parts[0] + ";" + (wall.parts[1] || 0) + ";;")
         sourceSize: wall.radius > 0 ? Qt.size(Math.ceil(wall.width), Math.ceil(wall.height)) : Qt.size(30, 63)
+        asynchronous: true
         smooth: true
         visible: !wall.ready
     }

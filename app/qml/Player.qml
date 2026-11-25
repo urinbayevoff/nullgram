@@ -19,9 +19,12 @@ Item {
     property string title: ""            // a song's title, a voice note's sender
     property string sub: ""              // its performer, a voice note's «Ovozli xabar»
     readonly property bool round: kind === "round"
-    readonly property bool playing: round ? !roundPaused : sound.playbackState === MediaPlayer.PlayingState
-    readonly property real position: round ? roundPos : sound.position
-    readonly property real duration: round ? roundDur : sound.duration
+    // (while one song gives way to the next, ⏸ stays and the length is the new one's: the player stops for a
+    // moment between them, and the sheet's ⏸/▶ and 0:00 blinked at every ⏭ ⏮)
+    readonly property bool playing: round ? !roundPaused : !!sound && (sound.playbackState === MediaPlayer.PlayingState || starting)
+    readonly property real position: round ? roundPos : sound ? sound.position : 0
+    readonly property real duration: round ? roundDur : sound && sound.duration > 0 ? sound.duration : roundDur
+    property bool starting: false        // a new file given and play() asked: not playing yet
     property bool roundPaused: false     // a round video: held (tapped while it played), its bubble still big
     property real roundPos: 0            // ms, as its bubble's player says
     property real roundDur: 0
@@ -64,7 +67,8 @@ Item {
             start({ chatId: 0, msgId: id })         // (the same one: paused or on again)
             return
         }
-        list = l                // (the sheet lists them at once, while the song comes down)
+        if (list !== l)
+            list = l            // (the sheet lists them at once, while the song comes down; the same list: not again)
         listAt = i
         waiting = id
         store.fetch(a.audio, 32, (path) => {
@@ -78,6 +82,7 @@ Item {
     // play this one (o: { chatId, msgId, path, kind, title, sub, from }): the same one again pauses or
     // goes on (or, given `from`, goes there)
     function start(o) {
+        need()
         if (o.chatId === chatId && o.msgId === msgId) {
             if (round) {
                 roundPaused = !roundPaused
@@ -108,9 +113,11 @@ Item {
         roundPath = o.kind === "round" ? o.path || "" : ""
         sound.from = o.from || 0
         if (kind === "round") {     // (its bubble plays it)
+            starting = false
             sound.stop()
             sound.source = ""
         } else {
+            starting = true
             sound.source = "file://" + o.path
             sound.play()
         }
@@ -121,20 +128,26 @@ Item {
     function toggle() {
         if (round)
             roundPaused = !roundPaused
-        else if (playing)
+        else if (playing) {
+            starting = false
             sound.pause()
-        else if (msgId)
-            sound.play()
+        } else if (msgId)
+            need().play()
     }
     function pause() {
         if (round)
             roundPaused = true
-        else
+        else if (sound) {
+            starting = false
             sound.pause()
+        }
     }
     function stop() {
-        sound.stop()
-        sound.source = ""
+        starting = false
+        if (sound) {
+            sound.stop()
+            sound.source = ""
+        }
         roundPaused = false
         waiting = 0             // (one being brought down to follow: not any more)
         msgId = 0
@@ -149,12 +162,16 @@ Item {
     // the song's album picture (Telegram-iOS's player shows it in place of the note): the file's own,
     // else one Telegram found for its title and performer (external_album_covers); its tiny blurred
     // preview while it comes down
+    // (the one before's picture, and whether it is in our profile, stay until this one's come: cleared first,
+    // the sheet's picture blinked to ♪ and its «Profilga qo'shish» went and came back -- the whole sheet
+    // dropped and rose -- at every ⏭ ⏮. song is null meanwhile: the button does nothing.)
     function findCover() {
-        cover = ""
         song = null
-        onProfile = null
-        if (kind !== "audio")
+        if (kind !== "audio") {
+            onProfile = null
+            cover = ""
             return
+        }
         const chat = chatId, id = msgId
         if (list) {
             useAudio(list.songs[listAt], chat, id)
@@ -168,14 +185,19 @@ Item {
     }
     function useAudio(a, chat, id) {
         const still = () => player.msgId === id && player.chatId === chat
-        song = { file: a.audio.id, duration: a.duration, title: a.title, performer: a.performer }
+        const s = { file: a.audio.id, duration: a.duration, title: a.title, performer: a.performer }
+        song = null             // (not to be added or taken out until it is known which it is)
         store.send({ "@type": "isProfileAudio", file_id: a.audio.id }, (r) => {
-            if (still())
+            if (still()) {
                 onProfile = r["@type"] === "ok"
+                song = s
+            }
         })
+        const t = a.album_cover_thumbnail || (a.external_album_covers || [])[0]
         if (a.album_cover_minithumbnail)
             cover = "image://pic/8/48/mini/" + a.album_cover_minithumbnail.data
-        const t = a.album_cover_thumbnail || (a.external_album_covers || [])[0]
+        else if (!(t && t.file))
+            cover = ""
         if (t && t.file)
             store.fetch(t.file, 1, (path) => {
                 if (still())
@@ -198,7 +220,7 @@ Item {
             done(ok)
         })
     }
-    function seek(ms) { sound.position = ms }
+    function seek(ms) { if (sound) sound.position = ms }
     // 1x → 1.5x → 2x → 1x, said at the foot (Main's Toast: Telegram-iOS's .audioRate tooltip)
     signal rated(real r)
     function nextRate() {
@@ -294,23 +316,43 @@ Item {
             sound.stop()
     }
 
-    MediaPlayer {
-        id: sound
-        audioOutput: AudioOutput {}
-        playbackRate: player.rate
-        property real from: 0           // where it is to start (a timestamp tapped), once it can go there
-        function begin() {
-            // (seekable comes while it still loads, and a position given then is lost: once loaded)
-            if (from > 0 && seekable && mediaStatus !== MediaPlayer.LoadingMedia && mediaStatus !== MediaPlayer.NoMedia) {
-                position = from
-                from = 0
+    // the player itself: not made with the window (the first MediaPlayer starts Qt Multimedia's FFmpeg,
+    // ~220 ms on the phone before the first frame); made once the app is quiet after start, or when
+    // something is played sooner (need())
+    property MediaPlayer sound: null
+    function need() {
+        if (!sound)
+            sound = soundComp.createObject(player)
+        return sound
+    }
+    Timer {
+        interval: 1500
+        repeat: true
+        running: !player.sound
+        onTriggered: if (td.quietMs() > 1500) player.need()
+    }
+    Component {
+        id: soundComp
+        MediaPlayer {
+            audioOutput: AudioOutput {}
+            playbackRate: player.rate
+            property real from: 0           // where it is to start (a timestamp tapped), once it can go there
+            function begin() {
+                // (seekable comes while it still loads, and a position given then is lost: once loaded)
+                if (from > 0 && seekable && mediaStatus !== MediaPlayer.LoadingMedia && mediaStatus !== MediaPlayer.NoMedia) {
+                    position = from
+                    from = 0
+                }
             }
-        }
-        onSeekableChanged: begin()
-        onMediaStatusChanged: {
-            begin()
-            if (mediaStatus === MediaPlayer.EndOfMedia)
-                player.step(false)
+            onSeekableChanged: begin()
+            onPlaybackStateChanged: if (playbackState === MediaPlayer.PlayingState) player.starting = false
+            onMediaStatusChanged: {
+                if (mediaStatus === MediaPlayer.InvalidMedia || mediaStatus === MediaPlayer.EndOfMedia)
+                    player.starting = false
+                begin()
+                if (mediaStatus === MediaPlayer.EndOfMedia)
+                    player.step(false)
+            }
         }
     }
 }

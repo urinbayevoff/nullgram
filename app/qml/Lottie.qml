@@ -1,4 +1,4 @@
-// A TGS sticker (Lottie) playing: its frames drawn by libtlottie (image://lottie, nullgram.py's Lottie) and
+// A TGS sticker (Lottie) playing: its frames drawn by libtlottie (image://lottie, nullgram_app.py's Lottie) and
 // shown two pictures in turn -- the next one asked for while the last stays on the screen, so it never
 // blinks empty. On Tick's clock, as every other sticker: a tick shows the frame the last one asked for,
 // if it has come, and asks for the next. The frame is found by the time since it started, so one that
@@ -21,7 +21,7 @@ Item {
     property bool atEnd: false      // (read as it is made)
     signal ended()                  // a `once` one has played to its end
     // pixels a frame: 384 at most (Qt asks for the size in points times the ratio); drawn bigger, three
-    // stickers cost a big core (nullgram.py, Lottie). An emoji's effect, three times its size and played
+    // stickers cost a big core (nullgram_app.py, Lottie). An emoji's effect, three times its size and played
     // once, is let have more.
     property int most: 384
     readonly property real side: Math.min(Math.max(width, height), most / Screen.devicePixelRatio)
