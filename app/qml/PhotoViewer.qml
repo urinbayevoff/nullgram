@@ -21,9 +21,17 @@ Item {
     property string source: ""          // what shows (the bubble's own, then a bigger one)
     property string video: ""           // a video's local path: it plays over the picture
     property bool chrome: true          // the video's controls show
+    property real rate: 1               // video playback speed: 1, 1.5, 2, 0.5
     property bool turned: false         // the wide video across the screen
     property bool sideways: false       // the controls laid out for it (once the turn is over)
     readonly property bool wide: video !== "" && aspect < 0.9
+    function nextRate() {
+        rate = rate === 1 ? 1.5 : rate === 1.5 ? 2 : rate === 2 ? 0.5 : 1
+        hide.restart()
+    }
+    function rateText(r) {
+        return (r === 1 || r === 2 ? String(Math.round(r)) : String(r)) + "X"
+    }
     signal save()
     signal paged(var id)                // another message's picture shows now
 
@@ -56,6 +64,7 @@ Item {
         older = newer = null
         neighbours()
         viewer.video = video || ""
+        viewer.rate = 1
         chrome = true
         if (viewer.video) {
             player.from = at || 0
@@ -183,6 +192,7 @@ Item {
         id: player
         videoOutput: screen
         audioOutput: AudioOutput {}
+        playbackRate: viewer.rate
         onPlaybackStateChanged: if (playbackState !== MediaPlayer.PlayingState) viewer.chrome = true
         property real from: 0           // where it is to start, once it can go there
         function begin() {
@@ -451,6 +461,34 @@ Item {
                     }
                 }
             }
+            Rectangle {          // playback speed: 1X → 1.5X → 2X → 0.5X → 1X (MiniPlayer's framed pill)
+                id: rateButton
+                anchors.right: parent.right; anchors.rightMargin: 64
+                y: 14
+                width: Math.max(40, rateBox.width + 14); height: 40; radius: 20
+                color: Qt.rgba(0, 0, 0, 0.45)
+                opacity: rateHit.pressed ? 0.5 : 1
+                Rectangle {
+                    id: rateBox
+                    anchors.centerIn: parent
+                    width: Math.max(26, rateLabel.implicitWidth + 8); height: 18; radius: 4
+                    color: viewer.rate !== 1 ? Theme.accent : "transparent"
+                    border.color: viewer.rate !== 1 ? Theme.accent : "white"; border.width: 1.2
+                    Text {
+                        id: rateLabel
+                        anchors.centerIn: parent
+                        text: viewer.rateText(viewer.rate)
+                        color: "white"
+                        font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
+                    }
+                }
+                MouseArea {
+                    id: rateHit
+                    anchors.fill: parent; anchors.margins: -6
+                    enabled: viewer.chrome
+                    onClicked: viewer.nextRate()
+                }
+            }
         }
         Rectangle {          // ↓: into ~/Downloads
             anchors.right: parent.right; anchors.rightMargin: 14
@@ -490,6 +528,7 @@ Item {
             viewer.visible = false
             big.source = ""
             viewer.video = ""
+            viewer.rate = 1
             player.source = ""
             viewer.current = viewer.older = viewer.newer = null
             viewer.waiting = false

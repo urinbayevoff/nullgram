@@ -25,6 +25,13 @@ QtObject {
     property var me: null
     property real stars: -1             // our Telegram Stars (updateOwnedStarCount; -1 not yet told)
     property int unreadChats: 0         // the main list's chats with unread messages, not muted
+    property int unreadArchive: 0       // the archive list's chats with unread messages
+    property int unreadArchiveUnmuted: 0
+    property bool archiveUnreadKnown: false
+    property bool archiveHidden: false  // the Archive row collapsed above the main list (pull down to reveal)
+    property int archiveSeen: 0         // bumped when archiveList changes (Archive row binds to this)
+    property var archiveSettings: ({ archive_and_mute_new_chats_from_unknown_users: false,
+                                     keep_unmuted_chats_archived: false, keep_chats_from_folders_archived: false })
     property var folders: []            // the user's chat folders: [{ id, name, icon, color, shared, links }], in their order
     property int mainPosition: 0        // where «All chats» stands among them (moved only with Premium)
     property bool folderTags: false     // each chat's folders named in the list (Premium)
@@ -52,6 +59,7 @@ QtObject {
     property int directTopicsSeen: 0
 
     readonly property ListModel chatList: ListModel {}     // the main list in Telegram's order
+    readonly property ListModel archiveList: ListModel {}  // the archived chats in Telegram's order (list id -1)
     property var folderLists: ({})      // folder id -> its ListModel, made when first shown, kept up after
     readonly property Component listModel: Component { ListModel {} }
     property var chats: ({})
@@ -76,6 +84,7 @@ QtObject {
     signal fileUpdated(var f)           // a file is coming or going: how far, or done
     signal messagePinned(var chatId, var id, bool pinned)
     signal messageInteraction(var chatId, var id, var info)     // views, reactions
+    signal rowMoved(var listId)         // a row of a kept list moved (ListModel's rowsMoved is not QML's): an open swipe follows
     signal emojiClicked(var chatId, var id, var sticker)    // the other one in a private chat tapped an emoji alone: its effect
 
     // ---- talking to TDLib ----------------------------------------------------
@@ -190,6 +199,8 @@ QtObject {
         updateChatPosition: (u) => store.position(u.chat_id, u.position),
         updateChatReadInbox: (u) => store.change(u.chat_id, { unread_count: u.unread_count,
                                                                last_read_inbox_message_id: u.last_read_inbox_message_id }),
+        updateChatIsMarkedAsUnread: (u) => store.change(u.chat_id, { is_marked_as_unread: u.is_marked_as_unread }),
+        updateArchiveChatListSettings: (u) => { store.archiveSettings = u.settings },
         updateChatReadOutbox: (u) => {
             store.change(u.chat_id, { last_read_outbox_message_id: u.last_read_outbox_message_id })
             store.readOutbox(u.chat_id, u.last_read_outbox_message_id)
@@ -211,12 +222,27 @@ QtObject {
             for (const p of u.positions)
                 store.position(u.chat_id, p)
         },
-        updateNewMessage: (u) => { store.message(u.message); store.autoSave(u.message) },
-        updateMessageSendSucceeded: (u) => store.messageChanged(u.message.chat_id, u.old_message_id, u.message),
+        updateNewMessage: (u) => {
+            if (u.message && u.message.scheduling_state)
+                return store.onScheduledNew(u.message)
+            store.message(u.message); store.autoSave(u.message)
+        },
+        updateMessageSendSucceeded: (u) => {
+            if (u.message && u.message.scheduling_state)
+                return store.scheduledChanged(u.message.chat_id, u.old_message_id, u.message)
+            store.scheduledSent(u.message.chat_id, u.old_message_id)
+            store.messageChanged(u.message.chat_id, u.old_message_id, u.message)
+        },
         updateMessageContent: (u) => store.messageContent(u.chat_id, u.message_id, u.new_content),
         updateMessageEdited: (u) => store.messageEdited(u.chat_id, u.message_id, u.edit_date),
         updateMessageContentOpened: (u) => store.contentOpened(u.chat_id, u.message_id),
-        updateDeleteMessages: (u) => { if (u.is_permanent) store.messagesDeleted(u.chat_id, u.message_ids) },
+        updateDeleteMessages: (u) => {
+            if (u.is_permanent) {
+                store.messagesDeleted(u.chat_id, u.message_ids)
+                store.scheduledDeleted(u.chat_id, u.message_ids)
+            }
+        },
+        updateChatHasScheduledMessages: (u) => store.change(u.chat_id, { has_scheduled_messages: !!u.has_scheduled_messages }),
         updateFile: (u) => store.file(u.file),
         updateChatActiveStories: (u) => {
             const a = u.active_stories
@@ -246,7 +272,11 @@ QtObject {
         updateUnreadChatCount: (u) => {
             if (u.chat_list["@type"] === "chatListMain")
                 store.unreadChats = u.unread_unmuted_count
-            else if (u.chat_list["@type"] === "chatListFolder") {
+            else if (u.chat_list["@type"] === "chatListArchive") {
+                store.archiveUnreadKnown = true
+                store.unreadArchive = u.unread_count
+                store.unreadArchiveUnmuted = u.unread_unmuted_count
+            } else if (u.chat_list["@type"] === "chatListFolder") {
                 const f = Object.assign({}, store.folderUnread)
                 f[u.chat_list.chat_folder_id] = u.unread_unmuted_count
                 store.folderUnread = f
@@ -321,6 +351,11 @@ QtObject {
             send({ "@type": "setOption", name: "notification_group_size_max",
                    value: { "@type": "optionValueInteger", value: 3 } })
             send({ "@type": "loadChats", chat_list: { "@type": "chatListMain" }, limit: 200 })
+            send({ "@type": "loadChats", chat_list: { "@type": "chatListArchive" }, limit: 50 })
+            send({ "@type": "getArchiveChatListSettings" }, (r) => {
+                if (r["@type"] === "archiveChatListSettings")
+                    store.archiveSettings = r
+            })
             store.loadStories(0)
             for (const dark of [false, true])       // (no default of its own told: Telegram's)
                 if (store.backgrounds[dark ? "night" : "day"] === undefined)
@@ -419,7 +454,7 @@ QtObject {
         if (p.order !== "0")
             c.positions.push(p)
         const at = listId(p.list)
-        if (at !== null && (at === 0 || folderLists[at]))
+        if (at !== null && (at === 0 || at === -1 || folderLists[at]))
             placeIn(at, c)
     }
 
@@ -427,12 +462,16 @@ QtObject {
         return a["@type"] === b["@type"] && (a["@type"] !== "chatListFolder" || a.chat_folder_id === b.chat_folder_id)
     }
 
-    // a TDLib chat list by our id (0 the main one, else a folder's), and back (null: the archive)
+    // a TDLib chat list by our id (0 the main one, -1 the archive, >0 a folder's), and back
     function chatListOf(id) {
-        return id ? { "@type": "chatListFolder", chat_folder_id: id } : { "@type": "chatListMain" }
+        return id === -1 ? { "@type": "chatListArchive" }
+             : id ? { "@type": "chatListFolder", chat_folder_id: id }
+                  : { "@type": "chatListMain" }
     }
     function listId(list) {
-        return list["@type"] === "chatListMain" ? 0 : list["@type"] === "chatListFolder" ? list.chat_folder_id : null
+        return list["@type"] === "chatListMain" ? 0
+             : list["@type"] === "chatListArchive" ? -1
+             : list["@type"] === "chatListFolder" ? list.chat_folder_id : null
     }
     function shown() {
         return chatListOf(folder)
@@ -448,10 +487,12 @@ QtObject {
         return positionIn(0, c)
     }
 
-    // the rows of a list: the main one always there, a folder's made the first time it is asked for
+    // the rows of a list: the main and archive lists always there, a folder's made the first time it is asked for
     // (its chats now, sorted by their order there; TDLib then loads more) and kept up from then on, so
     // that going back to it shows it at once with its pictures
     function modelOf(id) {
+        if (id === -1)
+            return archiveList
         if (!id)
             return chatList
         let m = folderLists[id]
@@ -491,6 +532,7 @@ QtObject {
     // put a chat where its order says in every list kept (or out of one where it has none)
     function place(c) {
         placeIn(0, c)
+        placeIn(-1, c)
         for (const k in folderLists)
             placeIn(Number(k), c)
     }
@@ -517,7 +559,7 @@ QtObject {
         _dirty = {}
         for (const k in dirty) {
             const id = Number(k)
-            if (id && !folderLists[id])
+            if (id > 0 && !folderLists[id])
                 continue
             const m = modelOf(id)
             const ids = Object.keys(dirty[k])
@@ -533,11 +575,15 @@ QtObject {
                 m.append(rows.map((r) => row(r.c, id)))
                 if (fps && !id)
                     td.mark("listed", 1)    // (tools/startup.py: when the chats came)
+                if (id === -1)
+                    archiveSeen++
                 continue
             }
             for (const cid of ids)
                 if (chats[cid])
                     placeOne(id, m, chats[cid])
+            if (id === -1)
+                archiveSeen++
         }
     }
     function placeOne(id, m, c) {
@@ -565,12 +611,19 @@ QtObject {
         if (to !== at)
             m.move(at, to, 1)
         setRow(m, to, row(c, id))
+        if (to !== at)
+            rowMoved(id)
     }
 
     function refresh(c) {
         let at = rowIndex(chatList, c.id)
         if (at >= 0)
             setRow(chatList, at, row(c, 0))
+        at = rowIndex(archiveList, c.id)
+        if (at >= 0) {
+            setRow(archiveList, at, row(c, -1))
+            archiveSeen++
+        }
         for (const k in folderLists) {
             at = rowIndex(folderLists[k], c.id)
             if (at >= 0)
@@ -673,7 +726,8 @@ QtObject {
             chatId: c.id, title: title(c), saved: isSaved(c), direct: isDirect(c), who: who, draft: drafted, preview: text.replace(/\s+/g, " "),
             // a song: Telegram-iOS's round ▶ before its name (a draft has its own text)
             glyph: !drafted && said === null && m && m.content["@type"] === "messageAudio" ? "playround" : "",
-            time: m ? stamp(m.date) : "", unread: c.unread_count || 0, muted: muted, pinned: !!(at && at.is_pinned),
+            time: m ? stamp(m.date) : "", unread: c.unread_count || 0, markedUnread: !!c.is_marked_as_unread,
+            muted: muted, pinned: !!(at && at.is_pinned),
             photo: photoPath(c), letters: letters(c.title), tint: tints[Math.abs(c.id) % tints.length],
             outgoing: !!(m && m.is_outgoing), read: !!(m && m.is_outgoing && m.id <= (c.last_read_outbox_message_id || 0))
         }
@@ -1781,20 +1835,22 @@ QtObject {
             return { "@type": "messageTopicDirectMessages", direct_messages_chat_topic_id: directTopic }
         return thread ? { "@type": "messageTopicThread", message_thread_id: thread } : null
     }
-    function sendOpts(silent, paidStars) {
-        if (!silent && !(paidStars > 0))
+    function sendOpts(silent, paidStars, schedule) {
+        if (!silent && !(paidStars > 0) && !schedule)
             return null
         const o = { "@type": "messageSendOptions", disable_notification: !!silent }
         if (paidStars > 0)
             o.paid_message_star_count = paidStars
+        if (schedule)
+            o.scheduling_state = schedule
         return o
     }
 
     // silent: the subscribers get it without a sound (a channel's 🔔 off)
     // marks: the formatting given in the field (textEntity's), [] for none
-    function sendText(chatId, text, replyTo, thread, silent, marks, directTopic, paidStars) {
+    function sendText(chatId, text, replyTo, thread, silent, marks, directTopic, paidStars, schedule) {
         const req = { "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
-                      options: sendOpts(silent, paidStars),
+                      options: sendOpts(silent, paidStars, schedule),
                       input_message_content: { "@type": "inputMessageText",
                                                text: { "@type": "formattedText", text: text, entities: marks || [] } } }
         if (replyTo)
@@ -1805,8 +1861,8 @@ QtObject {
     // files from the phone (td.recent's): pictures and videos together as an album when there are
     // several (unless `apart`), the rest one by one; the field's words ({ text, marks }) go under the
     // first. asFiles: all as documents; a picture or video with `spoiler` goes hidden under one
-    function sendFiles(chatId, files, caption, replyTo, asFiles, thread, silent, apart, directTopic, paidStars) {
-        const options = sendOpts(silent, paidStars)
+    function sendFiles(chatId, files, caption, replyTo, asFiles, thread, silent, apart, directTopic, paidStars, schedule) {
+        const options = sendOpts(silent, paidStars, schedule)
         const text = { "@type": "formattedText", text: caption ? caption.text : "", entities: caption ? caption.marks : [] }
         // (TDLib 1.8.68: the file and its sizes go in an inputPhoto, inputVideo... of their own)
         const contents = files.map((f, k) => {
@@ -1851,9 +1907,9 @@ QtObject {
                    input_message_content: c }, check)
     }
 
-    function sendVoice(chatId, path, duration, waveform, replyTo, thread, silent, directTopic, paidStars) {
+    function sendVoice(chatId, path, duration, waveform, replyTo, thread, silent, directTopic, paidStars, schedule) {
         send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
-               options: sendOpts(silent, paidStars),
+               options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageVoiceNote",
                                         voice_note: { "@type": "inputVoiceNote", voice_note: { "@type": "inputFileLocal", path: path },
@@ -1861,26 +1917,26 @@ QtObject {
     }
 
     // a round video (384×384 square MP4, as Telegram's apps send them)
-    function sendRound(chatId, path, duration, replyTo, thread, silent, directTopic, paidStars) {
+    function sendRound(chatId, path, duration, replyTo, thread, silent, directTopic, paidStars, schedule) {
         send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
-               options: sendOpts(silent, paidStars),
+               options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageVideoNote", self_destruct_type: null,
                                         video_note: { "@type": "inputVideoNote", video_note: { "@type": "inputFileLocal", path: path },
                                                       thumbnail: null, duration: duration, length: 384 } } }, check)
     }
     // a sticker or a GIF from the panel (TDLib has them already: sent by their file's id, nothing uploaded)
-    function sendSticker(chatId, st, replyTo, thread, silent, directTopic, paidStars) {
+    function sendSticker(chatId, st, replyTo, thread, silent, directTopic, paidStars, schedule) {
         send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
-               options: sendOpts(silent, paidStars),
+               options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageSticker", emoji: st.emoji || "",
                                         sticker: { "@type": "inputSticker", sticker: { "@type": "inputFileId", id: st.sticker.id },
                                                    width: st.width, height: st.height } } }, check)
     }
-    function sendGif(chatId, a, replyTo, thread, silent, directTopic, paidStars) {
+    function sendGif(chatId, a, replyTo, thread, silent, directTopic, paidStars, schedule) {
         send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
-               options: sendOpts(silent, paidStars),
+               options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageAnimation",
                                         animation: { "@type": "inputAnimation", animation: { "@type": "inputFileId", id: a.animation.id },
@@ -2347,6 +2403,511 @@ QtObject {
     function storyReport(chatId, id, optionId, text, done) {
         send({ "@type": "reportStory", story_poster_chat_id: chatId, story_id: id,
                option_id: optionId || "", text: text || "" }, done)
+    }
+
+    // ---- archive and chat list row actions -----------------------------------
+    function loadArchive(limit, done) {
+        send({ "@type": "loadChats", chat_list: { "@type": "chatListArchive" }, limit: limit || 50 }, done || check)
+    }
+    function archiveUnreadCount() {
+        if (archiveUnreadKnown)
+            return unreadArchive
+        let n = 0
+        for (let i = 0; i < archiveList.count; i++) {
+            const r = archiveList.get(i)
+            if (r.unread > 0 || r.markedUnread)
+                n++
+        }
+        return n
+    }
+    function archiveChat(chatId, archived, done) {
+        send({ "@type": "addChatToList", chat_id: chatId,
+               chat_list: { "@type": archived ? "chatListArchive" : "chatListMain" } }, done || check)
+    }
+    function togglePinChat(chatId, listId, pinned, done) {
+        send({ "@type": "toggleChatIsPinned", chat_list: chatListOf(listId || 0),
+               chat_id: chatId, is_pinned: !!pinned }, done || check)
+    }
+    function toggleMuteChat(chatId, muted, done) {
+        const c = chats[chatId]
+        if (!c)
+            return
+        const n = Object.assign({}, c.notification_settings || {})
+        n["@type"] = "chatNotificationSettings"
+        n.use_default_mute_for = false
+        n.mute_for = muted ? 2147483647 : 0
+        send({ "@type": "setChatNotificationSettings", chat_id: chatId, notification_settings: n }, done || check)
+    }
+    function toggleUnreadChat(chatId, unread, done) {
+        const c = chats[chatId]
+        if (!c)
+            return
+        if (unread) {
+            send({ "@type": "toggleChatIsMarkedAsUnread", chat_id: chatId, is_marked_as_unread: true }, done || check)
+            return
+        }
+        if (c.unread_count > 0 && c.last_message) {
+            send({ "@type": "viewMessages", chat_id: chatId, message_ids: [c.last_message.id],
+                   source: { "@type": "messageSourceChatList" }, force_read: true }, (r) => {
+                if (c.is_marked_as_unread)
+                    send({ "@type": "toggleChatIsMarkedAsUnread", chat_id: chatId, is_marked_as_unread: false }, done || check)
+                else if (done)
+                    done(r)
+            })
+        } else {
+            send({ "@type": "toggleChatIsMarkedAsUnread", chat_id: chatId, is_marked_as_unread: false }, done || check)
+        }
+    }
+    function chatListsToAdd(chatId, done) {
+        send({ "@type": "getChatListsToAddChat", chat_id: chatId }, done)
+    }
+    function addChatToFolder(chatId, folderId, done) {
+        send({ "@type": "addChatToList", chat_id: chatId,
+               chat_list: { "@type": "chatListFolder", chat_folder_id: folderId } }, done || check)
+    }
+    function clearChatHistory(chatId, revoke, remove, done) {
+        send({ "@type": "deleteChatHistory", chat_id: chatId,
+               remove_from_chat_list: !!remove, revoke: !!revoke }, done || check)
+    }
+    function leaveChat(chatId, done) {
+        send({ "@type": "leaveChat", chat_id: chatId }, done || check)
+    }
+    function deleteChat(chatId, done) {
+        send({ "@type": "deleteChat", chat_id: chatId }, done || check)
+    }
+    function setArchiveSettings(settings, done) {
+        const s = Object.assign({ "@type": "archiveChatListSettings" }, archiveSettings, settings)
+        send({ "@type": "setArchiveChatListSettings", settings: s }, (r) => {
+            if (r["@type"] !== "error")
+                store.archiveSettings = s
+            if (done)
+                done(r)
+        })
+    }
+
+    // ---- Yangi suhbat va kontaktlar (0.9.5) ----------------------------------------
+    // last-seen sort rank (higher = more recently active; online first)
+    function userLastSeenRank(u, now) {
+        if (!u || !u.status)
+            return 0
+        const s = u.status["@type"]
+        if (s === "userStatusOnline")
+            return u.status.expires > now ? now + 1000000 : (u.status.expires || 0)
+        if (s === "userStatusOffline")
+            return u.status.was_online || 0
+        if (s === "userStatusRecently")
+            return now - 86400 * 2
+        if (s === "userStatusLastWeek")
+            return now - 86400 * 7
+        if (s === "userStatusLastMonth")
+            return now - 86400 * 30
+        return 0
+    }
+
+    // search contacts on TDLib (query "" returns contacts ordered by relevance): done([user])
+    function searchContacts(q, limit, done) {
+        send({ "@type": "searchContacts", query: q || "", limit: limit || 50 }, (r) => {
+            const ids = r.user_ids || []
+            let left = 0
+            const finish = () => done(ids.map((id) => users[id]).filter((u) => u))
+            for (const id of ids) {
+                if (!users[id]) {
+                    left++
+                    send({ "@type": "getUser", user_id: id }, (u) => {
+                        if (u["@type"] === "user")
+                            users[u.id] = u
+                        if (--left === 0)
+                            finish()
+                    })
+                }
+            }
+            if (left === 0)
+                finish()
+        })
+    }
+
+    // global public chats by username or title: done([chatId])
+    function searchPublic(q, done) {
+        const clean = (q || "").trim().replace(/^@/, "")
+        if (clean.length < 4) {
+            done([])
+            return
+        }
+        send({ "@type": "searchPublicChats", query: clean }, (r) => {
+            const ids = r.chat_ids || []
+            let left = 0
+            const finish = () => done(ids.filter((id) => !!chats[id]))
+            for (const id of ids) {
+                if (!chats[id]) {
+                    left++
+                    send({ "@type": "getChat", chat_id: id }, (c) => {
+                        if (c["@type"] === "chat") {
+                            c.positions = c.positions || []
+                            chats[c.id] = c
+                        }
+                        if (--left === 0)
+                            finish()
+                    })
+                }
+            }
+            if (left === 0)
+                finish()
+        })
+    }
+
+    // create a new basic group (and set its photo if given): done(chatId, errorText, how many could not be added)
+    function createGroup(title, userIds, photoPath, done) {
+        send({ "@type": "createNewBasicGroupChat", user_ids: userIds || [], title: title, message_auto_delete_time: 0 }, (r) => {
+            if (r["@type"] === "error") {
+                console.warn("nullgram: createNewBasicGroupChat", r.code, r.message)
+                done(0, r.message || Tr.t("Bo'lmadi"))
+                return
+            }
+            const cid = r["@type"] === "createdBasicGroupChat" ? r.chat_id : r["@type"] === "chat" ? r.id : 0
+            if (!cid) {
+                done(0, Tr.t("Bo'lmadi"))
+                return
+            }
+            if (r["@type"] === "chat" && !chats[cid]) {
+                r.positions = r.positions || []
+                chats[cid] = r
+            }
+            // those whose privacy settings kept them out (createdBasicGroupChat.failed_to_add_members)
+            const failed = r.failed_to_add_members && r.failed_to_add_members.failed_to_add_members
+                ? r.failed_to_add_members.failed_to_add_members.length : 0
+            const afterChat = () => {
+                if (!photoPath) {
+                    done(cid, "", failed)
+                    return
+                }
+                send({ "@type": "setChatPhoto", chat_id: cid,
+                       photo: { "@type": "inputChatPhotoStatic", photo: { "@type": "inputFileLocal", path: photoPath } } }, (pr) => {
+                    if (pr["@type"] === "error")
+                        console.warn("nullgram: setChatPhoto", pr.code, pr.message)
+                    done(cid, "", failed)
+                })
+            }
+            if (chats[cid])
+                afterChat()
+            else
+                send({ "@type": "getChat", chat_id: cid }, (c) => {
+                    if (c["@type"] === "chat") {
+                        c.positions = c.positions || []
+                        chats[c.id] = c
+                    }
+                    afterChat()
+                })
+        })
+    }
+
+    // create a new channel (supergroup with is_channel: true, plus photo if given): done(chatId, errorText)
+    function createChannel(title, description, photoPath, done) {
+        send({ "@type": "createNewSupergroupChat", title: title, is_forum: false, is_channel: true,
+               description: description || "", location: null, message_auto_delete_time: 0, for_import: false }, (r) => {
+            if (r["@type"] !== "chat") {
+                console.warn("nullgram: createNewSupergroupChat", r.code, r.message)
+                done(0, r.message || Tr.t("Bo'lmadi"))
+                return
+            }
+            r.positions = r.positions || []
+            chats[r.id] = r
+            if (!photoPath) {
+                done(r.id, "")
+                return
+            }
+            send({ "@type": "setChatPhoto", chat_id: r.id,
+                   photo: { "@type": "inputChatPhotoStatic", photo: { "@type": "inputFileLocal", path: photoPath } } }, (pr) => {
+                if (pr["@type"] === "error")
+                    console.warn("nullgram: setChatPhoto", pr.code, pr.message)
+                done(r.id, "")
+            })
+        })
+    }
+
+    // import a contact by phone number: done(userId, errorText); userId === 0 with empty error = not on Telegram
+    function importContact(phone, firstName, lastName, done) {
+        send({ "@type": "importContacts",
+               contacts: [{ "@type": "importedContact", phone_number: phone, first_name: firstName,
+                            last_name: lastName || "", note: null }] }, (r) => {
+            if (r["@type"] === "error") {
+                console.warn("nullgram: importContacts", r.code, r.message)
+                done(0, r.message || Tr.t("Bo'lmadi"))
+                return
+            }
+            const uid = r.user_ids && r.user_ids.length ? r.user_ids[0] : 0
+            if (!uid) {
+                done(0, "")
+                return
+            }
+            send({ "@type": "getUser", user_id: uid }, (u) => {
+                if (u["@type"] === "user") {
+                    users[u.id] = u
+                    seenSoon()
+                }
+                done(uid, "")
+            })
+        })
+    }
+
+    // --- hikoya joylash (agy/hikoya-joylash) ---
+    property real storyPosting: 0           // 0..1 upload/posting progress (0 when idle; Claude's «Hikoyam» ring)
+    property bool storyPostingActive: false // true while postStory is in flight
+    property int _storyPostId: 0            // temporary story id returned by postStory
+    property int _storyPostFileId: 0        // uploading file id for progress tracking
+    property var _storyPostDone: null       // callback(ok, err, story)
+    signal storyPosted(bool ok, string err)
+
+    property Timer _storyPostReset: Timer {
+        interval: 350
+        onTriggered: {
+            if (!store.storyPostingActive)
+                store.storyPosting = 0
+        }
+    }
+
+    property Connections _storyPostFile: Connections {
+        target: store
+        enabled: store.storyPostingActive && store._storyPostFileId > 0
+        function onFileUpdated(f) {
+            if (!f || f.id !== store._storyPostFileId)
+                return
+            const p = store.progress(f)
+            if (p >= 0)
+                store.storyPosting = Math.max(0.15, Math.min(0.95, p))
+        }
+    }
+
+    property Connections _storyPostTd: Connections {
+        target: td
+        enabled: store.storyPostingActive
+        function onReceived(text) {
+            if (text.indexOf("updateStoryPost") < 0 && text.indexOf("updateStorySend") < 0
+                    && text.indexOf("updateStoryDeleted") < 0)
+                return
+            const u = JSON.parse(text)
+            const t = u["@type"]
+            if (t === "updateStoryPostSucceeded" || t === "updateStorySendSucceeded") {
+                const s = u.story
+                if (s && s.poster_chat_id && s.id) {
+                    if (u.old_story_id)
+                        delete store._storyCache[s.poster_chat_id + ":" + u.old_story_id]
+                    store._storyCache[s.poster_chat_id + ":" + s.id] = s
+                    store.storyChanged(s.poster_chat_id, s.id)
+                }
+                if (!store._storyPostId || !u.old_story_id || u.old_story_id === store._storyPostId)
+                    store._finishStoryPost(true, "", s || null)
+            } else if (t === "updateStoryPostFailed" || t === "updateStorySendFailed") {
+                if (!store._storyPostId || !u.story || u.story.id === store._storyPostId) {
+                    const msg = (u.error && u.error.message) || Tr.t("Hikoya joylanmadi")
+                    store._finishStoryPost(false, msg, null)
+                }
+            } else if (t === "updateStoryDeleted" && store._storyPostId && u.story_id === store._storyPostId) {
+                store._finishStoryPost(false, Tr.t("Hikoya joylash bekor qilindi"), null)
+            }
+        }
+    }
+
+    function _storyRetryText(sec) {
+        if (!sec || sec <= 0)
+            return ""
+        if (sec >= 86400)
+            return Tr.n("%1 kun", Math.ceil(sec / 86400))
+        if (sec >= 3600)
+            return Tr.n("%1 soat", Math.ceil(sec / 3600))
+        return Tr.n("%1 daqiqa", Math.max(1, Math.ceil(sec / 60)))
+    }
+
+    function _finishStoryPost(ok, err, s) {
+        const cb = _storyPostDone
+        _storyPostDone = null
+        _storyPostId = 0
+        _storyPostFileId = 0
+        storyPostingActive = false
+        storyPosting = ok ? 1 : 0
+        if (ok)
+            _storyPostReset.restart()
+        storyPosted(ok, err || "")
+        if (cb)
+            cb(ok, err || "", s || null)
+    }
+
+    // check whether our account can post a story right now: done({ ok, type, text, retryAfter, count, premiumNeeded })
+    function canPostStory(done) {
+        const cid = store.me ? store.me.id : 0
+        if (!cid) {
+            if (done)
+                done({ ok: false, type: "error", text: Tr.t("Hisob hali tayyor emas"), retryAfter: 0, count: 0, premiumNeeded: false })
+            return
+        }
+        send({ "@type": "canPostStory", chat_id: cid }, (r) => {
+            const t = r["@type"] || "error"
+            let res = { ok: false, type: t, text: "", retryAfter: r.retry_after || 0, count: r.story_count || 0, premiumNeeded: false }
+            if (t === "canPostStoryResultOk") {
+                res.ok = true
+            } else if (t === "canPostStoryResultPremiumNeeded") {
+                res.premiumNeeded = true
+                res.text = Tr.t("Hikoya joylash uchun Telegram Premium kerak")
+            } else if (t === "canPostStoryResultWeeklyLimitExceeded") {
+                const w = store._storyRetryText(r.retry_after)
+                res.text = w ? Tr.f("Haftalik hikoya limiti tugadi. %1dan keyin urinib ko'ring", w)
+                             : Tr.t("Haftalik hikoya limiti tugadi")
+            } else if (t === "canPostStoryResultMonthlyLimitExceeded") {
+                const w = store._storyRetryText(r.retry_after)
+                res.text = w ? Tr.f("Oylik hikoya limiti tugadi. %1dan keyin urinib ko'ring", w)
+                             : Tr.t("Oylik hikoya limiti tugadi")
+            } else if (t === "canPostStoryResultActiveStoryLimitExceeded") {
+                res.text = Tr.t("Faol hikoyalar soni limitga yetdi")
+            } else if (t === "canPostStoryResultBoostNeeded") {
+                res.text = Tr.t("Hikoya joylash uchun kanalga boost kerak")
+            } else if (t === "canPostStoryResultLiveStoryIsActive") {
+                res.text = Tr.t("Jonli hikoya faol paytda yangi hikoya joylab bo'lmaydi")
+            } else {
+                res.text = r.message || Tr.t("Hikoya joylab bo'lmaydi")
+            }
+            if (done)
+                done(res)
+        })
+    }
+
+    // post a photo or video story (TDLib 1.8.68: postStory + updateStoryPostSucceeded / updateStoryPostFailed)
+    function postStory(file, isVideo, caption, privacy, period, done, opts) {
+        const cid = store.me ? store.me.id : 0
+        if (!cid || !file) {
+            if (done)
+                done(false, Tr.t("Fayl tanlanmagan"), null)
+            return
+        }
+        if (storyPostingActive) {
+            if (done)
+                done(false, Tr.t("Hikoya yuklanmoqda…"), null)
+            return
+        }
+        const o = opts || {}
+        const local = { "@type": "inputFileLocal", path: file }
+        let content
+        if (isVideo) {
+            const p = o.duration > 0 ? { duration: o.duration } : td.probe(file)
+            const dur = p && p.duration > 0 ? p.duration : 1
+            content = { "@type": "inputStoryContentVideo", video: local, added_sticker_file_ids: [],
+                        duration: dur, cover_frame_timestamp: 0, is_animation: false }
+        } else {
+            content = { "@type": "inputStoryContentPhoto", photo: local, added_sticker_file_ids: [] }
+        }
+        let priv
+        if (privacy && privacy["@type"]) {
+            priv = privacy
+        } else {
+            const kind = privacy && privacy.kind ? privacy.kind : "everyone"
+            if (kind === "contacts")
+                priv = { "@type": "storyPrivacySettingsContacts", except_user_ids: [] }
+            else if (kind === "closeFriends")
+                priv = { "@type": "storyPrivacySettingsCloseFriends" }
+            else if (kind === "selected")
+                priv = { "@type": "storyPrivacySettingsSelectedUsers", user_ids: (privacy && privacy.userIds) || [] }
+            else
+                priv = { "@type": "storyPrivacySettingsEveryone", except_user_ids: [] }
+        }
+        const prem = !!(store.me && store.me.is_premium)
+        const activePeriod = prem && period > 0 ? period : 86400
+        const capText = (caption || "").trim()
+        const cap = capText ? { "@type": "formattedText", text: capText, entities: [] } : null
+        const saveToProfile = o.saveToProfile !== undefined ? !!o.saveToProfile : true
+        const protectContent = !!o.protectContent
+
+        _storyPostReset.stop()
+        storyPostingActive = true
+        storyPosting = 0.08
+        _storyPostId = 0
+        _storyPostFileId = 0
+        _storyPostDone = done || null
+
+        send({ "@type": "postStory", chat_id: cid, content: content, areas: null, caption: cap,
+               privacy_settings: priv, album_ids: [], active_period: activePeriod,
+               from_story_full_id: null, is_posted_to_chat_page: saveToProfile,
+               protect_content: protectContent }, (r) => {
+            if (r["@type"] === "error") {
+                console.warn("nullgram: postStory", r.code, r.message)
+                store._finishStoryPost(false, r.message || Tr.t("Hikoya joylanmadi"), null)
+                return
+            }
+            if (r["@type"] === "story") {
+                store._storyPostId = r.id || 0
+                if (r.poster_chat_id && r.id)
+                    store._storyCache[r.poster_chat_id + ":" + r.id] = r
+                const c = r.content
+                const f = c && c["@type"] === "storyContentVideo"
+                    ? (c.video && c.video.video)
+                    : (c && c.photo && c.photo.sizes && c.photo.sizes.length
+                       ? c.photo.sizes[c.photo.sizes.length - 1].photo : null)
+                if (f && f.id)
+                    store._storyPostFileId = f.id
+                if (!r.is_being_posted)
+                    store._finishStoryPost(true, "", r)
+                else if (store.storyPosting < 0.15)
+                    store.storyPosting = 0.15
+            }
+        })
+    }
+
+    // --- rejali yuborish (agy/rejali-yuborish) ---
+    signal scheduledMessage(var msg)
+    signal scheduledChanged(var chatId, var oldId, var msg)
+    signal scheduledDeleted(var chatId, var ids)
+    signal scheduledSent(var chatId, var oldId)
+
+    function onScheduledNew(m) {
+        if (chats[m.chat_id])
+            change(m.chat_id, { has_scheduled_messages: true })
+        scheduledMessage(m)
+    }
+
+    // "Send When Online" is allowed only in private chats with a regular user whose last-seen status is known
+    function canScheduleOnline(c) {
+        if (!c || c.type["@type"] !== "chatTypePrivate" || isSaved(c))
+            return false
+        const u = users[c.type.user_id]
+        if (!u || !u.type || u.type["@type"] !== "userTypeRegular" || !u.status)
+            return false
+        const st = u.status["@type"]
+        return st === "userStatusOnline" || st === "userStatusOffline"
+    }
+
+    function scheduleAt(unix) {
+        return { "@type": "messageSchedulingStateSendAtDate", send_date: Math.floor(unix) }
+    }
+
+    function scheduleOnline() {
+        return { "@type": "messageSchedulingStateSendWhenOnline" }
+    }
+
+    function scheduledMessages(chatId, done) {
+        send({ "@type": "getChatScheduledMessages", chat_id: chatId }, (r) => {
+            if (r["@type"] === "error") {
+                console.warn("nullgram: getChatScheduledMessages", r.code, r.message)
+                if (done)
+                    done([], true)
+                return
+            }
+            const list = r.messages || []
+            if (chats[chatId])
+                change(chatId, { has_scheduled_messages: list.length > 0 })
+            if (done)
+                done(list, false)
+        })
+    }
+
+    function sendScheduledNow(chatId, messageId, done) {
+        send({ "@type": "editMessageSchedulingState", chat_id: chatId, message_id: messageId,
+               scheduling_state: null }, done || check)
+    }
+
+    function rescheduleMessage(chatId, messageId, schedulingState, done) {
+        send({ "@type": "editMessageSchedulingState", chat_id: chatId, message_id: messageId,
+               scheduling_state: schedulingState }, done || check)
+    }
+
+    function deleteScheduledMessages(chatId, ids, done) {
+        send({ "@type": "deleteMessages", chat_id: chatId, message_ids: ids, revoke: true }, done || check)
     }
 
 }

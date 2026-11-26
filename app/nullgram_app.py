@@ -45,7 +45,10 @@ from PySide6.QtSvg import QSvgRenderer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST = "--test-dc" in sys.argv
-DATA = os.path.expanduser("~/.local/share/ztos/data/uz.omonullos.nullgram" + (".test" if TEST else ""))
+# NULLGRAM_DATA: another account in a folder of its own (a test copy signed in as someone else, the usual one
+# left signed in where it is); else the usual folder (.test for --test-dc)
+DATA = os.path.expanduser(os.environ.get("NULLGRAM_DATA")
+                          or "~/.local/share/ztos/data/uz.omonullos.nullgram" + (".test" if TEST else ""))
 KEYDIR = os.path.expanduser("~/.local/share/ztos/data/uz.omonullos.nullgram")
 # the Telegram API key, the first one found: the user's own (Settings › «O'z API kalitingiz», for when the
 # packaged one is blocked), install.sh --key's (our phone), the one a package carries beside the app
@@ -59,7 +62,7 @@ EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram
 EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
 EMOJI_GET = os.path.join(HERE, "emoji_get.py")
 EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
-VERSION = "0.9.4.1"
+VERSION = "0.9.6"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -2006,6 +2009,9 @@ def main():
 	# what is read here; Python's own handler may not have run yet when Qt calls back)
 	signal.signal(signal.SIGUSR1, lambda n, f: None)
 	signal.signal(signal.SIGTERM, lambda n, f: None)
+	# SIGUSR2: the window as it is drawn now, to $NULLGRAM_SHOT (/tmp/nullgram-shot.png): a test's look when
+	# grim cannot (the shell's CMA full: no buffer for a screencopy) -- Qt reads its own GL frame
+	signal.signal(signal.SIGUSR2, lambda n, f: None)
 
 	def woken():
 		try:
@@ -2014,6 +2020,9 @@ def main():
 			return
 		if signal.SIGTERM in got:
 			app.quit()
+		elif signal.SIGUSR2 in got:
+			path = os.environ.get("NULLGRAM_SHOT", "/tmp/nullgram-shot.png")
+			print("nullgram: shot", path, view.grabWindow().save(path), flush=True)
 		elif signal.SIGUSR1 in got:
 			print("nullgram: shown again", flush=True)
 			safe.shown()

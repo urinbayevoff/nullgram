@@ -412,6 +412,69 @@ Rectangle {
         pop()
     }
 
+    // Yangi suhbat (0.9.5): entry point for ChatListPage's compose button (and ContactsPage)
+    function newChat() {
+        const c = Qt.createComponent("NewChatPage.qml")
+        if (c.status === Component.Error) {
+            console.warn("nullgram:", c.errorString())
+            return null
+        }
+        return push(c, {})
+    }
+
+    // our story posted in the background (StoryCreatePage left at once): how it ended
+    Connections {
+        target: store
+        function onStoryPosted(ok, err) { root.say(ok ? Tr.t("Hikoya joylandi") : (err || Tr.t("Hikoya joylanmadi"))) }
+    }
+
+    // Hikoya joylash: entry point for ChatListPage's ⊕ and «Hikoyam» (checks canPostStory first)
+    property bool _storyChecking: false
+    function storyCreate() {
+        if (_storyChecking || moving)
+            return
+        if (store.storyPostingActive) {
+            say(Tr.t("Hikoya yuklanmoqda…"))
+            return
+        }
+        _storyChecking = true
+        store.canPostStory((res) => {
+            root._storyChecking = false
+            if (!res.ok) {
+                root.say(res.text || Tr.t("Hikoya joylab bo'lmaydi"))
+                return
+            }
+            const c = Qt.createComponent("StoryCreatePage.qml")
+            if (c.status === Component.Error) {
+                console.warn("nullgram:", c.errorString())
+                return
+            }
+            root.push(c, {})
+        })
+    }
+
+    // drop intermediate pages under the top page (like popHome, keeping the newly opened chat on top)
+    property var _trimFor: null
+    function trimToHome() {
+        if (pages.length > 2 && !moving) {
+            const mid = pages.slice(1, -1)
+            pages = [pages[0], pages[pages.length - 1]]
+            mid.forEach((p) => p.destroy())
+        }
+    }
+    function openCreatedChat(chatId) {
+        const p = pushChat(spareMaker, { chatId: chatId })
+        if (p)
+            _trimFor = p
+        return p
+    }
+    onMovingChanged: if (!moving && _trimFor) {
+        const target = _trimFor
+        _trimFor = null
+        if (topPage === target)
+            trimToHome()
+    }
+
     Timer {
         id: wait
         interval: 700

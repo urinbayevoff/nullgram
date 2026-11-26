@@ -53,6 +53,11 @@ Page {
     readonly property var why: reportMenu ? reportMenu.whyField : null
     readonly property var transMenu: transMenuLoader.item
     readonly property var paidAlert: paidAlertLoader.item
+    readonly property var sendMenu: sendMenuLoader.item
+    readonly property var scheduleSheet: scheduleSheetLoader.item
+    property bool hasScheduled: false
+    property var pendingSchedule: null
+    property string pendingAttachMode: ""
     readonly property var devices: voiceRecLoader.item ? voiceRecLoader.item.devices : null
     readonly property var mic: voiceRecLoader.item ? voiceRecLoader.item.mic : null
     readonly property var recorder: voiceRecLoader.item ? voiceRecLoader.item.recorder : null
@@ -66,8 +71,15 @@ Page {
     function showDeleteMenu() { deleteMenuLoader.active = true; deleteMenuLoader.item.show() }
     function askReport(st) { reportMenuLoader.active = true; reportMenuLoader.item.ask(st) }
     function showTransMenu() { transMenuLoader.active = true; transMenuLoader.item.show() }
+    function showSendMenu(origin) { sendMenuLoader.active = true; sendMenuLoader.item.show(origin || "field") }
+    function openScheduleSheet(payload) {
+        pendingSchedule = payload
+        scheduleSheetLoader.active = true
+        scheduleSheetLoader.item.show(0, false, false)
+    }
     property Component infoPageMaker: null
     property Component joinPageMaker: null
+    property Component scheduledPageMaker: null
     function openInfo(id) {
         if (!infoPageMaker)
             infoPageMaker = Qt.createComponent("ChatInfoPage.qml")
@@ -77,6 +89,11 @@ Page {
         if (!joinPageMaker)
             joinPageMaker = Qt.createComponent("JoinRequestsPage.qml")
         page.nav.push(joinPageMaker, { chatId: page.chatId })
+    }
+    function openScheduled() {
+        if (!scheduledPageMaker)
+            scheduledPageMaker = Qt.createComponent("ScheduledPage.qml")
+        page.nav.push(scheduledPageMaker, { chatId: page.chatId })
     }
     // a channel we may write in (its owner, or an admin who posts); the others have its bar instead of the field
     readonly property bool canPost: {
@@ -539,6 +556,9 @@ Page {
                 })
         }
         readTo = chat ? chat.last_read_inbox_message_id : 0
+        hasScheduled = !!(chat && chat.has_scheduled_messages)
+        pendingAttachMode = ""
+        pendingSchedule = null
         loadDraft()
         openLog("draft")
         const spot = thread || directTopic ? null : store.spots[chatId]
@@ -2224,6 +2244,85 @@ Page {
         menu.change(rows)
     }
     property bool holding: false        // a long-pressed bubble's finger still down: the list stays where it is
+    // Swipe-to-reply (Telegram-iOS): dragging a message row left reveals ↩ on the right; releasing
+    // past swipeThreshold (~60 pt) opens the reply bar via page.reply(), and the row glides back.
+    // Single page-level PointHandler (0 extra objects in row delegates).
+    readonly property bool canSwipeReply: !channel && canPost && !selecting && !picking && !searching
+        && !holding && !(menu && menu.open) && !(viewer && viewer.open)
+    readonly property real swipeThreshold: 50
+    property bool swiping: false        // horizontal swipe-to-reply active: cancels list MouseAreas & scrolling
+    property Item swipeRow: null        // delegate shell currently swiped (or returning)
+    property Item swipeMover: null      // its mover Item (face + bubble)
+    property real swipeShift: 0         // <= 0, horizontal offset of swipeMover
+    property bool swipeArmed: false     // crossed swipeThreshold
+    property real swipeY: 0             // bubble center y in list content coordinates
+    onSwipeShiftChanged: if (swipeMover) swipeMover.x = swipeShift
+    onCanSwipeReplyChanged: if (!canSwipeReply && (swiping || (swipeRow && !swipeBackAnim.running))) { swiping = false; cancelSwipe() }
+    function swipeStart(sh) {
+        if (!sh || !sh.view || !sh.view.moverItem || sh.said !== "" || sh.sending)
+            return false
+        if (swipeBackAnim.running)
+            swipeBackAnim.stop()
+        if (swipeMover && swipeMover !== sh.view.moverItem)
+            swipeMover.x = 0
+        swipeRow = sh
+        swipeMover = sh.view.moverItem
+        swipeShift = 0
+        swipeArmed = false
+        const f = sh.view.face
+        swipeY = sh.y + (f ? f.y + f.height / 2 : sh.height / 2)
+        return true
+    }
+    function swipeMove(dx) {
+        if (!swipeRow || !swipeMover)
+            return
+        const d = Math.max(0, -dx)
+        const shift = d <= swipeThreshold ? -d : -(swipeThreshold + (d - swipeThreshold) * 0.25)
+        swipeShift = Math.max(-92, shift)
+        const was = swipeArmed
+        swipeArmed = d >= swipeThreshold
+        if (swipeArmed && !was && swipeBadgeLoader.item)
+            swipeBadgeLoader.item.pop()
+    }
+    function swipeEnd() {
+        if (!swipeRow)
+            return
+        const sh = swipeRow
+        const fire = swipeArmed && canSwipeReply && sh && sh.said === "" && !sh.sending
+        swipeArmed = false
+        if (fire) {
+            const q = quotes[sh.msgId]
+            reply({
+                id: sh.msgId,
+                name: sh.out ? Tr.t("Siz") : sh.sender || (q ? q.name : "") || (chat ? chat.title : ""),
+                text: sh.text || sh.kind || (q ? q.text : "")
+            })
+        }
+        swipeBackAnim.restart()
+    }
+    function cancelSwipe() {
+        if (!swipeRow)
+            return
+        swipeArmed = false
+        if (swipeShift < -0.5)
+            swipeBackAnim.restart()
+        else {
+            if (swipeMover)
+                swipeMover.x = 0
+            swipeRow = null
+            swipeMover = null
+            swipeShift = 0
+        }
+    }
+    function clearSwipeAnim(m) {
+        if (swipeMover === m) {
+            swipeBackAnim.stop()
+            swipeMover = null
+            swipeRow = null
+            swipeShift = 0
+            swipeArmed = false
+        }
+    }
     property var menuWaits: null        // the menu, while the keyboard goes down
     onKbChanged: if (kb === 0 && menuWaits) menuLate.triggered()
     Timer {
@@ -2517,6 +2616,14 @@ Page {
             paidAlert.open = false
             return true
         }
+        if (scheduleSheet && scheduleSheet.open) {
+            scheduleSheet.close(true)
+            return true
+        }
+        if (sendMenu && sendMenu.visible) {
+            sendMenu.visible = false
+            return true
+        }
         if (paidSheet.open) {
             paidSheet.backOne()
             return true
@@ -2629,7 +2736,20 @@ Page {
                 page.unread = page.chat.unread_count
                 page.muted = page.isMuted()
                 page.blocked = page.isBlocked()
+                page.hasScheduled = !!(page.chat && page.chat.has_scheduled_messages)
             }
+        }
+        function onScheduledMessage(m) {
+            if (m.chat_id === page.chatId)
+                page.hasScheduled = true
+        }
+        function onScheduledDeleted(chatId, ids) {
+            if (chatId === page.chatId)
+                page.hasScheduled = !!(page.chat && page.chat.has_scheduled_messages)
+        }
+        function onScheduledSent(chatId, oldId) {
+            if (chatId === page.chatId)
+                page.hasScheduled = !!(page.chat && page.chat.has_scheduled_messages)
         }
         function onMessageChanged(chatId, oldId, m) {
             if (chatId !== page.chatId)
@@ -2794,7 +2914,8 @@ Page {
 
         ListView {
             id: list
-            interactive: !page.holding
+            enabled: !page.swiping
+            interactive: !page.holding && !page.swiping
             anchors.fill: parent
             transform: Translate { y: -page.kb }
             z: page.lift ? 2 : 0        // over the field while a sent bubble leaves it (the header stays over all)
@@ -2941,6 +3062,76 @@ Page {
                     onLoaded: if (item && item.initRow) item.initRow()
                 }
             }
+        }
+
+        Item {               // page-level swipe-to-reply gesture layer (left 36 pt kept clear for edge-back)
+            id: swipeArea
+            z: 1
+            x: 36
+            y: bar.height + pinBar.height
+            width: Math.max(0, parent.width - 36)
+            height: Math.max(0, parent.height - y - page.kb - page.foot)
+            PointHandler {
+                id: swipeDrag
+                target: null
+                enabled: page.canSwipeReply
+                grabPermissions: PointerHandler.ApprovesTakeOverByAnything
+                property bool engaged: false
+                property bool rejected: false
+                onEnabledChanged: {
+                    if (!enabled && engaged) {
+                        engaged = false
+                        page.swiping = false
+                        page.cancelSwipe()
+                    }
+                }
+                onActiveChanged: {
+                    if (active) {
+                        engaged = false
+                        rejected = false
+                    } else {
+                        if (engaged) {
+                            engaged = false
+                            page.swiping = false
+                            page.swipeEnd()
+                        }
+                        rejected = false
+                    }
+                }
+                onPointChanged: {
+                    if (!active || rejected)
+                        return
+                    const dx = point.position.x - point.pressPosition.x
+                    const dy = point.position.y - point.pressPosition.y
+                    if (!engaged) {
+                        if (list.dragging || Math.abs(dy) > 10 || dx > 10) {
+                            rejected = true
+                            return
+                        }
+                        if (dx < -12 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+                            const pt = swipeArea.mapToItem(list, point.pressPosition.x, point.pressPosition.y)
+                            const sh = list.itemAt(pt.x, list.contentY + pt.y)
+                            if (page.swipeStart(sh)) {
+                                engaged = true
+                                page.swiping = true
+                                page.swipeMove(dx + 12)
+                            } else {
+                                rejected = true
+                            }
+                        }
+                        return
+                    }
+                    page.swipeMove(dx + 12)
+                }
+            }
+        }
+        Loader {             // swipe-to-reply ↩ badge on the right (active only while swiping)
+            id: swipeBadgeLoader
+            z: 1
+            active: page.swipeRow !== null && page.swipeShift < -1
+            anchors.fill: list
+            transform: Translate { y: -page.kb }
+            sourceComponent: swipeBadgeComp
         }
 
         Glass {              // ↓: to the newest (loaded afresh when it was opened at the unread ones)
@@ -3702,9 +3893,30 @@ Page {
                 MouseArea {
                     id: clipHit
                     anchors.fill: parent
+                    property bool clipHeld: false
+                    Timer {
+                        id: clipHold
+                        interval: 380
+                        onTriggered: {
+                            if (page.canAttach && !page.thread && !page.directTopic) {
+                                clipHit.clipHeld = true
+                                page.showSendMenu("attach")
+                            }
+                        }
+                    }
+                    onPressed: {
+                        clipHeld = false
+                        if (page.canAttach && !page.thread && !page.directTopic)
+                            clipHold.restart()
+                    }
+                    onReleased: clipHold.stop()
+                    onCanceled: clipHold.stop()
                     onClicked: {
+                        if (clipHeld)
+                            return
                         if (!page.canAttach)        // (none of what it sends may be sent here)
                             return page.toast(page.allowedText)
+                        page.pendingAttachMode = ""
                         page.keyboardDown()     // (over the sheet it stayed, its «Yuborish» under it)
                         page.openAttach()
                     }
@@ -3751,7 +3963,7 @@ Page {
                 TextEdit {
                     id: field
                     x: 14; y: compose.height + 11
-                    width: parent.width - 28 - (bell.visible ? 30 : 0) - (clock.visible ? 30 : 0) - (smiley.visible ? 30 : 0)
+                    width: parent.width - 28 - (schedBtn.visible ? 30 : 0) - (bell.visible ? 30 : 0) - (clock.visible ? 30 : 0) - (smiley.visible ? 30 : 0)
                     wrapMode: TextEdit.Wrap
                     onActiveFocusChanged: if (activeFocus && page.panelOpen) page.keyboardUp()
                     color: Theme.text
@@ -3874,6 +4086,36 @@ Page {
                         border.color: Theme.glass; border.width: 0.5
                     }
                     MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: page.setSilent(!page.silent) }
+                }
+                Item {           // scheduled messages button: shown when this chat has scheduled messages
+                    id: schedBtn
+                    visible: page.hasScheduled && !page.editing && !page.thread && !page.directTopic
+                    anchors.right: bell.visible ? bell.left : clock.visible ? clock.left : smiley.visible ? smiley.left : parent.right
+                    anchors.rightMargin: bell.visible || clock.visible || smiley.visible ? 8 : 12
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: (44 - height) / 2
+                    width: 22; height: 22
+                    opacity: schedBtnHit.pressed ? 0.5 : 1
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 20; height: 20; radius: 6
+                        color: "transparent"
+                        border.color: Theme.accent; border.width: 1.7
+                        Rectangle {
+                            x: 9; y: 4
+                            width: 1.8; height: 6.5; radius: 0.9
+                            color: Theme.accent
+                        }
+                        Rectangle {
+                            x: 9; y: 9.2
+                            width: 5.5; height: 1.8; radius: 0.9
+                            color: Theme.accent
+                        }
+                    }
+                    MouseArea {
+                        id: schedBtnHit
+                        anchors.fill: parent; anchors.margins: -10
+                        onClicked: page.openScheduled()
+                    }
                 }
             }
             Loader {             // recording: the time, and how to let it go (over the clip and the field)
@@ -4013,17 +4255,35 @@ Page {
                 }
                 Text { visible: !sendButton.mic; anchors.centerIn: parent; text: page.editing ? "✓" : "↑"; color: "white"; font.pixelSize: 20; font.weight: Font.Bold }
                 MouseArea {
+                    id: sendHit
                     anchors.fill: parent; anchors.margins: -6
                     property real startX: 0
                     property real startY: 0
                     property bool held: false       // this press started the recording (a locked one's ↑ is a tap)
+                    property bool sendHeld: false   // long press on send button opened the send-options menu
                     // held a moment first (as iOS): a tap switches mic ↔ camera without starting the recorder (whose
                     // start holds the UI thread long enough that a tap's release came late, counted as a hold)
-                    Timer { id: holdOn; interval: 180; onTriggered: { parent.held = true; page.startVoice() } }
+                    Timer { id: holdOn; interval: 180; onTriggered: { sendHit.held = true; page.startVoice() } }
+                    Timer {
+                        id: sendHold
+                        interval: 380
+                        onTriggered: {
+                            if (!sendButton.mic && !page.editing && !page.recordLocked
+                                && (field.text.trim() !== "" || page.preview !== null || page.roundPreview !== null)) {
+                                sendHit.sendHeld = true
+                                page.showSendMenu("field")
+                            }
+                        }
+                    }
                     onPressed: (m) => {
                         held = false
-                        if (!sendButton.mic)
+                        sendHeld = false
+                        if (!sendButton.mic) {
+                            if (!page.editing && !page.recordLocked
+                                && (field.text.trim() !== "" || page.preview !== null || page.roundPreview !== null))
+                                sendHold.restart()
                             return
+                        }
                         if (!(page.roundMode ? page.canRound : page.canVoice))     // (barred here; a tap still switches)
                             page.toast(page.allowedText)
                         const at = mapToItem(page, m.x, m.y)    // (the page's points: the button grows 1.6× under the finger)
@@ -4043,6 +4303,7 @@ Page {
                             page.recordLocked = true
                     }
                     onReleased: {
+                        sendHold.stop()
                         if (sendButton.mic && !held) {      // a tap: voice ↔ round video
                             holdOn.stop()
                             page.roundMode = !page.roundMode
@@ -4054,11 +4315,12 @@ Page {
                     }
                     onCanceled: {
                         holdOn.stop()
+                        sendHold.stop()
                         if (page.recording && held && !page.recordLocked)
                             page.stopVoice(true)
                     }
                     onClicked: {
-                        if (held)
+                        if (held || sendHeld)
                             return
                         if (page.recordLocked)      // locked: ↑ sends it as it is
                             return page.stopVoice(false)
@@ -4077,21 +4339,7 @@ Page {
                             field.text = ""
                             return
                         }
-                        const doSend = () => {
-                            if (page.gap)           // what is sent goes under the newest: go there first
-                                page.fresh()
-                            const at = field.mapToItem(page, 0, 0)
-                            page.flying = { text: t, x: at.x, y: at.y }
-                            store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, page.silent,
-                                           w.marks, page.directTopic, page.paidMessageStars)
-                            page.replying = null
-                            field.text = ""
-                            list.positionViewAtBeginning()
-                        }
-                        if (page.paidMessageStars > 0)
-                            page.askPaid(page.paidMessageStars, doSend)
-                        else
-                            doSend()
+                        page.sendFieldWith(page.silent, null)
                     }
                 }
             }
@@ -4454,23 +4702,129 @@ Page {
         sourceComponent: AttachSheet {
             rights: page.rights
             onRefused: (text) => page.toast(text)
+            onOpenChanged: if (!open) Qt.callLater(() => { page.pendingAttachMode = "" })
             onSend: (picked, asFiles, apart) => {
-                const doSend = () => {
-                    if (page.gap)
-                        page.fresh()
-                    store.sendFiles(page.chatId, picked, page.textBarred ? null : page.fieldWords(), page.replying ? page.replying.id : 0,
-                                    asFiles, page.thread, page.silent, apart, page.directTopic, page.paidMessageStars)
-                    field.text = ""
-                    page.replying = null
-                    list.down = true
-                    list.positionViewAtBeginning()
+                const mode = page.pendingAttachMode
+                page.pendingAttachMode = ""
+                const cap = page.textBarred ? null : page.fieldWords()
+                const replyId = page.replying ? page.replying.id : 0
+                if (mode === "schedule") {
+                    page.openScheduleSheet({ kind: "files", picked: picked, asFiles: asFiles, apart: apart, caption: cap, replyId: replyId })
+                    return
                 }
-                if (page.paidMessageStars > 0)
-                    page.askPaid(page.paidMessageStars * Math.max(1, picked.length), doSend)
-                else
-                    doSend()
+                const isSilent = mode === "silent" ? true : page.silent
+                const sched = mode === "online" ? store.scheduleOnline() : null
+                page.sendFilesWith(picked, cap, replyId, asFiles, apart, isSilent, sched)
             }
         }
+    }
+
+    function sendFieldWith(silentFlag, scheduleState) {
+        if (page.preview) {
+            const p = page.preview
+            page.dropPreview()
+            const doVoice = () => {
+                if (!scheduleState && page.gap)
+                    page.fresh()
+                store.sendVoice(page.chatId, p.path, p.dur, p.wave, page.replying ? page.replying.id : 0,
+                                page.thread, silentFlag, page.directTopic, page.paidMessageStars, scheduleState)
+                page.replying = null
+                if (scheduleState) {
+                    page.hasScheduled = true
+                    page.toast(scheduleState["@type"] === "messageSchedulingStateSendWhenOnline"
+                               ? Tr.t("Onlayn bo'lganda yuboriladi") : Tr.t("Xabar rejalashtirildi"))
+                } else {
+                    list.down = true
+                    list.positionViewAtBeginning()
+                    if (silentFlag && !page.silent)
+                        page.toast(Tr.t("Ovozsiz yuborildi"))
+                }
+            }
+            if (page.paidMessageStars > 0)
+                page.askPaid(page.paidMessageStars, doVoice)
+            else
+                doVoice()
+            return
+        }
+        if (page.roundPreview) {
+            const rp = page.roundPreview
+            page.roundPreview = null
+            const doRound = () => {
+                if (!scheduleState && page.gap)
+                    page.fresh()
+                store.sendRound(page.chatId, rp.path, rp.dur, page.replying ? page.replying.id : 0,
+                                page.thread, silentFlag, page.directTopic, page.paidMessageStars, scheduleState)
+                page.replying = null
+                if (scheduleState) {
+                    page.hasScheduled = true
+                    page.toast(scheduleState["@type"] === "messageSchedulingStateSendWhenOnline"
+                               ? Tr.t("Onlayn bo'lganda yuboriladi") : Tr.t("Xabar rejalashtirildi"))
+                } else {
+                    list.down = true
+                    list.positionViewAtBeginning()
+                    if (silentFlag && !page.silent)
+                        page.toast(Tr.t("Ovozsiz yuborildi"))
+                }
+            }
+            if (page.paidMessageStars > 0)
+                page.askPaid(page.paidMessageStars, doRound)
+            else
+                doRound()
+            return
+        }
+        const w = page.fieldWords(), t = w.text
+        if (!t)
+            return
+        const doSend = () => {
+            if (!scheduleState && page.gap)
+                page.fresh()
+            if (!scheduleState) {
+                const at = field.mapToItem(page, 0, 0)
+                page.flying = { text: t, x: at.x, y: at.y }
+            }
+            store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, silentFlag,
+                           w.marks, page.directTopic, page.paidMessageStars, scheduleState)
+            page.replying = null
+            field.text = ""
+            if (scheduleState) {
+                page.hasScheduled = true
+                page.toast(scheduleState["@type"] === "messageSchedulingStateSendWhenOnline"
+                           ? Tr.t("Onlayn bo'lganda yuboriladi") : Tr.t("Xabar rejalashtirildi"))
+            } else {
+                list.positionViewAtBeginning()
+                if (silentFlag && !page.silent)
+                    page.toast(Tr.t("Ovozsiz yuborildi"))
+            }
+        }
+        if (page.paidMessageStars > 0)
+            page.askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
+    }
+
+    function sendFilesWith(picked, caption, replyId, asFiles, apart, silentFlag, scheduleState) {
+        const doSend = () => {
+            if (!scheduleState && page.gap)
+                page.fresh()
+            store.sendFiles(page.chatId, picked, caption, replyId, asFiles, page.thread, silentFlag, apart,
+                            page.directTopic, page.paidMessageStars, scheduleState)
+            field.text = ""
+            page.replying = null
+            if (scheduleState) {
+                page.hasScheduled = true
+                page.toast(scheduleState["@type"] === "messageSchedulingStateSendWhenOnline"
+                           ? Tr.t("Onlayn bo'lganda yuboriladi") : Tr.t("Xabar rejalashtirildi"))
+            } else {
+                list.down = true
+                list.positionViewAtBeginning()
+                if (silentFlag && !page.silent)
+                    page.toast(Tr.t("Ovozsiz yuborildi"))
+            }
+        }
+        if (page.paidMessageStars > 0)
+            page.askPaid(page.paidMessageStars * Math.max(1, picked.length), doSend)
+        else
+            doSend()
     }
 
     Loader {
@@ -4859,6 +5213,121 @@ Page {
                     }
                 }
             }
+        }
+    }
+
+    Loader {             // send button / clip long-press menu: Silent, Schedule, Send When Online (iOS style)
+        id: sendMenuLoader
+        z: 30
+        active: false
+        anchors.fill: parent
+        sourceComponent: Item {
+            id: sendMenuItem
+            visible: false
+            property string origin: "field"
+            property bool canOnline: false
+            readonly property var items: {
+                const a = [
+                    { key: "silent", text: Tr.t("Ovozsiz yuborish"), icon: "belloff" },
+                    { key: "schedule", text: Tr.t("Rejalashtirish"), icon: "timer" }
+                ]
+                if (canOnline)
+                    a.push({ key: "online", text: Tr.t("Onlayn bo'lganda yuborish"), icon: "person" })
+                return a
+            }
+            function show(from) {
+                origin = from || "field"
+                canOnline = !page.thread && !page.directTopic && store.canScheduleOnline(page.chat)
+                visible = true
+                sendCard.scale = 0.01
+                sendGrow.start()
+            }
+            MouseArea { anchors.fill: parent; onClicked: sendMenuItem.visible = false }
+            Rectangle {
+                id: sendCard
+                x: sendMenuItem.origin === "attach" ? 10 : parent.width - width - 10
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: page.barLift + input.height + 6
+                width: 274; height: sendChoices.implicitHeight
+                radius: 16
+                color: Theme.menu
+                clip: true
+                transformOrigin: sendMenuItem.origin === "attach" ? Item.BottomLeft : Item.BottomRight
+                ScaleAnimator {
+                    id: sendGrow; target: sendCard; from: 0.01; to: 1; duration: 360
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring
+                }
+                Column {
+                    id: sendChoices
+                    width: parent.width
+                    Repeater {
+                        model: sendMenuItem.items
+                        Rectangle {
+                            required property var modelData
+                            required property int index
+                            width: sendChoices.width; height: 46
+                            color: optHit.pressed ? Theme.highlight : "transparent"
+                            Rectangle { visible: index > 0; width: parent.width; height: 0.5; color: Theme.separator }
+                            Icon {
+                                x: 16; anchors.verticalCenter: parent.verticalCenter
+                                width: 20; height: 20
+                                name: modelData.icon
+                                color: Theme.text
+                            }
+                            Text {
+                                x: 48; anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - 60
+                                elide: Text.ElideRight
+                                text: modelData.text
+                                color: Theme.text
+                                font.family: Theme.font; font.pixelSize: 16
+                            }
+                            MouseArea {
+                                id: optHit
+                                anchors.fill: parent
+                                onClicked: {
+                                    sendMenuItem.visible = false
+                                    const k = modelData.key
+                                    if (sendMenuItem.origin === "attach") {
+                                        page.pendingAttachMode = k
+                                        page.keyboardDown()
+                                        page.openAttach()
+                                        return
+                                    }
+                                    if (k === "silent") {
+                                        page.sendFieldWith(true, null)
+                                    } else if (k === "online") {
+                                        page.sendFieldWith(page.silent, store.scheduleOnline())
+                                    } else if (k === "schedule") {
+                                        page.keyboardDown()
+                                        page.openScheduleSheet({ kind: "field" })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Loader {             // date + time picker for scheduling text or attachments
+        id: scheduleSheetLoader
+        z: 31
+        active: false
+        anchors.fill: parent
+        sourceComponent: ScheduleSheet {
+            onPicked: (st) => {
+                const payload = page.pendingSchedule
+                page.pendingSchedule = null
+                if (!payload)
+                    return
+                if (payload.kind === "files")
+                    page.sendFilesWith(payload.picked, payload.caption, payload.replyId, payload.asFiles, payload.apart, page.silent, st)
+                else
+                    page.sendFieldWith(page.silent, st)
+            }
+            onCancelled: page.pendingSchedule = null
         }
     }
 
@@ -5617,6 +6086,54 @@ Page {
         if (rowFlyX.target === m) { rowFlyX.stop(); rowFlyX.target = null }
         if (rowFlyY.target === m) { rowFlyY.stop(); rowFlyY.target = null }
     }
+    NumberAnimation {
+        id: swipeBackAnim
+        target: page
+        property: "swipeShift"
+        to: 0
+        duration: 240
+        easing.type: Easing.OutCubic
+        onFinished: {
+            if (page.swipeMover)
+                page.swipeMover.x = 0
+            page.swipeRow = null
+            page.swipeMover = null
+            page.swipeArmed = false
+        }
+    }
+    Component {
+        id: swipeBadgeComp
+        Item {
+            id: sbWrap
+            readonly property real progress: Math.min(1, Math.abs(page.swipeShift) / page.swipeThreshold)
+            readonly property real rawY: page.swipeY - list.contentY - 17
+            readonly property real minY: bar.height + pinBar.height + 10 + page.kb
+            readonly property real maxY: page.height - page.foot - 44
+            function pop() { popAnim.restart() }
+            Rectangle {
+                id: badge
+                width: 34; height: 34; radius: 17
+                x: sbWrap.width - 10 - 36 * sbWrap.progress
+                y: Math.max(sbWrap.minY, Math.min(sbWrap.maxY, sbWrap.rawY))
+                color: page.swipeArmed ? Theme.accent : Theme.dayPill
+                opacity: Math.min(1, sbWrap.progress * 1.4)
+                property real bump: 1
+                scale: (0.4 + 0.6 * sbWrap.progress) * bump
+                Behavior on color { ColorAnimation { duration: 120 } }
+                SequentialAnimation {
+                    id: popAnim
+                    NumberAnimation { target: badge; property: "bump"; to: 1.22; duration: 90; easing.type: Easing.OutQuad }
+                    NumberAnimation { target: badge; property: "bump"; to: 1.0; duration: 140; easing.type: Easing.OutBack }
+                }
+                Icon {
+                    anchors.centerIn: parent
+                    width: 18; height: 18
+                    name: "reply"
+                    color: "white"
+                }
+            }
+        }
+    }
 
     NumberAnimation { id: roundGrow; property: "roundK"; to: 1; duration: 300; easing.type: Easing.OutCubic }
     NumberAnimation { id: roundShrink; property: "roundK"; to: 0; duration: 300; easing.type: Easing.OutCubic }
@@ -6330,6 +6847,7 @@ Page {
             readonly property var reactList: []
             readonly property bool bursting: false
             readonly property Item face: bubble
+            readonly property Item moverItem: mover
             function oneAt(x, y) { return 0 }
             function tileOf(id) { return null }
             function replay(gently) {}
@@ -6359,6 +6877,7 @@ Page {
                 if (page) {
                     page.clearBubbleAnim(bubble)
                     page.clearFlyAnim(mover)
+                    page.clearSwipeAnim(mover)
                     if (hold.held) page.holding = false
                 }
             }
@@ -6573,6 +7092,7 @@ Page {
             // the last line of what is last in the bubble: the time goes by it when it fits
             readonly property real lastLine: stacked ? (attach.item ? attach.item.last : 0) : body.last
             readonly property Item face: bubble
+            readonly property Item moverItem: mover
             readonly property Item picFace: picture
             // a picture: photo, video or GIF in the bubble; sticker and round video without one
             readonly property bool media: picKind !== ""
@@ -6631,6 +7151,7 @@ Page {
                     page.clearRoundAnim(item)
                     page.clearBubbleAnim(bubble)
                     page.clearFlyAnim(mover)
+                    page.clearSwipeAnim(mover)
                     if (hold.held) page.holding = false
                 }
             }

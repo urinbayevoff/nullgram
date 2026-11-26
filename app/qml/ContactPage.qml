@@ -14,9 +14,11 @@ SubPage {
     property var userId: 0
     property var full: null            // their userFullInfo (the note, need_phone_number_privacy_exception)
     property bool adding: false
+    property bool byPhone: false       // adding a new contact by phone number (importContacts)
     property string photo: ""
     property bool saving: false
-    readonly property var user: (store.seen, store.users[userId])
+    property string errorText: ""
+    readonly property var user: byPhone ? null : (store.seen, store.users[userId])
     readonly property string phoneText: {
         const n = user && user.phone_number ? user.phone_number : ""
         const m = /^998(\d{2})(\d{3})(\d{2})(\d{2})$/.exec(n)
@@ -24,11 +26,13 @@ SubPage {
     }
     readonly property string firstOf: first.text.trim() || (user ? user.first_name : "")
     signal said(string text)            // a word for their page's note
+    signal added(var userId)            // emitted after byPhone importContacts succeeds
 
-    title: adding ? Tr.t("Kontakt qo'shish") : ""
-    action: Tr.t("Tayyor")
+    title: byPhone ? Tr.t("Yangi kontakt") : adding ? Tr.t("Kontakt qo'shish") : ""
+    action: byPhone && saving ? "" : byPhone ? Tr.t("Yaratish") : Tr.t("Tayyor")
     actionBold: true
-    actionOn: first.text.trim() !== "" && !saving
+    actionOn: byPhone ? (first.text.trim() !== "" && phoneInput.text.trim() !== "" && !saving)
+                      : (first.text.trim() !== "" && !saving)
     onActed: save()
 
     Component.onCompleted: {
@@ -43,6 +47,40 @@ SubPage {
     function save() {
         if (!actionOn)
             return
+        if (byPhone) {
+            const raw = phoneInput.text.trim()
+            const digits = raw.replace(/[^0-9]/g, "")
+            if (/[a-zA-Z\u0400-\u04FF]/.test(raw) || digits.length < 7 || digits.length > 15) {
+                errorText = Tr.t("Raqam noto'g'ri. Qaytadan tekshiring.")
+                return
+            }
+            saving = true
+            errorText = ""
+            phoneInput.focus = false
+            first.focus = false
+            last.focus = false
+            if (osk.h > 0)
+                osk.hide()
+            store.importContact("+" + digits, first.text.trim(), last.text.trim(), (uid, err) => {
+                if (!page)
+                    return
+                page.saving = false
+                if (err) {
+                    page.errorText = err.indexOf("PHONE_NUMBER_INVALID") >= 0
+                        ? Tr.t("Raqam noto'g'ri. Qaytadan tekshiring.")
+                        : err
+                    return
+                }
+                if (!uid) {
+                    page.errorText = Tr.t("Bu raqam Telegram'da ro'yxatdan o'tmagan.")
+                    return
+                }
+                page.added(uid)
+                page.nav.say(Tr.f("%1 endi kontaktlaringiz ro'yxatida.", first.text.trim()))
+                page.nav.pop()
+            })
+            return
+        }
         saving = true
         const note = { "@type": "formattedText", text: notes.text.trim(), entities: [] }
         store.send({ "@type": "addContact", user_id: userId,
@@ -74,6 +112,20 @@ SubPage {
         })
     }
 
+    // ---- spinner for byPhone importContacts ----
+    Ring {
+        parent: page
+        z: 10
+        visible: page.byPhone && page.saving
+        anchors.right: parent.right; anchors.rightMargin: 16
+        y: 17
+        width: 22; height: 22
+        value: 0.72
+        cross: false
+        color: Theme.accent
+        thickness: 2.2
+    }
+
     // ---- the picture, their number under it ----
     Column {
         width: parent.width
@@ -82,8 +134,8 @@ SubPage {
             anchors.horizontalCenter: parent.horizontalCenter
             width: 100; height: 100
             source: page.photo
-            letters: store.letters(((first.text || "") + " " + (last.text || "")).trim() || "?")
-            tint: store.tints[Math.abs(page.userId) % store.tints.length]
+            letters: page.store.letters(((first.text || "") + " " + (last.text || "")).trim() || "?")
+            tint: page.byPhone ? Theme.accent : page.store.tints[Math.abs(page.userId) % page.store.tints.length]
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -102,6 +154,7 @@ SubPage {
                 id: first
                 x: 16; width: parent.width - 32; height: 46
                 verticalAlignment: TextInput.AlignVCenter
+                enabled: !page.saving
                 color: Theme.text
                 font.family: Theme.font; font.pixelSize: 17
                 maximumLength: 64
@@ -122,10 +175,11 @@ SubPage {
                 id: last
                 x: 16; width: parent.width - 32; height: 46
                 verticalAlignment: TextInput.AlignVCenter
+                enabled: !page.saving
                 color: Theme.text
                 font.family: Theme.font; font.pixelSize: 17
                 maximumLength: 64
-                onAccepted: notes.forceActiveFocus()
+                onAccepted: page.byPhone ? phoneInput.forceActiveFocus() : notes.forceActiveFocus()
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: !last.text
@@ -137,8 +191,46 @@ SubPage {
         }
     }
 
+    // ---- phone number (byPhone mode: importContacts) ----
+    SettingsGroup {
+        visible: page.byPhone
+        note: Tr.t("Telefon raqamini mamlakat kodi bilan kiriting (masalan, +998 90 123 45 67).")
+        Item {
+            width: parent.width; height: 46
+            TextInput {
+                id: phoneInput
+                x: 16; width: parent.width - 32; height: 46
+                verticalAlignment: TextInput.AlignVCenter
+                enabled: !page.saving
+                inputMethodHints: Qt.ImhDialableCharactersOnly
+                color: Theme.text; selectionColor: Theme.accent
+                font.family: Theme.font; font.pixelSize: 17
+                maximumLength: 24
+                clip: true
+                onTextChanged: page.errorText = ""
+                onAccepted: page.save()
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: !phoneInput.text
+                    text: Tr.t("Telefon raqami")
+                    color: Theme.grey
+                    font: phoneInput.font
+                }
+            }
+        }
+    }
+    Text {
+        visible: page.byPhone && page.errorText !== ""
+        x: 32; width: parent.width - 64
+        wrapMode: Text.Wrap
+        text: page.errorText
+        color: Theme.danger
+        font.family: Theme.font; font.pixelSize: 14
+    }
+
     // ---- our notes on them (only we see them) ----
     SettingsGroup {
+        visible: !page.byPhone
         note: Tr.t("Eslatmalar faqat sizga ko'rinadi.")
         Item {
             width: parent.width
@@ -280,7 +372,7 @@ SubPage {
         }
     }
     SettingsGroup {
-        visible: page.adding && !page.phoneText
+        visible: page.adding && !page.byPhone && !page.phoneText
         Text {
             x: 16; width: parent.width - 32
             topPadding: 12; bottomPadding: 12
@@ -291,7 +383,7 @@ SubPage {
         }
     }
     SettingsGroup {
-        visible: !page.adding
+        visible: !page.adding && !page.byPhone
         SettingsRow {
             text: Tr.t("Kontaktni o'chirish")
             danger: true
@@ -299,6 +391,10 @@ SubPage {
             last: true
             onClicked: page.askDelete()
         }
+    }
+    Item {
+        visible: page.byPhone
+        width: 1; height: Math.max(osk.h, safe.bottom) + 16
     }
 
     // iOS's action sheet: «Kontaktni o'chirish» in red on a card, «Bekor qilish» under it
@@ -319,7 +415,7 @@ SubPage {
         }
         Column {
             x: 8; width: parent.width - 16
-            y: sheet.open ? parent.height - height - 8 : parent.height + 8
+            y: sheet.open ? parent.height - height - 8 - safe.bottom : parent.height + 8
             Behavior on y { NumberAnimation { duration: 350; easing.type: Easing.BezierSpline
                 easing.bezierCurve: [0.0744, 0.0298, 0.1307, 0.7931, 0.3680, 0.9301, 0.4409, 0.9722, 0.4273, 0.9999, 1.0, 1.0] } }
             spacing: 8

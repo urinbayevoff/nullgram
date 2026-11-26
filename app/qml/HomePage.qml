@@ -17,7 +17,8 @@ Page {
         function onCallsTabChanged() { if (!Prefs.callsTab && home.tab === 3) home.tab = 1 }
     }
 
-    readonly property real toastFloor: tabs.visible ? tabs.height + tabs.gap : 0    // (Main's Toast stands over it)
+    readonly property real toastFloor: tabs.visible ? tabs.height + tabs.gap
+                                     : (home.tab === 1 && chats.editing ? 52 + safe.bottom : 0)    // (Main's Toast stands over it)
 
     TabBar {
         id: tabs
@@ -25,7 +26,7 @@ Page {
         // over the shell's nav line: clear of it (its safe area), as on iOS
         readonly property real gap: safe.bottom > 0 ? safe.bottom + 4 : 10
         y: parent.height - height - gap
-        visible: !(home.tab === 1 && chats.searching)
+        visible: !(home.tab === 1 && (chats.searching || chats.editing || chats.modalOpen))
         tabs: Prefs.callsTab
             ? [{ icon: "person", text: Tr.t("Kontaktlar") }, { icon: "phone", text: Tr.t("Qo'ng'iroqlar") },
                { icon: "chats", text: Tr.t("Chatlar") }, { icon: "settings", text: Tr.t("Sozlamalar") }]
