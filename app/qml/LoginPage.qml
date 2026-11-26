@@ -28,6 +28,16 @@ Page {
     readonly property var spring: [0.0744, 0.0298, 0.1307, 0.7931, 0.3680, 0.9301,
                                    0.4409, 0.9722, 0.4273, 0.9999, 1.0, 1.0]
 
+    Text {                  // a new account's sign-in (0.9.7): back to the one it was added from
+        z: 5
+        visible: accounts.adding
+        x: 16; y: 14
+        text: "‹ " + Tr.t("Bekor qilish")
+        color: Theme.accent
+        font.family: Theme.font; font.pixelSize: 17
+        MouseArea { anchors.fill: parent; anchors.margins: -10; onClicked: accounts.cancelAdd(0) }
+    }
+
     onStepChanged: show(true)
     Component.onCompleted: show(false)
 
@@ -182,18 +192,18 @@ Page {
                     running: st.step !== "password" || field.activeFocus
                 }
 
-                Rectangle {         // the QR code: black modules on white
+                Rectangle {         // the QR code: black modules on a white card (Telegram Desktop's QR sign-in)
                     visible: st.step === "qr"
                     anchors.horizontalCenter: parent.horizontalCenter
-                    width: 236; height: visible ? 236 : 0
+                    width: 208; height: visible ? 208 : 0
                     color: "white"
-                    radius: 12
+                    radius: 20
                     border.color: Theme.separator; border.width: Theme.dark ? 0 : 1
                     property var rows: store.qrLink ? td.qr(store.qrLink) : []
                     Grid {
                         id: modules
                         anchors.centerIn: parent
-                        property real cell: parent.rows.length ? Math.floor(212 / parent.rows.length * 4) / 4 : 0
+                        property real cell: parent.rows.length ? Math.floor(184 / parent.rows.length * 4) / 4 : 0
                         columns: parent.rows.length
                         Repeater {
                             model: parent.parent.rows.length * parent.parent.rows.length
@@ -221,13 +231,14 @@ Page {
                     wrapMode: Text.Wrap
                     color: Theme.text
                     font.family: Theme.font; font.pixelSize: 28; font.weight: Font.DemiBold
-                    text: ({ qr: Tr.t("Telefondagi Telegram'dan skanerlang"), phone: Tr.t("Telefon raqamingiz"),
+                    text: ({ qr: Tr.t("QR kod bilan kirish"), phone: Tr.t("Telefon raqamingiz"),
                              code: Tr.t("Kodni kiriting"), emailcode: Tr.t("E-pochtangizni tekshiring"),
                              password: Tr.t("Parolingiz"), email: Tr.t("E-pochta qo'shing"),
                              name: Tr.t("Ma'lumotlaringiz") })[st.step]
                 }
                 Item { width: 1; height: 10 }
                 Text {              // what to do
+                    visible: st.step !== "qr"
                     width: parent.width
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
@@ -244,7 +255,41 @@ Page {
                         : Tr.t("Hisobingiz ikki bosqichli tasdiqlash bilan himoyalangan: qo'shimcha parol kerak.")
                 }
 
-                Item { width: 1; height: st.step === "qr" ? 0 : st.code ? 30 : 26 }
+                Column {            // the QR's steps, numbered (Telegram Desktop: open, Settings › Devices, point)
+                    visible: st.step === "qr"
+                    x: 8; width: parent.width - 16
+                    topPadding: 8
+                    spacing: 14
+                    Repeater {
+                        model: st.step === "qr" ? [Tr.t("Telefonda Telegram'ni oching"),
+                                                   Tr.t("Sozlamalar → Qurilmalar → «Qurilma ulash»"),
+                                                   Tr.t("Telefonni shu kodga qarating")] : []
+                        Row {
+                            required property int index
+                            required property string modelData
+                            spacing: 14
+                            Rectangle {
+                                width: 26; height: 26; radius: 13
+                                color: Theme.accent
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: String(parent.parent.index + 1)
+                                    color: "white"
+                                    font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                                }
+                            }
+                            Text {
+                                width: col.width - 16 - 40
+                                anchors.verticalCenter: parent.children[0].verticalCenter
+                                wrapMode: Text.Wrap
+                                text: parent.modelData
+                                color: Theme.text
+                                font.family: Theme.font; font.pixelSize: 17
+                            }
+                        }
+                    }
+                }
+                Item { width: 1; height: st.step === "qr" ? 18 : st.code ? 30 : 26 }
                 Item {              // the field: a number, a password...; or a code's cells over it
                     id: box
                     visible: st.step !== "qr"
@@ -366,6 +411,27 @@ Page {
                     font.family: Theme.font; font.pixelSize: 14
                 }
 
+                Item {              // a new account (0.9.7): its contacts to be synced or not (Telegram-iOS's ContactSyncNode)
+                    visible: accounts.adding && (st.step === "phone" || st.step === "qr")
+                    width: parent.width; height: visible ? 52 : 0
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 70
+                        elide: Text.ElideRight
+                        text: Tr.t("Kontaktlarni sinxronlash")
+                        color: Theme.text
+                        font.family: Theme.font; font.pixelSize: 17
+                    }
+                    Switch {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        on: accounts.sync
+                    }
+                    MouseArea {     // (the Switch only draws: the whole row is what is tapped, as SettingsRow)
+                        anchors.fill: parent
+                        onClicked: accounts.setSync(!accounts.sync)
+                    }
+                }
                 Item { width: 1; height: st.step === "qr" || st.code ? 0 : 18 }
                 Rectangle {
                     visible: st.step !== "qr" && !st.code
@@ -424,6 +490,13 @@ Page {
             return
         store.error = ""            // (the same error again is a change too: it shakes again)
         if (step === "phone") {
+            // (0.9.7: a number already signed in here: Telegram's apps offer to go there instead)
+            const here = accounts.adding ? accounts.phoneUsed(v) : 0
+            if (here) {
+                alert.show("", Tr.t("Bu raqam bilan bu yerda allaqachon kirilgan."),
+                           [{ t: "OK" }, { t: Tr.t("O'tish"), run: () => accounts.cancelAdd(here) }])
+                return
+            }
             again = false
             store.send({ "@type": "setAuthenticationPhoneNumber", phone_number: v }, store.check)
         } else if (step === "email")
@@ -441,4 +514,6 @@ Page {
         if (st.code)
             st.sent = true          // (the cells keep the code: red and emptied if it was wrong)
     }
+
+    Alert { id: alert; anchors.fill: parent; z: 10 }     // (0.9.7: a number already signed in here)
 }

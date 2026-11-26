@@ -4,7 +4,7 @@
 # its user for one (Settings › Ma'lumotlar va xotira › API kaliti). Apple emoji are not in it (Apple's): the user
 # downloads them at their own wish in the app (Ko'rinish › Emoji; emoji_get.py, also usable by hand).
 pkgname=nullgram
-pkgver=0.9.6
+pkgver=0.9.7
 pkgrel=1
 pkgdesc="Telegram client for ztOS phones (unofficial), Qt Quick + TDLib"
 arch=('any')

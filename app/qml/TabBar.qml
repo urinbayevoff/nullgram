@@ -13,6 +13,7 @@ Item {
                         { icon: "settings", text: Tr.t("Sozlamalar") }]
     property var badges: [0, 0, 0]
     signal picked(int index)
+    signal held(int index)            // (0.9.7: Sozlamalar held → the accounts' menu)
 
     height: 64
     readonly property real tabWidth: (capsule.width - 8) / tabs.length
@@ -84,6 +85,8 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     onClicked: bar.picked(index)
+                    pressAndHoldInterval: 350
+                    onPressAndHold: bar.held(index)
                 }
             }
         }

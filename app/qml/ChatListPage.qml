@@ -86,6 +86,8 @@ Page {
             store.tapAt = Date.now()
         if (store.isDirectAdmin(c))
             page.nav.push(directPage, { chatId: chatId })
+        else if (!messageId && store.isForum(c))
+            page.nav.push(forumPage, { chatId: chatId })
         else
             page.nav.pushChat(chatPage, messageId ? { chatId: chatId, target: messageId } : { chatId: chatId })
     }
@@ -1846,6 +1848,7 @@ Page {
 
     Component { id: chatPage; ChatPage {} }
     Component { id: directPage; DirectTopicsPage {} }
+    Component { id: forumPage; ForumTopicsPage {} }
 
     SearchView {
         id: search

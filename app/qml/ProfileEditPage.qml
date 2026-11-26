@@ -109,7 +109,8 @@ SubPage {
     }
     function askLogOut() {
         alert.title = Tr.t("Chiqish")
-        alert.text = Tr.t("Rostdan ham hisobdan chiqmoqchimisiz?")
+        alert.text = Tr.t("Rostdan ham hisobdan chiqmoqchimisiz?") +
+                     (accounts.count > 1 ? "\n" + Tr.t("Faqat shu hisobdan chiqasiz. Boshqa hisoblaringiz qoladi.") : "")
         alert.answers = [{ t: Tr.t("Bekor qilish") }, { t: Tr.t("Chiqish"), red: true, run: () => store.logOut() }]
         alert.open = true
     }

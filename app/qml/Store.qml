@@ -17,7 +17,10 @@ QtObject {
     property real emojiZoom: 0.625
     property string qrLink: ""          // tg://login?token=... while it waits for a scan
     property string passwordHint: ""
-    property bool byPhone: td.testDc    // signing in by number (else a QR code is asked for)
+    // a QR given up for the number: the client closed and a new one opened (renew), the sign-in kept on the
+    // screen meanwhile (Main), not a blank page for the seconds it takes
+    property bool renewing: false
+    property bool byPhone: true         // signing in by number, as Telegram's phone apps begin (the QR code: «QR kod bilan kirish»)
     property bool wasReady: false       // signed in in this run (a close then is a sign-out: the app starts again)
     property var authState: ({})        // the whole of it: where the code went (code_info), the e-mail's pattern...
     property string error: ""
@@ -77,6 +80,7 @@ QtObject {
     signal messagesDeleted(var chatId, var ids)
     signal messageContent(var chatId, var id, var content)
     signal messageEdited(var chatId, var id, var date)
+    signal messageReplyMarkup(var chatId, var id, var replyMarkup)
     signal contentOpened(var chatId, var id)    // a voice note or a round video played (here or by them)
     signal readOutbox(var chatId, var lastRead)
     signal chatChanged(var chatId)      // fields of a chat changed (an open chat page reads them again)
@@ -153,6 +157,7 @@ QtObject {
             }
         },
         updateBasicGroup: (u) => { store.groups["b" + u.basic_group.id] = u.basic_group; store.seenSoon() },
+        updateDiceEmojis: (u) => { store.diceEmojis = u.emojis || store.diceEmojis },
         updateSupergroup: (u) => { store.groups["s" + u.supergroup.id] = u.supergroup; store.seenSoon() },
         updateDirectMessagesChatTopic: (u) => {
             const t = u.topic
@@ -166,6 +171,8 @@ QtObject {
             store.directTopics[t.chat_id] = map
             store.directTopicsSeen++
         },
+        updateForumTopicInfo: (u) => store.onForumTopicInfo(u.info),
+        updateForumTopic: (u) => store.onForumTopic(u),
         updateChatAction: (u) => {
             const acts = store.actions[u.chat_id] || {}
             const key = JSON.stringify(u.sender_id)
@@ -207,6 +214,11 @@ QtObject {
         },
         updateChatBlockList: (u) => store.change(u.chat_id, { block_list: u.block_list }),
         updateChatPermissions: (u) => store.change(u.chat_id, { permissions: u.permissions }),
+        updateChatUnreadMentionCount: (u) => store.change(u.chat_id, { unread_mention_count: u.unread_mention_count || 0 }),
+        updateChatUnreadReactionCount: (u) => store.change(u.chat_id, { unread_reaction_count: u.unread_reaction_count || 0 }),
+        // a mention or a reaction read by viewing its message: TDLib sends the chat's new count only here
+        updateMessageMentionRead: (u) => store.change(u.chat_id, { unread_mention_count: u.unread_mention_count || 0 }),
+        updateMessageUnreadReactions: (u) => store.change(u.chat_id, { unread_reaction_count: u.unread_reaction_count || 0 }),
         updateChatIsTranslatable: (u) => store.change(u.chat_id, { is_translatable: u.is_translatable }),
         updateChatMessageAutoDeleteTime: (u) => store.change(u.chat_id, { message_auto_delete_time: u.message_auto_delete_time }),
         updateChatPendingJoinRequests: (u) => store.change(u.chat_id, { pending_join_requests: u.pending_join_requests }),
@@ -234,7 +246,11 @@ QtObject {
             store.messageChanged(u.message.chat_id, u.old_message_id, u.message)
         },
         updateMessageContent: (u) => store.messageContent(u.chat_id, u.message_id, u.new_content),
-        updateMessageEdited: (u) => store.messageEdited(u.chat_id, u.message_id, u.edit_date),
+        updateMessageEdited: (u) => {
+            store.messageEdited(u.chat_id, u.message_id, u.edit_date)
+            store.messageReplyMarkup(u.chat_id, u.message_id, u.reply_markup || null)
+        },
+        updateChatReplyMarkup: (u) => store.change(u.chat_id, { reply_markup_message_id: u.reply_markup_message_id || 0 }),
         updateMessageContentOpened: (u) => store.contentOpened(u.chat_id, u.message_id),
         updateDeleteMessages: (u) => {
             if (u.is_permanent) {
@@ -301,12 +317,17 @@ QtObject {
             if (store.folder && !store.folders.some((f) => f.id === store.folder))
                 store.showFolder(0)
         },
+        updateInstalledStickerSets: (u) => store.installedStickerSetsChanged(u.sticker_type, u.sticker_set_ids || []),
     })
 
     function authorization(s) {
         auth = s["@type"].replace("authorizationState", "")
         authState = s
         error = ""
+        if (auth !== "LoggingOut" && auth !== "Closed" && auth !== "WaitTdlibParameters")
+            renewing = false
+        if (accounts.adding && (auth === "WaitPhoneNumber" || auth === "WaitOtherDeviceConfirmation"))
+            _watchOthers.start()            // (0.9.7: the others' numbers, for the sign-in's «already here»)
         if (auth === "WaitTdlibParameters" && !td.apiId) {
             auth = "NeedApiKey"         // no key in this build or on this phone: Main asks for one (ApiKeyPage)
         } else if (auth === "WaitTdlibParameters") {
@@ -324,14 +345,19 @@ QtObject {
         } else if (auth === "WaitRegistration" && td.testPhone) {
             send({ "@type": "registerUser", first_name: "Sinov", last_name: td.testPhone.slice(-4) }, check)
         } else if (auth === "WaitPhoneNumber" && !byPhone) {
-            send({ "@type": "requestQrCodeAuthentication" }, check)
+            send({ "@type": "requestQrCodeAuthentication", other_user_ids: accounts.otherIds() }, check)
+        } else if (auth === "WaitOtherDeviceConfirmation" && byPhone) {
+            renewing = true                 // (the number chosen while the QR was on its way: that QR given up)
+            send({ "@type": "logOut" }, check)
         } else if (auth === "WaitOtherDeviceConfirmation") {
             qrLink = s.link
         } else if (auth === "WaitPassword") {
             passwordHint = s.password_hint || ""
         } else if (auth === "Closed") {     // (signed out: TDLib closes the client; at the app's own end QML is gone)
-            if (wasReady)
+            if (wasReady) {
+                accounts.signedOut()        // (0.9.7: only this account; the next one shown)
                 td.restart()
+            }
             else
                 td.renew()                  // (the QR given up for the number: a new client, at WaitPhoneNumber)
         } else if (auth === "Ready") {
@@ -339,7 +365,19 @@ QtObject {
             qrLink = ""
             tellNetwork()
             cleaner.restart()
-            send({ "@type": "getMe" }, (m) => { store.me = m })
+            send({ "@type": "getMe" }, (m) => {
+                store.me = m
+                if (m["@type"] !== "user")
+                    return
+                // (0.9.7: the accounts' list shows it; an account just added that was here already: this new
+                // session signed out, and the app goes to that one -- AccountList.signedOut)
+                const same = accounts.setMe(m.id, m.first_name || "", (m.usernames && m.usernames.active_usernames[0]) || "", !!m.is_premium)
+                if (same)
+                    send({ "@type": "logOut" }, check)
+                else
+                    syncContacts()
+            })
+            _watchOthers.start()
             send({ "@type": "getApplicationConfig" }, (c) => {
                 for (const m of c.members || [])
                     if (m.key === "emojies_animated_zoom" && m.value && m.value.value > 0)
@@ -375,9 +413,10 @@ QtObject {
         error = ""
         if (phone && auth === "WaitOtherDeviceConfirmation") {
             qrLink = ""
+            renewing = true
             send({ "@type": "logOut" }, check)
         } else if (!phone && auth === "WaitPhoneNumber")
-            send({ "@type": "requestQrCodeAuthentication" }, check)
+            send({ "@type": "requestQrCodeAuthentication", other_user_ids: accounts.otherIds() }, check)
     }
 
     function check(r) {
@@ -649,6 +688,85 @@ QtObject {
         }
     }
 
+    // ---- the other accounts (0.9.7): kept on in the background (nullgram_app.py's AccountList) ----------
+    // a moment after this one is up (its start not shared with theirs), when Bildirishnomalar › «Barcha
+    // hisoblardan» is on; their new messages told here, the banner made as this account's are, its title
+    // «chat → account» (Telegram-iOS's NotificationRecipientAccount; the account's first name, as Android)
+    property Timer _watchOthers: Timer {
+        interval: 3000
+        onTriggered: accounts.watch(Prefs.allAccounts, Tr.lang)
+    }
+    property Connections _others: Connections {
+        target: accounts
+        function onNotified(slot, p) { store.notifyOther(p) }
+        function onContactsChanged() { store.syncContacts() }
+        function onChanged() { store._tile.restart() }     // (othersUnread too: the tile)
+    }
+    // Kontaktlarni sinxronlash (0.9.7): the phone's contacts to this account -- at the start, when the phone's
+    // change, when switched on (Telegram Android's ContactsController: the whole book, TDLib finding what changed
+    // and taking the ones gone off the server too); one request at a time (TDLib's rule), a change meanwhile after.
+    // Off: nothing read, nothing sent; what was sent stays till «Sinxronlangan kontaktlarni o'chirish».
+    property bool _syncing: false
+    property bool _syncAgain: false
+    function syncContacts() {
+        if (!accounts.sync || !wasReady)
+            return
+        if (_syncing)
+            return _syncAgain = true
+        const book = accounts.phoneContacts()
+        if (!book.length)
+            return console.log("nullgram: contact sync: no phone contacts")
+        _syncing = true
+        send({ "@type": "changeImportedContacts", contacts: book }, (r) => {
+            _syncing = false
+            if (r["@type"] === "error")
+                console.warn("nullgram: contact sync", r.code, r.message)
+            else
+                console.log("nullgram: contact sync:", book.length, "sent,", (r.user_ids || []).filter((u) => u).length, "on Telegram")
+            if (_syncAgain) {
+                _syncAgain = false
+                syncContacts()
+            }
+        })
+    }
+    // how many may be signed in: 3, 4 with Premium on any of them (Telegram's phone apps: UserConfig, AccountUtils)
+    readonly property int accountLimit: accounts.list.some((a) => a.premium) ? 4 : 3
+    // the switch: «Hisob ochilmoqda…» drawn first (HomePage), then the app starts again with it (AccountList)
+    property int switchingTo: 0
+    function switchAccount(slot) {
+        if (slot === accounts.active || switchingTo)
+            return
+        switchingTo = slot
+        _switch.start()
+    }
+    property Timer _switch: Timer { interval: 120; onTriggered: accounts.switchTo(store.switchingTo) }
+    // «Hisob qo'shish»: past the limit, why (Telegram Android's LimitReachedBottomSheet TYPE_ACCOUNTS, Premium's page
+    // to read: nothing bought here); else the app starts again at a new account's sign-in (AccountList.add), its
+    // contacts to be synced to begin with (Telegram's apps; the sign-in's switch changes it)
+    function addAccount(nav, alert) {
+        if (switchingTo)
+            return
+        if (accounts.count >= accountLimit) {
+            alert.show(Tr.t("Hisoblar limiti"),
+                       accountLimit < 4 ? Tr.t("Bir vaqtda %1 tagacha hisob ulash mumkin. Telegram Premium bilan — 4 tagacha.").arg(accountLimit)
+                                        : Tr.t("Bir vaqtda %1 tagacha hisob ulash mumkin.").arg(accountLimit),
+                       accountLimit < 4 ? [{ t: "OK" }, { t: Tr.t("Premium haqida"), run: () => nav.push(Qt.createComponent("PremiumPage.qml"), {}) }]
+                                        : [{ t: "OK" }])
+            return
+        }
+        switchingTo = -1
+        _add.start()
+    }
+    property Timer _add: Timer { interval: 120; onTriggered: if (!accounts.add(true)) store.switchingTo = 0 }
+    function notifyOther(p) {
+        if (inFront && !Prefs.inAppPreview)
+            return
+        const who = p.kind === "group" && Prefs.lockNames && p.sender ? p.sender + ": " : ""
+        const body = p.preview ? preview(p.content, { type: { is_channel: p.kind === "channel" } }) : Tr.t("Yangi xabar")
+        td.notify(Prefs.lockNames ? p.chat + (p.account ? " → " + p.account : "") : "Nullgram",
+                  who + body, inFront && !Prefs.inAppSounds)
+    }
+
     // ---- outside the app: banners, the tile, being online ------------------------
     readonly property bool inFront: Qt.application.state === Qt.ApplicationActive
     function notify(chatId, m, full) {
@@ -667,7 +785,9 @@ QtObject {
             return
         const group = c.type["@type"] === "chatTypeBasicGroup" || (c.type["@type"] === "chatTypeSupergroup" && !c.type.is_channel)
         const who = group && Prefs.lockNames ? senderName(m.sender_id, true) : ""
-        td.notify(Prefs.lockNames ? title(c) : "Nullgram", (who ? who + ": " : "") + (full ? preview(m.content, c) : Tr.t("Yangi xabar")),
+        // (2+ accounts: whose, «Chat → Ism» as the others' -- Telegram Android's; names off: none, iOS's)
+        const mine = accounts.count > 1 && me && me.first_name ? " → " + me.first_name : ""
+        td.notify(Prefs.lockNames ? title(c) + mine : "Nullgram", (who ? who + ": " : "") + (full ? preview(m.content, c) : Tr.t("Yangi xabar")),
                   inFront && !Prefs.inAppSounds)
     }
 
@@ -687,8 +807,10 @@ QtObject {
             rows.sort((a, b) => store.before(a.order, b.order) ? -1 : 1)
             // the count as the Bildirishnomalar page has it (NISHON HISOBLAGICHI): TDLib's own when it is chats with the channels
             const counted = rows.filter((r) => Prefs.badgeChannels || !(r.c.type["@type"] === "chatTypeSupergroup" && r.c.type.is_channel))
-            const count = Prefs.badgeChannels && !Prefs.badgeMessages ? store.unreadChats
-                        : counted.reduce((n, r) => n + (Prefs.badgeMessages ? r.c.unread_count : 1), 0)
+            // (+ the other accounts' unread chats while they are kept on, «Barcha hisoblardan»: chats, also when
+            // this one's are counted as messages -- the others' messages are not known)
+            const count = (Prefs.badgeChannels && !Prefs.badgeMessages ? store.unreadChats
+                           : counted.reduce((n, r) => n + (Prefs.badgeMessages ? r.c.unread_count : 1), 0)) + accounts.othersUnread
             const lines = rows.slice(0, 3).map((r) => store.title(r.c) + ": " +
                                                (r.c.last_message ? store.preview(r.c.last_message.content, r.c) : ""))
             if (td)
@@ -1258,6 +1380,9 @@ QtObject {
         const words = plain(content)
         if (words !== null)
             return words
+        const cp = cardPreview(content)
+        if (cp !== "")
+            return cp
         const caption = content.caption ? content.caption.text : ""
         if (t === "messageSticker" && content.sticker.emoji)
             return content.sticker.emoji + " " + Tr.t("Stiker")
@@ -1800,10 +1925,13 @@ QtObject {
     // `directTopic`: a subscriber's thread in an administered channel direct messages chat
     // `local`: only what TDLib has without asking the server (only_local; Telegram X opens a chat so), up to
     // the first message it lacks -- consecutive, as TDLib keeps them
-    function history(chatId, from, limit, done, got, thread, directTopic, local) {
+    function history(chatId, from, limit, done, got, thread, directTopic, local, forumTopic) {
         got = got || []
         const req = directTopic
             ? { "@type": "getDirectMessagesChatTopicHistory", chat_id: chatId, topic_id: directTopic,
+                from_message_id: from, offset: 0, limit: limit - got.length }
+            : forumTopic
+            ? { "@type": "getForumTopicHistory", chat_id: chatId, forum_topic_id: forumTopic,
                 from_message_id: from, offset: 0, limit: limit - got.length }
             : thread
             ? { "@type": "getMessageThreadHistory", chat_id: chatId, message_id: thread, from_message_id: from,
@@ -1825,14 +1953,16 @@ QtObject {
             if (msgs.length === 0 || got.length >= limit)
                 done(got, false)
             else
-                store.history(chatId, msgs[msgs.length - 1].id, limit, done, got, thread, directTopic, local)
+                store.history(chatId, msgs[msgs.length - 1].id, limit, done, got, thread, directTopic, local, forumTopic)
         })
     }
 
-    // a message in a post's comments goes to its thread; in a channel DM inbox to its directMessages topic
-    function topic(thread, directTopic) {
+    // a message in a post's comments goes to its thread; in a channel DM inbox to its directMessages topic; in a forum to its topic
+    function topic(thread, directTopic, forumTopic) {
         if (directTopic)
             return { "@type": "messageTopicDirectMessages", direct_messages_chat_topic_id: directTopic }
+        if (forumTopic)
+            return { "@type": "messageTopicForum", forum_topic_id: forumTopic }
         return thread ? { "@type": "messageTopicThread", message_thread_id: thread } : null
     }
     function sendOpts(silent, paidStars, schedule) {
@@ -1848,11 +1978,27 @@ QtObject {
 
     // silent: the subscribers get it without a sound (a channel's 🔔 off)
     // marks: the formatting given in the field (textEntity's), [] for none
-    function sendText(chatId, text, replyTo, thread, silent, marks, directTopic, paidStars, schedule) {
-        const req = { "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+    // the emojis a message of only one of goes as a dice (Telegram's apps do so: 🎲 alone is thrown, not
+    // written); the server's list comes in updateDiceEmojis
+    property var diceEmojis: ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"]
+    function diceOf(text, marks) {
+        if (marks && marks.length)
+            return ""
+        const t = (text || "").trim().replace(/\uFE0F/g, "")
+        for (const e of diceEmojis)
+            if (e.replace(/\uFE0F/g, "") === t)
+                return e
+        return ""
+    }
+    function sendText(chatId, text, replyTo, thread, silent, marks, directTopic, paidStars, schedule, linkPreviewOptions, forumTopic) {
+        const dice = diceOf(text, marks)
+        const content = dice ? { "@type": "inputMessageDice", emoji: dice, clear_draft: true }
+            : { "@type": "inputMessageText", text: { "@type": "formattedText", text: text, entities: marks || [] } }
+        if (linkPreviewOptions && !dice)
+            content.link_preview_options = linkPreviewOptions
+        const req = { "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic),
                       options: sendOpts(silent, paidStars, schedule),
-                      input_message_content: { "@type": "inputMessageText",
-                                               text: { "@type": "formattedText", text: text, entities: marks || [] } } }
+                      input_message_content: content }
         if (replyTo)
             req.reply_to = { "@type": "inputMessageReplyToMessage", message_id: replyTo }
         send(req, check)
@@ -1861,7 +2007,7 @@ QtObject {
     // files from the phone (td.recent's): pictures and videos together as an album when there are
     // several (unless `apart`), the rest one by one; the field's words ({ text, marks }) go under the
     // first. asFiles: all as documents; a picture or video with `spoiler` goes hidden under one
-    function sendFiles(chatId, files, caption, replyTo, asFiles, thread, silent, apart, directTopic, paidStars, schedule) {
+    function sendFiles(chatId, files, caption, replyTo, asFiles, thread, silent, apart, directTopic, paidStars, schedule, forumTopic) {
         const options = sendOpts(silent, paidStars, schedule)
         const text = { "@type": "formattedText", text: caption ? caption.text : "", entities: caption ? caption.marks : [] }
         // (TDLib 1.8.68: the file and its sizes go in an inputPhoto, inputVideo... of their own)
@@ -1897,18 +2043,18 @@ QtObject {
         const rest = contents.filter((c) => album.indexOf(c) < 0)
         if (album.length > 1 && !apart) {
             for (let k = 0; k < album.length; k += 10)
-                send({ "@type": "sendMessageAlbum", chat_id: chatId, topic_id: topic(thread, directTopic), reply_to: k ? null : reply, options: options,
+                send({ "@type": "sendMessageAlbum", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic), reply_to: k ? null : reply, options: options,
                        input_message_contents: album.slice(k, k + 10) }, check)
         } else {
             rest.unshift(...album)
         }
         for (const c of rest)
-            send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic), reply_to: reply, options: options,
+            send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic), reply_to: reply, options: options,
                    input_message_content: c }, check)
     }
 
-    function sendVoice(chatId, path, duration, waveform, replyTo, thread, silent, directTopic, paidStars, schedule) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+    function sendVoice(chatId, path, duration, waveform, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic),
                options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageVoiceNote",
@@ -1917,8 +2063,8 @@ QtObject {
     }
 
     // a round video (384×384 square MP4, as Telegram's apps send them)
-    function sendRound(chatId, path, duration, replyTo, thread, silent, directTopic, paidStars, schedule) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+    function sendRound(chatId, path, duration, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic),
                options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageVideoNote", self_destruct_type: null,
@@ -1926,16 +2072,16 @@ QtObject {
                                                       thumbnail: null, duration: duration, length: 384 } } }, check)
     }
     // a sticker or a GIF from the panel (TDLib has them already: sent by their file's id, nothing uploaded)
-    function sendSticker(chatId, st, replyTo, thread, silent, directTopic, paidStars, schedule) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+    function sendSticker(chatId, st, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic),
                options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageSticker", emoji: st.emoji || "",
                                         sticker: { "@type": "inputSticker", sticker: { "@type": "inputFileId", id: st.sticker.id },
                                                    width: st.width, height: st.height } } }, check)
     }
-    function sendGif(chatId, a, replyTo, thread, silent, directTopic, paidStars, schedule) {
-        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic),
+    function sendGif(chatId, a, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic) {
+        send({ "@type": "sendMessage", chat_id: chatId, topic_id: topic(thread, directTopic, forumTopic),
                options: sendOpts(silent, paidStars, schedule),
                reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
                input_message_content: { "@type": "inputMessageAnimation",
@@ -1977,10 +2123,13 @@ QtObject {
             || [0xa9, 0xae, 0x203c, 0x2049, 0x2122, 0x2139, 0x24c2, 0x3030, 0x303d, 0x3297, 0x3299].indexOf(c) >= 0
     }
 
-    function editText(chatId, messageId, text, marks) {
+    function editText(chatId, messageId, text, marks, linkPreviewOptions) {
+        const content = { "@type": "inputMessageText",
+                          text: { "@type": "formattedText", text: text, entities: marks || [] } }
+        if (linkPreviewOptions)
+            content.link_preview_options = linkPreviewOptions
         send({ "@type": "editMessageText", chat_id: chatId, message_id: messageId,
-               input_message_content: { "@type": "inputMessageText",
-                                        text: { "@type": "formattedText", text: text, entities: marks || [] } } }, check)
+               input_message_content: content }, check)
     }
 
     function forward(toChat, fromChat, ids, copy, done) {
@@ -2910,4 +3059,1808 @@ QtObject {
         send({ "@type": "deleteMessages", chat_id: chatId, message_ids: ids, revoke: true }, done || check)
     }
 
+    // --- havola ko'rinishi (agy/havola-korinish) ---
+    function linkPreviewOptions(opts) {
+        if (!opts)
+            return null
+        return {
+            "@type": "linkPreviewOptions",
+            is_disabled: !!opts.is_disabled,
+            url: opts.url || "",
+            force_small_media: !!opts.force_small_media,
+            force_large_media: !!opts.force_large_media,
+            show_above_text: !!opts.show_above_text
+        }
+    }
+
+    function getLinkPreview(text, marks, opts, done) {
+        send({
+            "@type": "getLinkPreview",
+            text: { "@type": "formattedText", text: text || "", entities: marks || [] },
+            link_preview_options: linkPreviewOptions(opts)
+        }, (r) => {
+            if (done)
+                done(r && r["@type"] === "linkPreview" ? r : null, r)
+        })
+    }
+
+    function _lpPhotoPick(photo, wantW) {
+        if (!photo || !photo.sizes || !photo.sizes.length)
+            return null
+        const sizes = photo.sizes
+        let best = sizes[sizes.length - 1]
+        for (const z of sizes) {
+            if (z.width >= wantW) {
+                best = z
+                break
+            }
+        }
+        return {
+            file: best.photo || null,
+            w: best.width || 1,
+            h: best.height || 1,
+            mini: photo.minithumbnail ? (photo.minithumbnail.data || "") : ""
+        }
+    }
+
+    function _lpStillThumb(th) {
+        if (!th || !th.format)
+            return null
+        const f = th.format["@type"]
+        if (f !== "thumbnailFormatJpeg" && f !== "thumbnailFormatWebp" && f !== "thumbnailFormatPng" && f !== "thumbnailFormatGif")
+            return null
+        return { file: th.file || null, w: th.width || 1, h: th.height || 1 }
+    }
+
+    function linkPreviewInfo(lp) {
+        if (!lp || lp["@type"] !== "linkPreview")
+            return null
+        const url = lp.url || ""
+        const displayUrl = lp.display_url || url
+        let site = lp.site_name || ""
+        const title = lp.title || ""
+        const desc = lp.description ? (lp.description.text || "") : ""
+        if (!site && !title && displayUrl) {
+            const m = displayUrl.match(/^(?:https?:\/\/)?(?:www\.)?([^\/?#]+)/i)
+            site = m ? m[1] : displayUrl
+        }
+        const showLarge = !!lp.show_large_media
+        const hasLarge = !!lp.has_large_media
+        const mediaAbove = !!lp.show_media_above_description
+        const aboveText = !!lp.show_above_text
+        const wantW = showLarge ? 640 : 240
+
+        let file = null, mini = "", w = 1, h = 1, isVideo = false, dur = 0
+        const tp = lp.type || null
+        const tt = tp ? tp["@type"] : ""
+        const usePhoto = (p) => {
+            const k = _lpPhotoPick(p, wantW)
+            if (k) {
+                file = k.file
+                mini = k.mini
+                w = k.w
+                h = k.h
+            }
+        }
+        const useThumb = (th, mth, dw, dh) => {
+            const k = _lpStillThumb(th)
+            if (k) {
+                file = k.file
+                w = k.w
+                h = k.h
+            } else if (dw && dh) {
+                w = dw
+                h = dh
+            }
+            if (mth && mth.data)
+                mini = mth.data
+        }
+
+        if (tt === "linkPreviewTypeArticle" || tt === "linkPreviewTypePhoto" || tt === "linkPreviewTypeApp" || tt === "linkPreviewTypeWebApp") {
+            usePhoto(tp.photo)
+        } else if (tt === "linkPreviewTypeVideo") {
+            isVideo = true
+            const v = tp.video
+            dur = v ? (v.duration || 0) : 0
+            if (tp.cover)
+                usePhoto(tp.cover)
+            else if (v)
+                useThumb(v.thumbnail, v.minithumbnail, v.width, v.height)
+        } else if (tt === "linkPreviewTypeEmbeddedVideoPlayer" || tt === "linkPreviewTypeEmbeddedAnimationPlayer") {
+            isVideo = true
+            dur = tp.duration || 0
+            if (tp.thumbnail)
+                usePhoto(tp.thumbnail)
+            if (tp.width && tp.height && w === 1 && h === 1) {
+                w = tp.width
+                h = tp.height
+            }
+        } else if (tt === "linkPreviewTypeExternalVideo") {
+            isVideo = true
+            dur = tp.duration || 0
+            if (tp.width && tp.height) {
+                w = tp.width
+                h = tp.height
+            }
+        } else if (tt === "linkPreviewTypeAnimation" && tp.animation) {
+            isVideo = true
+            dur = tp.animation.duration || 0
+            useThumb(tp.animation.thumbnail, tp.animation.minithumbnail, tp.animation.width, tp.animation.height)
+        } else if (tt === "linkPreviewTypeVideoNote" && tp.video_note) {
+            isVideo = true
+            dur = tp.video_note.duration || 0
+            useThumb(tp.video_note.thumbnail, tp.video_note.minithumbnail, tp.video_note.length, tp.video_note.length)
+        } else if (tt === "linkPreviewTypeAlbum" && tp.media && tp.media.length) {
+            const first = tp.media[0]
+            if (first["@type"] === "linkPreviewAlbumMediaVideo") {
+                isVideo = true
+                if (first.video) {
+                    dur = first.video.duration || 0
+                    useThumb(first.video.thumbnail, first.video.minithumbnail, first.video.width, first.video.height)
+                }
+            } else if (first.photo) {
+                usePhoto(first.photo)
+            }
+        } else if ((tt === "linkPreviewTypeChat" || tt === "linkPreviewTypeUser") && tp.photo) {
+            usePhoto(tp.photo)
+        } else if (tt === "linkPreviewTypeDocument" && tp.document) {
+            useThumb(tp.document.thumbnail, tp.document.minithumbnail, 1, 1)
+        } else if (tt === "linkPreviewTypeAudio" && tp.audio) {
+            useThumb(tp.audio.album_cover_thumbnail, tp.audio.album_cover_minithumbnail, 1, 1)
+        } else if (tt === "linkPreviewTypeSticker" && tp.sticker) {
+            useThumb(tp.sticker.thumbnail, null, tp.sticker.width, tp.sticker.height)
+        } else if (tp && tp.photo) {
+            usePhoto(tp.photo)
+        }
+
+        return {
+            url: url,
+            displayUrl: displayUrl,
+            site: site,
+            title: title,
+            desc: desc,
+            showLarge: showLarge,
+            hasLarge: hasLarge,
+            mediaAbove: mediaAbove,
+            aboveText: aboveText,
+            isVideo: isVideo,
+            dur: dur,
+            file: file,
+            mini: mini,
+            w: w,
+            h: h,
+            hasMedia: !!(file || mini)
+        }
+    }
+
+
+    // --- agy/qidiruv-tablar ---
+    // global message search with an optional TDLib SearchMessagesFilter and string offset pagination:
+    // done(messages, nextOffset, totalCount, err)
+    function searchMessagesFiltered(q, filterType, offset, limit, done) {
+        const req = {
+            "@type": "searchMessages",
+            chat_list: null,
+            query: q || "",
+            offset: offset || "",
+            limit: limit || 30,
+            filter: filterType ? { "@type": filterType } : null,
+            chat_type_filter: null,
+            min_date: 0,
+            max_date: 0
+        }
+        send(req, (r) => {
+            if (r["@type"] === "error") {
+                console.warn("nullgram: searchMessages", filterType || "", r.code, r.message)
+                if (done)
+                    done([], "", 0, r.message || Tr.t("Bo'lmadi"))
+                return
+            }
+            if (done)
+                done(r.messages || [], r.next_offset || "", r.total_count || 0, "")
+        })
+    }
+
+    // --- agy/eslatma-tarjima ---
+    function searchUnreadMentions(chatId, fromId, done) {
+        send({ "@type": "searchChatMessages", chat_id: chatId, topic_id: null, query: "", sender_id: null,
+               from_message_id: fromId || 0, offset: 0, limit: 20,
+               filter: { "@type": "searchMessagesFilterUnreadMention" } }, (r) => {
+            if (!done)
+                return
+            if (r["@type"] === "foundChatMessages")
+                done(r.messages || [], "")
+            else
+                done([], r.message || "")
+        })
+    }
+
+    function searchUnreadReactions(chatId, fromId, done) {
+        send({ "@type": "searchChatMessages", chat_id: chatId, topic_id: null, query: "", sender_id: null,
+               from_message_id: fromId || 0, offset: 0, limit: 20,
+               filter: { "@type": "searchMessagesFilterUnreadReaction" } }, (r) => {
+            if (!done)
+                return
+            if (r["@type"] === "foundChatMessages")
+                done(r.messages || [], "")
+            else
+                done([], r.message || "")
+        })
+    }
+
+    function readAllMentions(chatId, done) {
+        send({ "@type": "readAllChatMentions", chat_id: chatId }, done || check)
+    }
+
+    function readAllReactions(chatId, done) {
+        send({ "@type": "readAllChatReactions", chat_id: chatId }, done || check)
+    }
+
+    function viewMessage(chatId, msgId) {
+        if (!chatId || !msgId)
+            return
+        send({ "@type": "viewMessages", chat_id: chatId, message_ids: [msgId], force_read: true })
+    }
+
+    function translateErrorText(r) {
+        const msg = r && r.message ? String(r.message) : ""
+        const up = msg.toUpperCase()
+        if (up.indexOf("PREMIUM") >= 0)
+            return Tr.t("Bu tarjima uchun Telegram Premium kerak")
+        if ((r && r.code === 429) || up.indexOf("FLOOD") >= 0 || up.indexOf("TOO_MANY") >= 0)
+            return Tr.t("Juda ko'p so'rov. Birozdan keyin urinib ko'ring")
+        if (up.indexOf("LANGUAGE") >= 0 || up.indexOf("UNSUPPORTED") >= 0 || up.indexOf("TRANSLATION_DISABLED") >= 0)
+            return Tr.t("Bu tilga tarjima hozircha mavjud emas")
+        if (up.indexOf("EMPTY") >= 0 || up.indexOf("MESSAGE_ID_INVALID") >= 0)
+            return Tr.t("Bu xabarda tarjima qilinadigan matn yo'q")
+        return msg ? Tr.f("Tarjima qilib bo'lmadi: %1", msg) : Tr.t("Tarjima qilib bo'lmadi")
+    }
+
+    function translateMessage(chatId, msgId, langCode, done) {
+        const to = langCode || Tr.lang || "uz"
+        send({ "@type": "translateMessageText", chat_id: chatId, message_id: msgId,
+               to_language_code: to, tone: "" }, (r) => {
+            if (!done)
+                return
+            if (r["@type"] === "formattedText") {
+                const raw = r.text || ""
+                const txt = r.entities && r.entities.length
+                    ? raw
+                    : raw.replace(/<\/?(b|i|u|s|code|pre)>/g, "").replace(/\*\*|__/g, "")
+                done(true, txt, r, "")
+                return
+            }
+            done(false, "", null, store.translateErrorText(r))
+        })
+    }
+
+    // --- agy/avtotoldirish ---
+    // search group/supergroup members for @ mention autocomplete (TDLib 1.8.68: searchChatMembers + chatMembersFilterMention)
+    function searchChatMembers(chatId, query, topicId, limit, done) {
+        if (!chatId) {
+            if (done)
+                done([])
+            return
+        }
+        send({ "@type": "searchChatMembers", chat_id: chatId, query: query || "", limit: limit || 20,
+               filter: { "@type": "chatMembersFilterMention", topic_id: topicId || null } }, (r) => {
+            if (!done)
+                return
+            if (!r || r["@type"] !== "chatMembers") {
+                done([])
+                return
+            }
+            const uids = []
+            for (const m of (r.members || [])) {
+                const s = m && m.member_id
+                if (s && s["@type"] === "messageSenderUser" && s.user_id && uids.indexOf(s.user_id) < 0)
+                    uids.push(s.user_id)
+            }
+            let left = 0
+            const finish = () => {
+                const list = []
+                for (const id of uids) {
+                    const u = users[id]
+                    if (u && (!u.type || u.type["@type"] !== "userTypeDeleted"))
+                        list.push(u)
+                }
+                done(list)
+            }
+            for (const id of uids) {
+                if (!users[id]) {
+                    left++
+                    send({ "@type": "getUser", user_id: id }, (u) => {
+                        if (u && u["@type"] === "user")
+                            users[u.id] = u
+                        if (--left === 0)
+                            finish()
+                    })
+                }
+            }
+            if (left === 0)
+                finish()
+        })
+    }
+
+    // search emoji suggestions by keyword (TDLib 1.8.68: searchEmojis -> emojiKeywords / emojis)
+    function searchEmojis(query, done) {
+        const q = (query || "").trim()
+        if (!q) {
+            if (done)
+                done([])
+            return
+        }
+        const prefLang = (Prefs.lang || Tr.lang || "en").toLowerCase()
+        const langs = prefLang && prefLang !== "en" ? [prefLang, "en"] : ["en"]
+        send({ "@type": "searchEmojis", text: q, input_language_codes: langs }, (r) => {
+            if (!done)
+                return
+            const out = []
+            if (r && r["@type"] === "emojiKeywords" && r.emoji_keywords) {
+                for (const k of r.emoji_keywords) {
+                    if (k && k.emoji && out.indexOf(k.emoji) < 0)
+                        out.push(k.emoji)
+                }
+            } else if (r && r["@type"] === "emojis" && r.emojis) {
+                for (const e of r.emojis) {
+                    if (e && out.indexOf(e) < 0)
+                        out.push(e)
+                }
+            }
+            done(out)
+        })
+    }
+
+    // per-chat local hashtag history (up to 50 most recent tags, persisted in Prefs.recentHashtags)
+    function _hashtagMap() {
+        try {
+            const o = Prefs.recentHashtags ? JSON.parse(Prefs.recentHashtags) : {}
+            return o && typeof o === "object" && !Array.isArray(o) ? o : {}
+        } catch (e) {
+            return {}
+        }
+    }
+
+    function chatHashtags(chatId) {
+        if (!chatId)
+            return []
+        const arr = _hashtagMap()[String(chatId)]
+        return Array.isArray(arr) ? arr.slice(0, 50) : []
+    }
+
+    function recordHashtags(chatId, text) {
+        if (!chatId || !text || text.indexOf("#") < 0)
+            return
+        const re = /(?:^|[\s(\["'«])#([A-Za-z0-9_\u00C0-\u024F\u0400-\u052F\u1E00-\u1EFF]+)/g
+        const found = []
+        let m
+        while ((m = re.exec(text)) !== null) {
+            if (m[1])
+                found.push(m[1])
+        }
+        if (!found.length)
+            return
+        const map = _hashtagMap()
+        const key = String(chatId)
+        const cur = Array.isArray(map[key]) ? map[key].slice() : []
+        for (const tag of found) {
+            const low = tag.toLowerCase()
+            for (let i = cur.length - 1; i >= 0; i--) {
+                if (String(cur[i]).toLowerCase() === low)
+                    cur.splice(i, 1)
+            }
+            cur.unshift(tag)
+        }
+        map[key] = cur.slice(0, 50)
+        Prefs.recentHashtags = JSON.stringify(map)
+    }
+
+    function filterHashtags(chatId, query) {
+        const list = chatHashtags(chatId)
+        const q = fold((query || "").trim())
+        if (!q)
+            return list
+        const pref = [], sub = []
+        for (const tag of list) {
+            const f = fold(tag)
+            if (f.indexOf(q) === 0)
+                pref.push(tag)
+            else if (f.indexOf(q) > 0)
+                sub.push(tag)
+        }
+        return pref.concat(sub)
+    }
+
+    // --- agy/bot-tugmalar ---
+    function botUsernameOf(uid) {
+        const u = uid ? users[uid] : null
+        const un = u && u.usernames
+        if (!un)
+            return ""
+        if (un.active_usernames && un.active_usernames.length)
+            return un.active_usernames[0]
+        return un.editable_username || ""
+    }
+
+    function inlineKeyboardRows(rm) {
+        if (!rm || rm["@type"] !== "replyMarkupInlineKeyboard" || !rm.rows || !rm.rows.length)
+            return null
+        const out = []
+        for (const row of rm.rows) {
+            if (!row || !row.length)
+                continue
+            const btns = []
+            for (const b of row) {
+                if (!b)
+                    continue
+                const tp = b.type || {}
+                const tt = tp["@type"] || ""
+                let kind = "unsupported"
+                const item = { text: b.text || "", kind: "unsupported", url: "", data: "", copyText: "", query: "", inCurrent: false, userId: 0 }
+                if (tt === "inlineKeyboardButtonTypeUrl") {
+                    kind = "url"
+                    item.url = tp.url || ""
+                } else if (tt === "inlineKeyboardButtonTypeCallback") {
+                    kind = "callback"
+                    item.data = tp.data || ""
+                } else if (tt === "inlineKeyboardButtonTypeCopyText") {
+                    kind = "copy"
+                    item.copyText = tp.text || ""
+                } else if (tt === "inlineKeyboardButtonTypeSwitchInline") {
+                    kind = "switch_inline"
+                    item.query = tp.query || ""
+                    item.inCurrent = !!(tp.target_chat && tp.target_chat["@type"] === "targetChatCurrent")
+                } else if (tt === "inlineKeyboardButtonTypeUser") {
+                    kind = "user"
+                    item.userId = tp.user_id || 0
+                } else if (tt === "inlineKeyboardButtonTypeLoginUrl") {
+                    kind = "login_url"
+                } else if (tt === "inlineKeyboardButtonTypeBuy") {
+                    kind = "buy"
+                } else if (tt === "inlineKeyboardButtonTypeWebApp") {
+                    kind = "web_app"
+                } else if (tt === "inlineKeyboardButtonTypeCallbackGame") {
+                    kind = "game"
+                }
+                item.kind = kind
+                btns.push(item)
+            }
+            if (btns.length)
+                out.push(btns)
+        }
+        return out.length ? out : null
+    }
+
+    function replyKeyboardInfo(rm, msgId) {
+        if (!rm || rm["@type"] !== "replyMarkupShowKeyboard" || !rm.rows || !rm.rows.length)
+            return null
+        const rows = []
+        for (const row of rm.rows) {
+            if (!row || !row.length)
+                continue
+            const btns = []
+            for (const b of row) {
+                if (!b)
+                    continue
+                const tt = b.type ? (b.type["@type"] || "") : ""
+                btns.push({ text: b.text || "", kind: tt === "keyboardButtonTypeText" || !tt ? "text" : "unsupported" })
+            }
+            if (btns.length)
+                rows.push(btns)
+        }
+        if (!rows.length)
+            return null
+        return {
+            msgId: msgId || 0,
+            rows: rows,
+            oneTime: !!rm.one_time,
+            resize: !!rm.resize_keyboard,
+            persistent: !!rm.is_persistent,
+            personal: !!rm.is_personal,
+            placeholder: rm.input_field_placeholder || ""
+        }
+    }
+
+    function botCallback(chatId, messageId, payload, done) {
+        send({
+            "@type": "getCallbackQueryAnswer",
+            chat_id: chatId,
+            message_id: messageId,
+            payload: payload
+        }, (r) => {
+            if (done)
+                done(r)
+        })
+    }
+
+    function startBot(botUserId, chatId, parameter, done) {
+        send({
+            "@type": "sendBotStartMessage",
+            bot_user_id: botUserId,
+            chat_id: chatId,
+            parameter: parameter || ""
+        }, done || check)
+    }
+
+    function deleteReplyMarkup(chatId, messageId, done) {
+        send({
+            "@type": "deleteChatReplyMarkup",
+            chat_id: chatId,
+            message_id: messageId
+        }, done || check)
+    }
+
+    function loadBotCommands(chatId, done) {
+        const c = chats[chatId]
+        if (!c || !done) {
+            if (done)
+                done([], "")
+            return
+        }
+        const t = c.type["@type"]
+        if (t === "chatTypePrivate") {
+            const uid = c.type.user_id
+            const u = users[uid]
+            if (!u || u.type["@type"] !== "userTypeBot") {
+                done([], "")
+                return
+            }
+            send({ "@type": "getUserFullInfo", user_id: uid }, (r) => {
+                if (r["@type"] !== "userFullInfo" || !r.bot_info) {
+                    done([], "")
+                    return
+                }
+                const bi = r.bot_info
+                const uname = store.botUsernameOf(uid)
+                const cmds = (bi.commands || []).map((cmd) => ({
+                    command: (cmd.command || "").replace(/^\/+/, ""),
+                    description: cmd.description || "",
+                    botUserId: uid,
+                    botUsername: uname
+                })).filter((x) => x.command !== "")
+                done(cmds, bi.description || bi.short_description || "")
+            })
+            return
+        }
+        if (t === "chatTypeBasicGroup" || (t === "chatTypeSupergroup" && !c.type.is_channel)) {
+            const req = t === "chatTypeBasicGroup"
+                ? { "@type": "getBasicGroupFullInfo", basic_group_id: c.type.basic_group_id }
+                : { "@type": "getSupergroupFullInfo", supergroup_id: c.type.supergroup_id }
+            send(req, (r) => {
+                const groups = (r && r.bot_commands) || []
+                const cmds = []
+                for (const bc of groups) {
+                    const uname = store.botUsernameOf(bc.bot_user_id)
+                    for (const cmd of (bc.commands || [])) {
+                        const name = (cmd.command || "").replace(/^\/+/, "")
+                        if (name)
+                            cmds.push({
+                                command: name,
+                                description: cmd.description || "",
+                                botUserId: bc.bot_user_id || 0,
+                                botUsername: uname
+                            })
+                    }
+                }
+                done(cmds, "")
+            })
+            return
+        }
+        done([], "")
+    }
+
+    // --- agy/kartochkalar ---
+    readonly property var _cardTypes: ({
+        messageContact: "contact",
+        messageCall: "call",
+        messageStory: "story",
+        messageGift: "gift",
+        messageUpgradedGift: "gift",
+        messageDice: "dice",
+        messageGame: "game",
+        messageChecklist: "checklist",
+        messagePaidMedia: "paid",
+        messageGiveaway: "giveaway",
+        messageGiveawayWinners: "giveawayWinners",
+        messageInvoice: "invoice"
+    })
+
+    function isCardType(t) {
+        return !!_cardTypes[t]
+    }
+
+    function cardPreview(content) {
+        if (!content)
+            return ""
+        const t = content["@type"]
+        if (t === "messageContact" && content.contact) {
+            const c = content.contact
+            const name = ((c.first_name || "") + " " + (c.last_name || "")).trim()
+            return name ? Tr.t("Kontakt") + ": " + name : Tr.t("Kontakt")
+        }
+        if (t === "messageCall")
+            return Tr.t(content.is_video ? "Video qo'ng'iroq" : "Qo'ng'iroq")
+        if (t === "messageStory")
+            return Tr.t("Hikoya")
+        if (t === "messageDice")
+            return (content.emoji || "🎲") + (content.value > 0 ? " " + content.value : "")
+        if (t === "messageGame" && content.game)
+            return content.game.title ? "🎮 " + content.game.title : Tr.t("O'yin")
+        if (t === "messageChecklist" && content.list) {
+            const title = content.list.title && content.list.title.text ? content.list.title.text : ""
+            return title ? "☑ " + title : Tr.t("Ro'yxat")
+        }
+        if (t === "messagePaidMedia")
+            return Tr.t("Pullik media") + (content.star_count > 0 ? " · ⭐ " + count(content.star_count) : "")
+        if (t === "messageInvoice" && content.product_info && content.product_info.title)
+            return Tr.t("To'lov") + ": " + content.product_info.title
+        if (t === "messageUpgradedGift" && content.gift && content.gift.title)
+            return Tr.t("Hadya") + ": " + content.gift.title
+        return ""
+    }
+
+    function formatPhone(raw) {
+        const digits = String(raw || "").replace(/[^0-9]/g, "")
+        if (!digits)
+            return String(raw || "").trim()
+        const m = /^998(\d{2})(\d{3})(\d{2})(\d{2})$/.exec(digits)
+        return m ? "+998 " + m.slice(1).join(" ") : "+" + digits
+    }
+
+    function formatCallDuration(secs) {
+        const d = Math.max(0, Math.floor(secs || 0))
+        if (d <= 0)
+            return ""
+        if (d >= 3600)
+            return Math.floor(d / 3600) + ":" + String(Math.floor(d / 60) % 60).padStart(2, "0") + ":" + String(d % 60).padStart(2, "0")
+        return Math.floor(d / 60) + ":" + String(d % 60).padStart(2, "0")
+    }
+
+    function _photoBestFile(photo) {
+        if (!photo || !photo.sizes || !photo.sizes.length)
+            return null
+        let best = photo.sizes[photo.sizes.length - 1]
+        for (const z of photo.sizes) {
+            if (z.width >= 320) {
+                best = z
+                break
+            }
+        }
+        return best ? best.photo : null
+    }
+
+    function _stickerPicFile(st) {
+        if (!st)
+            return null
+        const fmt = st.format ? st.format["@type"] : ""
+        if (fmt === "stickerFormatTgs" || fmt === "stickerFormatWebp")
+            return st.sticker || null
+        return st.thumbnail ? st.thumbnail.file : null
+    }
+
+    function cardFile(c) {
+        if (!c)
+            return null
+        const t = c["@type"]
+        if (t === "messageContact" && c.contact && c.contact.user_id > 0) {
+            const u = users[c.contact.user_id]
+            return u && u.profile_photo ? u.profile_photo.small : null
+        }
+        if (t === "messageGift" && c.gift)
+            return _stickerPicFile(c.gift.sticker)
+        if (t === "messageUpgradedGift" && c.gift && c.gift.model)
+            return _stickerPicFile(c.gift.model.sticker)
+        if (t === "messageGame" && c.game)
+            return _photoBestFile(c.game.photo)
+        if (t === "messageInvoice" && c.product_info)
+            return _photoBestFile(c.product_info.photo)
+        if (t === "messageGiveaway" && c.sticker)
+            return _stickerPicFile(c.sticker)
+        if (t === "messageDice" && c.final_state && c.final_state["@type"] === "diceStickersRegular")
+            return _stickerPicFile(c.final_state.sticker)
+        return null
+    }
+
+    function cardData(m) {
+        if (!m || !m.content)
+            return null
+        const c = m.content, t = c["@type"]
+        if (!isCardType(t))
+            return null
+        const out = !!m.is_outgoing
+        if (t === "messageContact") {
+            const ct = c.contact || {}
+            const uid = ct.user_id || 0
+            const u = uid > 0 ? users[uid] : null
+            const first = ct.first_name || (u ? u.first_name : "") || ""
+            const last = ct.last_name || (u ? u.last_name : "") || ""
+            const name = (first + " " + last).trim() || formatPhone(ct.phone_number)
+            const tint = tints[Math.abs(uid || name.length) % tints.length]
+            return {
+                kind: "contact",
+                first: first,
+                last: last,
+                name: name,
+                phone: formatPhone(ct.phone_number),
+                rawPhone: ct.phone_number || "",
+                userId: uid,
+                isContact: !!(u && u.is_contact),
+                letters: letters(name),
+                tint: tint
+            }
+        }
+        if (t === "messageCall") {
+            const why = c.discard_reason ? c.discard_reason["@type"] : ""
+            const missed = !out && (why === "callDiscardReasonMissed" || why === "callDiscardReasonDeclined")
+            const cancelled = out && (why === "callDiscardReasonMissed" || why === "callDiscardReasonDeclined")
+            return {
+                kind: "call",
+                video: !!c.is_video,
+                out: out,
+                missed: missed,
+                cancelled: cancelled,
+                declined: why === "callDiscardReasonDeclined",
+                duration: c.duration || 0,
+                durText: formatCallDuration(c.duration || 0)
+            }
+        }
+        if (t === "messageStory") {
+            const cid = c.story_poster_chat_id || 0
+            const sid = c.story_id || 0
+            const ch = cid ? chats[cid] : null
+            const cached = _storyCache[cid + ":" + sid] || null
+            let mini = "", isVideo = false
+            if (cached && cached.content) {
+                if (cached.content["@type"] === "storyContentPhoto" && cached.content.photo && cached.content.photo.minithumbnail)
+                    mini = cached.content.photo.minithumbnail.data || ""
+                else if (cached.content["@type"] === "storyContentVideo" && cached.content.video) {
+                    isVideo = true
+                    if (cached.content.video.minithumbnail)
+                        mini = cached.content.video.minithumbnail.data || ""
+                }
+            }
+            return {
+                kind: "story",
+                chatId: cid,
+                storyId: sid,
+                viaMention: !!c.via_mention,
+                author: ch ? ch.title : "",
+                mini: mini,
+                isVideo: isVideo,
+                expired: false
+            }
+        }
+        if (t === "messageGift" || t === "messageUpgradedGift") {
+            const up = t === "messageUpgradedGift"
+            const g = c.gift || {}
+            const st = up ? (g.model ? g.model.sticker : null) : g.sticker
+            const isTgs = !!(st && st.format && st.format["@type"] === "stickerFormatTgs")
+            const bd = up && g.backdrop && g.backdrop.colors ? g.backdrop.colors : null
+            const hex = (v) => "#" + ((v >>> 0) & 0xffffff).toString(16).padStart(6, "0")
+            return {
+                kind: "gift",
+                upgraded: up,
+                title: up && g.title ? g.title + (g.number ? " #" + g.number : "") : Tr.t("Hadya"),
+                stars: up ? 0 : (g.star_count || 0),
+                text: c.text && c.text.text ? c.text.text : "",
+                tgs: isTgs,
+                bg1: bd ? hex(bd.center_color) : "",
+                bg2: bd ? hex(bd.edge_color) : "",
+                converted: !!c.was_converted,
+                wasUpgraded: !!c.was_upgraded
+            }
+        }
+        if (t === "messageDice") {
+            const st = c.final_state && c.final_state["@type"] === "diceStickersRegular" ? c.final_state.sticker : null
+            const isTgs = !!(st && st.format && st.format["@type"] === "stickerFormatTgs")
+            // 🎰: five animations over each other (Telegram's SlotMachineAnimationNode): the background, the
+            // three reels, the lever; each a TGS whose end shows this value
+            const sm = c.final_state && c.final_state["@type"] === "diceStickersSlotMachine" ? c.final_state : null
+            const part = (x) => x && x.sticker ? x.sticker : null
+            return {
+                kind: "dice",
+                emoji: c.emoji || "🎲",
+                value: c.value || 0,
+                tgs: isTgs,
+                // played from the start only when it has just come (Telegram-iOS plays a dice once, as it
+                // arrives); an old one shows its last frame, the outcome
+                fresh: (m.date || 0) > Date.now() / 1000 - 30,
+                slot: sm ? [part(sm.background), part(sm.left_reel), part(sm.center_reel), part(sm.right_reel),
+                            part(sm.lever)].filter((f) => f) : null
+            }
+        }
+        if (t === "messageGame") {
+            const g = c.game || {}
+            const ph = g.photo
+            const sz = ph && ph.sizes && ph.sizes.length ? ph.sizes[ph.sizes.length - 1] : null
+            return {
+                kind: "game",
+                title: g.title || Tr.t("O'yin"),
+                desc: g.description || "",
+                scoreText: g.text && g.text.text ? g.text.text : "",
+                hasPhoto: !!(ph && ph.sizes && ph.sizes.length),
+                mini: ph && ph.minithumbnail ? (ph.minithumbnail.data || "") : "",
+                w: sz && sz.width > 0 ? sz.width : 16,
+                h: sz && sz.height > 0 ? sz.height : 9
+            }
+        }
+        if (t === "messageChecklist") {
+            const lst = c.list || {}
+            const tasks = (lst.tasks || []).map((tk) => ({
+                id: tk.id,
+                text: tk.text && tk.text.text ? tk.text.text : "",
+                done: !!(tk.completion_date > 0 || tk.completed_by),
+                by: tk.completed_by ? (senderName(tk.completed_by, true) || "") : ""
+            }))
+            return {
+                kind: "checklist",
+                title: lst.title && lst.title.text ? lst.title.text : Tr.t("Vazifalar ro'yxati"),
+                tasks: tasks,
+                canMark: out || !!lst.others_can_mark_tasks_as_done
+            }
+        }
+        if (t === "messagePaidMedia") {
+            const items = c.media || []
+            let mini = "", w = 16, h = 10, videoCount = 0, photoCount = 0
+            for (const it of items) {
+                const itype = it && it["@type"]
+                if (itype === "paidMediaPreview") {
+                    if (!mini && it.minithumbnail)
+                        mini = it.minithumbnail.data || ""
+                    if (it.width > 0 && it.height > 0 && w === 16 && h === 10) {
+                        w = it.width; h = it.height
+                    }
+                    if (it.duration > 0) videoCount++
+                    else photoCount++
+                } else if (itype === "paidMediaPhoto" && it.photo) {
+                    photoCount++
+                    if (!mini && it.photo.minithumbnail)
+                        mini = it.photo.minithumbnail.data || ""
+                } else if (itype === "paidMediaVideo" && it.video) {
+                    videoCount++
+                    if (!mini && it.video.minithumbnail)
+                        mini = it.video.minithumbnail.data || ""
+                }
+            }
+            return {
+                kind: "paid",
+                stars: c.star_count || 0,
+                mediaCount: items.length,
+                photoCount: photoCount,
+                videoCount: videoCount,
+                mini: mini,
+                w: w,
+                h: h
+            }
+        }
+        if (t === "messageGiveaway") {
+            const p = c.parameters || {}
+            const pr = c.prize || {}
+            const ch = p.boosted_chat_id ? chats[p.boosted_chat_id] : null
+            const prizeText = pr["@type"] === "giveawayPrizeStars"
+                ? Tr.f("⭐ %1 yulduz", count(pr.star_count || 0))
+                : Tr.f("%1 oylik Telegram Premium", pr.month_count || 1)
+            const st = c.sticker
+            return {
+                kind: "giveaway",
+                winners: c.winner_count || 1,
+                prize: prizeText,
+                extra: p.prize_description || "",
+                channel: ch ? ch.title : "",
+                extraChats: p.additional_chat_ids ? p.additional_chat_ids.length : 0,
+                until: p.winners_selection_date || 0,
+                onlyNew: !!p.only_new_members,
+                tgs: !!(st && st.format && st.format["@type"] === "stickerFormatTgs")
+            }
+        }
+        if (t === "messageGiveawayWinners") {
+            const pr = c.prize || {}
+            const ch = c.boosted_chat_id ? chats[c.boosted_chat_id] : null
+            const prizeText = pr["@type"] === "giveawayPrizeStars"
+                ? Tr.f("⭐ %1 yulduz", count(pr.star_count || 0))
+                : Tr.f("%1 oylik Telegram Premium", pr.month_count || 1)
+            const wids = c.winner_user_ids || []
+            const names = []
+            for (let k = 0; k < Math.min(5, wids.length); k++) {
+                const n = senderName({ "@type": "messageSenderUser", user_id: wids[k] }, false)
+                names.push(n || ("#" + wids[k]))
+            }
+            return {
+                kind: "giveawayWinners",
+                winners: c.winner_count || wids.length,
+                prize: prizeText,
+                extra: c.prize_description || "",
+                channel: ch ? ch.title : "",
+                names: names,
+                moreNames: Math.max(0, wids.length - names.length),
+                date: c.actual_winners_selection_date || 0,
+                refunded: !!c.was_refunded,
+                unclaimed: c.unclaimed_prize_count || 0
+            }
+        }
+        if (t === "messageInvoice") {
+            const pi = c.product_info || {}
+            const ph = pi.photo
+            const sz = ph && ph.sizes && ph.sizes.length ? ph.sizes[ph.sizes.length - 1] : null
+            return {
+                kind: "invoice",
+                title: pi.title || Tr.t("To'lov"),
+                desc: pi.description && pi.description.text ? pi.description.text : "",
+                currency: c.currency || "",
+                amount: c.total_amount || 0,
+                isTest: !!c.is_test,
+                paid: !!(c.receipt_message_id && c.receipt_message_id > 0),
+                hasPhoto: !!(ph && ph.sizes && ph.sizes.length),
+                mini: ph && ph.minithumbnail ? (ph.minithumbnail.data || "") : "",
+                w: sz && sz.width > 0 ? sz.width : 16,
+                h: sz && sz.height > 0 ? sz.height : 9
+            }
+        }
+        return null
+    }
+
+    function cardGiftForSheet(m) {
+        if (!m || !m.content)
+            return null
+        const c = m.content, t = c["@type"]
+        if (t !== "messageGift" && t !== "messageUpgradedGift")
+            return null
+        const up = t === "messageUpgradedGift"
+        return {
+            "@type": "receivedGift",
+            received_gift_id: "",
+            sender_id: c.sender_id || m.sender_id || null,
+            text: c.text || null,
+            is_private: !!c.is_private,
+            is_saved: !!c.is_saved,
+            is_pinned: false,
+            can_be_upgraded: false,
+            can_be_transferred: false,
+            was_refunded: false,
+            date: m.date || 0,
+            gift: up ? { "@type": "sentGiftUpgraded", gift: c.gift }
+                     : { "@type": "sentGiftRegular", gift: c.gift },
+            sell_star_count: c.sell_star_count || 0,
+            prepaid_upgrade_star_count: c.prepaid_upgrade_star_count || 0
+        }
+    }
+
+    function markChecklistTask(chatId, messageId, taskId, doneNow, cb) {
+        send({
+            "@type": "markChecklistTasksAsDone",
+            chat_id: chatId,
+            message_id: messageId,
+            marked_as_done_task_ids: doneNow ? [taskId] : [],
+            marked_as_not_done_task_ids: doneNow ? [] : [taskId]
+        }, cb || check)
+    }
+
+    // --- agy/forum ---
+    // Forum supergroup topics (TDLib 1.8.68: getForumTopics, forumTopic, forumTopicInfo,
+    // forumTopicIcon, messageTopicForum, getForumTopicHistory, updateForumTopicInfo, updateForumTopic,
+    // createForumTopic, editForumTopic, toggleForumTopicIsClosed, toggleForumTopicIsPinned,
+    // readAllForumTopicMentions, readAllForumTopicReactions)
+    property var forumTopics: ({})      // chatId -> { forum_topic_id -> forumTopic }
+    property int forumTopicsSeen: 0
+    signal forumTopicInfoUpdated(var info)
+    signal forumTopicUpdated(var upd)
+
+    readonly property var forumIconColors: [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F]
+
+    function isForum(c) {
+        if (!c || !c.type || c.type["@type"] !== "chatTypeSupergroup" || c.type.is_channel)
+            return false
+        const g = groups["s" + c.type.supergroup_id]
+        return !!(g && g.is_forum)
+    }
+
+    function canManageTopics(c) {
+        if (!c || !c.type || c.type["@type"] !== "chatTypeSupergroup")
+            return false
+        const g = groups["s" + c.type.supergroup_id]
+        const st = g ? g.status : null
+        if (!st)
+            return false
+        if (st["@type"] === "chatMemberStatusCreator")
+            return true
+        return st["@type"] === "chatMemberStatusAdministrator" && !!(st.rights && st.rights.can_manage_topics)
+    }
+
+    function canCreateTopics(c) {
+        if (!c || !c.type || c.type["@type"] !== "chatTypeSupergroup")
+            return false
+        if (canManageTopics(c))
+            return true
+        const g = groups["s" + c.type.supergroup_id]
+        const st = g ? g.status : null
+        if (!st)
+            return false
+        const k = st["@type"]
+        if (k === "chatMemberStatusBanned" || k === "chatMemberStatusLeft")
+            return false
+        if (k === "chatMemberStatusRestricted")
+            return (!st.permissions || st.permissions.can_create_topics !== false)
+                   && !!(c.permissions && c.permissions.can_create_topics)
+        return !!(c.permissions && c.permissions.can_create_topics)
+    }
+
+    function forumColorHex(colorInt, fallbackId) {
+        if (colorInt && colorInt > 0)
+            return "#" + hex(colorInt)
+        return tints[Math.abs(fallbackId || 0) % tints.length]
+    }
+
+    function forumTopicOf(chatId, topicId) {
+        const m = forumTopics[chatId]
+        return m ? (m[topicId] || null) : null
+    }
+
+    function cacheForumTopic(chatId, t) {
+        if (!chatId || !t || !t.info)
+            return
+        const tid = t.info.forum_topic_id
+        if (!tid)
+            return
+        const map = forumTopics[chatId] || {}
+        map[tid] = t
+        forumTopics[chatId] = map
+    }
+
+    function onForumTopicInfo(info) {
+        if (!info || !info.chat_id || !info.forum_topic_id)
+            return
+        const cid = info.chat_id, tid = info.forum_topic_id
+        const map = forumTopics[cid] || {}
+        const cur = map[tid]
+        if (cur)
+            map[tid] = Object.assign({}, cur, { info: info })
+        else
+            map[tid] = { "@type": "forumTopic", info: info, last_message: null, order: "0", is_pinned: false,
+                         unread_count: 0, last_read_inbox_message_id: 0, last_read_outbox_message_id: 0,
+                         unread_mention_count: 0, unread_reaction_count: 0, unread_poll_vote_count: 0,
+                         notification_settings: null, draft_message: null }
+        forumTopics[cid] = map
+        forumTopicsSeen++
+        forumTopicInfoUpdated(info)
+    }
+
+    function onForumTopic(u) {
+        if (!u || !u.chat_id || !u.forum_topic_id)
+            return
+        const cid = u.chat_id, tid = u.forum_topic_id
+        const map = forumTopics[cid] || {}
+        const cur = map[tid]
+        if (cur) {
+            const next = Object.assign({}, cur)
+            if (u.is_pinned !== undefined)
+                next.is_pinned = !!u.is_pinned
+            if (u.last_read_inbox_message_id !== undefined)
+                next.last_read_inbox_message_id = u.last_read_inbox_message_id
+            if (u.last_read_outbox_message_id !== undefined)
+                next.last_read_outbox_message_id = u.last_read_outbox_message_id
+            if (u.unread_mention_count !== undefined)
+                next.unread_mention_count = u.unread_mention_count || 0
+            if (u.unread_reaction_count !== undefined)
+                next.unread_reaction_count = u.unread_reaction_count || 0
+            if (u.unread_poll_vote_count !== undefined)
+                next.unread_poll_vote_count = u.unread_poll_vote_count || 0
+            if (u.notification_settings !== undefined)
+                next.notification_settings = u.notification_settings
+            map[tid] = next
+            forumTopics[cid] = map
+            forumTopicsSeen++
+        }
+        forumTopicUpdated(u)
+    }
+
+    function getForumTopics(chatId, query, offsetDate, offsetMsgId, offsetTopicId, limit, done) {
+        send({
+            "@type": "getForumTopics",
+            chat_id: chatId,
+            query: query || "",
+            offset_date: offsetDate || 0,
+            offset_message_id: offsetMsgId || 0,
+            offset_forum_topic_id: offsetTopicId || 0,
+            limit: limit || 20
+        }, (r) => {
+            if (r["@type"] === "forumTopics") {
+                const list = r.topics || []
+                for (const t of list)
+                    store.cacheForumTopic(chatId, t)
+                if (list.length)
+                    store.forumTopicsSeen++
+                if (done)
+                    done(list, r.next_offset_date || 0, r.next_offset_message_id || 0,
+                         r.next_offset_forum_topic_id || 0, r.total_count || list.length, "")
+                return
+            }
+            if (done)
+                done([], 0, 0, 0, 0, r.message || Tr.t("Bo'lmadi"))
+        })
+    }
+
+    function createForumTopic(chatId, name, color, done) {
+        send({
+            "@type": "createForumTopic",
+            chat_id: chatId,
+            name: (name || "").trim(),
+            is_name_implicit: false,
+            icon: { "@type": "forumTopicIcon", color: color || forumIconColors[0], custom_emoji_id: "0" }
+        }, (r) => {
+            if (r["@type"] === "forumTopicInfo")
+                store.onForumTopicInfo(r)
+            if (done)
+                done(r)
+        })
+    }
+
+    function editForumTopic(chatId, topicId, name, done) {
+        send({
+            "@type": "editForumTopic",
+            chat_id: chatId,
+            forum_topic_id: topicId,
+            name: (name || "").trim(),
+            edit_icon_custom_emoji: false,
+            icon_custom_emoji_id: "0"
+        }, done || check)
+    }
+
+    function toggleForumTopicClosed(chatId, topicId, closed, done) {
+        send({
+            "@type": "toggleForumTopicIsClosed",
+            chat_id: chatId,
+            forum_topic_id: topicId,
+            is_closed: !!closed
+        }, done || check)
+    }
+
+    function toggleForumTopicPinned(chatId, topicId, pinned, done) {
+        send({
+            "@type": "toggleForumTopicIsPinned",
+            chat_id: chatId,
+            forum_topic_id: topicId,
+            is_pinned: !!pinned
+        }, done || check)
+    }
+
+    function searchForumUnreadMentions(chatId, topicId, fromId, done) {
+        send({
+            "@type": "searchChatMessages",
+            chat_id: chatId,
+            topic_id: { "@type": "messageTopicForum", forum_topic_id: topicId },
+            query: "",
+            sender_id: null,
+            from_message_id: fromId || 0,
+            offset: 0,
+            limit: 20,
+            filter: { "@type": "searchMessagesFilterUnreadMention" }
+        }, (r) => {
+            if (!done)
+                return
+            if (r["@type"] === "foundChatMessages")
+                done(r.messages || [], "")
+            else
+                done([], r.message || "")
+        })
+    }
+
+    function searchForumUnreadReactions(chatId, topicId, fromId, done) {
+        send({
+            "@type": "searchChatMessages",
+            chat_id: chatId,
+            topic_id: { "@type": "messageTopicForum", forum_topic_id: topicId },
+            query: "",
+            sender_id: null,
+            from_message_id: fromId || 0,
+            offset: 0,
+            limit: 20,
+            filter: { "@type": "searchMessagesFilterUnreadReaction" }
+        }, (r) => {
+            if (!done)
+                return
+            if (r["@type"] === "foundChatMessages")
+                done(r.messages || [], "")
+            else
+                done([], r.message || "")
+        })
+    }
+
+    function readAllForumTopicMentions(chatId, topicId, done) {
+        send({ "@type": "readAllForumTopicMentions", chat_id: chatId, forum_topic_id: topicId }, done || check)
+    }
+
+    function readAllForumTopicReactions(chatId, topicId, done) {
+        send({ "@type": "readAllForumTopicReactions", chat_id: chatId, forum_topic_id: topicId }, done || check)
+    }
+
+    // --- agy/inline-botlar ---
+    // Inline bot queries (TDLib 1.8.68: searchPublicChat, userTypeBot.is_inline,
+    // userTypeBot.inline_query_placeholder, getInlineQueryResults, inlineQueryResults,
+    // inlineQueryResultsButton/StartBot/WebApp, inlineQueryResult*, sendInlineQueryResultMessage,
+    // message.via_bot_user_id)
+    property var _inlineBotCache: ({})      // lowercase username -> { isInline, userId, username, placeholder, title }
+    property var _viaBotAsked: ({})         // userId -> true (lazy getUser guard)
+
+    function viaBotName(userId) {
+        if (!userId || userId <= 0)
+            return ""
+        const u = users[userId]
+        if (u) {
+            const un = botUsernameOf(userId)
+            return un || ((u.first_name || "") + " " + (u.last_name || "")).trim()
+        }
+        if (!_viaBotAsked[userId]) {
+            _viaBotAsked[userId] = true
+            send({ "@type": "getUser", user_id: userId }, (r) => {
+                if (r && r["@type"] === "user") {
+                    users[r.id] = r
+                    seenSoon()
+                }
+            })
+        }
+        return ""
+    }
+
+    function _inlineBotInfoFromUser(u, fallbackName) {
+        if (!u || !u.type || u.type["@type"] !== "userTypeBot")
+            return { isInline: false, userId: u ? u.id : 0, username: fallbackName || "", placeholder: "", title: "" }
+        const un = botUsernameOf(u.id) || fallbackName || ""
+        return {
+            isInline: !!u.type.is_inline,
+            userId: u.id,
+            username: un,
+            placeholder: u.type.inline_query_placeholder || "",
+            title: ((u.first_name || "") + " " + (u.last_name || "")).trim() || un
+        }
+    }
+
+    function resolveInlineBot(username, done) {
+        const clean = String(username || "").trim().replace(/^@/, "").toLowerCase()
+        if (clean.length < 3) {
+            if (done)
+                done(null)
+            return
+        }
+        if (_inlineBotCache[clean] !== undefined) {
+            if (done)
+                done(_inlineBotCache[clean])
+            return
+        }
+        // Check already-loaded users first to avoid redundant searchPublicChat
+        for (const k in users) {
+            const u = users[k]
+            if (!u || !u.usernames)
+                continue
+            const actives = u.usernames.active_usernames || []
+            const match = actives.some((x) => String(x || "").toLowerCase() === clean)
+                       || String(u.usernames.editable_username || "").toLowerCase() === clean
+            if (match) {
+                const info = _inlineBotInfoFromUser(u, clean)
+                _inlineBotCache[clean] = info
+                if (done)
+                    done(info)
+                return
+            }
+        }
+        send({ "@type": "searchPublicChat", username: clean }, (c) => {
+            if (!c || c["@type"] !== "chat" || !c.type || c.type["@type"] !== "chatTypePrivate") {
+                const miss = { isInline: false, userId: 0, username: clean, placeholder: "", title: "" }
+                _inlineBotCache[clean] = miss
+                if (done)
+                    done(miss)
+                return
+            }
+            const uid = c.type.user_id
+            const finish = (u) => {
+                const info = _inlineBotInfoFromUser(u, clean)
+                _inlineBotCache[clean] = info
+                if (done)
+                    done(info)
+            }
+            if (users[uid]) {
+                finish(users[uid])
+                return
+            }
+            send({ "@type": "getUser", user_id: uid }, (u) => {
+                if (u && u["@type"] === "user") {
+                    users[u.id] = u
+                    finish(u)
+                } else {
+                    finish(null)
+                }
+            })
+        })
+    }
+
+    function queryInlineBot(botUserId, chatId, query, offset, done) {
+        send({
+            "@type": "getInlineQueryResults",
+            bot_user_id: botUserId,
+            chat_id: chatId,
+            user_location: null,
+            query: query || "",
+            offset: offset || ""
+        }, (r) => {
+            if (!done)
+                return
+            if (r && r["@type"] === "inlineQueryResults") {
+                done(r, "")
+                return
+            }
+            done(null, (r && r.message) || Tr.t("Bo'lmadi"))
+        })
+    }
+
+    function inlineResultInfo(res, queryId) {
+        if (!res || !res["@type"])
+            return null
+        const t = res["@type"]
+        const id = String(res.id || "")
+        const qid = String(queryId || "0")
+        const thumbOf = (th) => th && th.file ? th.file : null
+        const thumbMini = (obj) => obj && obj.minithumbnail ? (obj.minithumbnail.data || "") : ""
+        if (t === "inlineQueryResultPhoto") {
+            const ph = res.photo || {}
+            const sz = ph.sizes && ph.sizes.length ? ph.sizes[ph.sizes.length - 1] : null
+            return {
+                id: id, queryId: qid, grid: true, kind: "photo",
+                title: res.title || "", desc: res.description || "",
+                thumbFile: _photoBestFile(ph), animFile: null, mini: thumbMini(ph),
+                w: sz && sz.width > 0 ? sz.width : 1, h: sz && sz.height > 0 ? sz.height : 1,
+                dur: 0, isTgs: false, badge: ""
+            }
+        }
+        if (t === "inlineQueryResultAnimation") {
+            const a = res.animation || {}
+            return {
+                id: id, queryId: qid, grid: true, kind: "animation",
+                title: res.title || "", desc: "",
+                thumbFile: thumbOf(a.thumbnail), animFile: a.animation || null, mini: thumbMini(a),
+                w: a.width > 0 ? a.width : 4, h: a.height > 0 ? a.height : 3,
+                dur: a.duration || 0, isTgs: false, badge: "GIF"
+            }
+        }
+        if (t === "inlineQueryResultSticker") {
+            const st = res.sticker || {}
+            const isTgs = !!(st.format && st.format["@type"] === "stickerFormatTgs")
+            return {
+                id: id, queryId: qid, grid: true, kind: "sticker",
+                title: st.emoji || "", desc: "",
+                thumbFile: _stickerPicFile(st), animFile: null, mini: "",
+                w: st.width > 0 ? st.width : 1, h: st.height > 0 ? st.height : 1,
+                dur: 0, isTgs: isTgs, badge: ""
+            }
+        }
+        if (t === "inlineQueryResultVideo") {
+            const v = res.video || {}
+            const dur = v.duration || 0
+            return {
+                id: id, queryId: qid, grid: true, kind: "video",
+                title: res.title || "", desc: res.description || "",
+                thumbFile: thumbOf(v.thumbnail), animFile: null, mini: thumbMini(v),
+                w: v.width > 0 ? v.width : 16, h: v.height > 0 ? v.height : 9,
+                dur: dur, isTgs: false, badge: dur > 0 ? formatCallDuration(dur) : "▶"
+            }
+        }
+        if (t === "inlineQueryResultArticle") {
+            return {
+                id: id, queryId: qid, grid: false, kind: "article",
+                title: res.title || res.url || Tr.t("Havola"),
+                desc: res.description || res.url || "",
+                thumbFile: thumbOf(res.thumbnail), animFile: null, mini: "",
+                w: 1, h: 1, dur: 0, isTgs: false, badge: ""
+            }
+        }
+        if (t === "inlineQueryResultAudio") {
+            const au = res.audio || {}
+            const dur = au.duration ? formatCallDuration(au.duration) : ""
+            const perf = au.performer || ""
+            return {
+                id: id, queryId: qid, grid: false, kind: "audio",
+                title: au.title || au.file_name || Tr.t("Musiqa"),
+                desc: perf && dur ? perf + " · " + dur : (perf || dur),
+                thumbFile: thumbOf(au.album_cover_thumbnail), animFile: null, mini: "",
+                w: 1, h: 1, dur: au.duration || 0, isTgs: false, badge: "♪"
+            }
+        }
+        if (t === "inlineQueryResultDocument") {
+            const doc = res.document || {}
+            const sz = doc.document ? size(doc.document.size || doc.document.expected_size || 0) : ""
+            return {
+                id: id, queryId: qid, grid: false, kind: "document",
+                title: res.title || doc.file_name || Tr.t("Fayl"),
+                desc: res.description || (doc.file_name && res.title ? doc.file_name + (sz ? " · " + sz : "") : sz),
+                thumbFile: thumbOf(doc.thumbnail), animFile: null, mini: thumbMini(doc),
+                w: 1, h: 1, dur: 0, isTgs: false, badge: "📄"
+            }
+        }
+        if (t === "inlineQueryResultLocation") {
+            const loc = res.location || {}
+            const coords = loc.latitude !== undefined ? (Number(loc.latitude).toFixed(4) + ", " + Number(loc.longitude).toFixed(4)) : ""
+            return {
+                id: id, queryId: qid, grid: false, kind: "location",
+                title: res.title || Tr.t("Joylashuv"),
+                desc: coords,
+                thumbFile: thumbOf(res.thumbnail), animFile: null, mini: "",
+                w: 1, h: 1, dur: 0, isTgs: false, badge: "📍"
+            }
+        }
+        if (t === "inlineQueryResultVenue") {
+            const ven = res.venue || {}
+            return {
+                id: id, queryId: qid, grid: false, kind: "venue",
+                title: ven.title || Tr.t("Joy"),
+                desc: ven.address || "",
+                thumbFile: thumbOf(res.thumbnail), animFile: null, mini: "",
+                w: 1, h: 1, dur: 0, isTgs: false, badge: "📍"
+            }
+        }
+        if (t === "inlineQueryResultContact") {
+            const ct = res.contact || {}
+            const name = ((ct.first_name || "") + " " + (ct.last_name || "")).trim() || Tr.t("Kontakt")
+            return {
+                id: id, queryId: qid, grid: false, kind: "contact",
+                title: name,
+                desc: formatPhone(ct.phone_number || ""),
+                thumbFile: thumbOf(res.thumbnail), animFile: null, mini: "",
+                w: 1, h: 1, dur: 0, isTgs: false, badge: "👤"
+            }
+        }
+        if (t === "inlineQueryResultVoiceNote") {
+            const vn = res.voice_note || {}
+            return {
+                id: id, queryId: qid, grid: false, kind: "voice",
+                title: res.title || Tr.t("Ovozli xabar"),
+                desc: vn.duration ? formatCallDuration(vn.duration) : "",
+                thumbFile: null, animFile: null, mini: "",
+                w: 1, h: 1, dur: vn.duration || 0, isTgs: false, badge: "🎤"
+            }
+        }
+        if (t === "inlineQueryResultGame") {
+            const g = res.game || {}
+            return {
+                id: id, queryId: qid, grid: false, kind: "game",
+                title: g.title || Tr.t("O'yin"),
+                desc: g.description || "",
+                thumbFile: _photoBestFile(g.photo), animFile: null, mini: thumbMini(g.photo),
+                w: 1, h: 1, dur: 0, isTgs: false, badge: "🎮"
+            }
+        }
+        return {
+            id: id, queryId: qid, grid: false, kind: "other",
+            title: res.title || id, desc: res.description || "",
+            thumbFile: null, animFile: null, mini: "",
+            w: 1, h: 1, dur: 0, isTgs: false, badge: "•"
+        }
+    }
+
+    function sendInlineResult(chatId, queryId, resultId, replyTo, thread, silent, directTopic, paidStars, forumTopic, hideViaBot, done) {
+        const req = {
+            "@type": "sendInlineQueryResultMessage",
+            chat_id: chatId,
+            topic_id: topic(thread, directTopic, forumTopic),
+            reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
+            options: sendOpts(silent, paidStars, null),
+            query_id: String(queryId || "0"),
+            result_id: String(resultId || ""),
+            hide_via_bot: !!hideViaBot
+        }
+        send(req, done || check)
+    }
+
+    // --- agy/sorovnoma-joylashuv ---
+    property int pollOptionLimit: 10
+    property int pollOpenPeriodMax: 600
+    property bool _pollLimitsLoaded: false
+
+    function loadPollLimits(done) {
+        if (_pollLimitsLoaded) {
+            if (done)
+                done(pollOptionLimit, pollOpenPeriodMax)
+            return
+        }
+        let left = 2
+        const finish = () => {
+            if (--left === 0) {
+                store._pollLimitsLoaded = true
+                if (done)
+                    done(store.pollOptionLimit, store.pollOpenPeriodMax)
+            }
+        }
+        send({ "@type": "getOption", name: "poll_answer_count_max" }, (r) => {
+            const v = r && r["@type"] === "optionValueInteger" ? Number(r.value) : 0
+            if (v >= 2 && v <= 20)
+                store.pollOptionLimit = v
+            finish()
+        })
+        send({ "@type": "getOption", name: "poll_open_period_max" }, (r) => {
+            const v = r && r["@type"] === "optionValueInteger" ? Number(r.value) : 0
+            if (v >= 30 && v <= 86400)
+                store.pollOpenPeriodMax = v
+            finish()
+        })
+    }
+
+    // TDLib 1.8.68 inputMessagePoll (inputPollOption + inputPollTypeRegular / inputPollTypeQuiz)
+    function sendPoll(chatId, question, options, opts, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic, done) {
+        const o = opts || {}
+        const isQuiz = !!o.quiz
+        const typeObj = isQuiz
+            ? {
+                "@type": "inputPollTypeQuiz",
+                correct_option_ids: [o.correctOptionId >= 0 ? o.correctOptionId : 0],
+                explanation: { "@type": "formattedText", text: (o.explanation || "").trim(), entities: [] }
+            }
+            : { "@type": "inputPollTypeRegular", allow_adding_options: false }
+        const content = {
+            "@type": "inputMessagePoll",
+            question: { "@type": "formattedText", text: (question || "").trim(), entities: [] },
+            options: (options || []).map((opt) => ({
+                "@type": "inputPollOption",
+                text: { "@type": "formattedText", text: String(opt || "").trim(), entities: [] }
+            })),
+            is_anonymous: o.anonymous !== undefined ? !!o.anonymous : true,
+            allows_multiple_answers: !isQuiz && !!o.multiple,
+            allows_revoting: !isQuiz,
+            shuffle_options: false,
+            hide_results_until_closes: false,
+            type: typeObj,
+            open_period: o.openPeriod > 0 ? Math.round(o.openPeriod) : 0,
+            close_date: o.closeDate > 0 ? Math.round(o.closeDate) : 0,
+            is_closed: false
+        }
+        const req = {
+            "@type": "sendMessage",
+            chat_id: chatId,
+            topic_id: topic(thread, directTopic, forumTopic),
+            options: sendOpts(silent, paidStars, schedule),
+            input_message_content: content
+        }
+        if (replyTo)
+            req.reply_to = { "@type": "inputMessageReplyToMessage", message_id: replyTo }
+        send(req, done || check)
+    }
+
+    function getMapThumbnail(chatId, lat, lon, zoom, width, height, scale, done) {
+        send({
+            "@type": "getMapThumbnailFile",
+            location: { "@type": "location", latitude: lat, longitude: lon, horizontal_accuracy: 0 },
+            zoom: Math.max(13, Math.min(20, Math.round(zoom || 15))),
+            width: Math.max(16, Math.min(1024, Math.round(width || 360))),
+            height: Math.max(16, Math.min(1024, Math.round(height || 360))),
+            scale: Math.max(1, Math.min(3, Math.round(scale || 2))),
+            chat_id: chatId || 0
+        }, (f) => {
+            if (!f || f["@type"] !== "file") {
+                if (done)
+                    done("")
+                return
+            }
+            store.fetch(f, 16, (path) => {
+                if (done)
+                    done(path || "")
+            })
+        })
+    }
+
+    // TDLib 1.8.68 inputMessageLocation
+    function sendLocation(chatId, lat, lon, accuracy, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic, done) {
+        const req = {
+            "@type": "sendMessage",
+            chat_id: chatId,
+            topic_id: topic(thread, directTopic, forumTopic),
+            options: sendOpts(silent, paidStars, schedule),
+            input_message_content: {
+                "@type": "inputMessageLocation",
+                location: { "@type": "location", latitude: lat, longitude: lon, horizontal_accuracy: accuracy || 0 }
+            }
+        }
+        if (replyTo)
+            req.reply_to = { "@type": "inputMessageReplyToMessage", message_id: replyTo }
+        send(req, done || check)
+    }
+
+    // TDLib 1.8.68 inputMessageLiveLocation (only used when device GPS is available)
+    function sendLiveLocation(chatId, lat, lon, accuracy, livePeriod, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic, done) {
+        const req = {
+            "@type": "sendMessage",
+            chat_id: chatId,
+            topic_id: topic(thread, directTopic, forumTopic),
+            options: sendOpts(silent, paidStars, schedule),
+            input_message_content: {
+                "@type": "inputMessageLiveLocation",
+                location: {
+                    "@type": "liveLocation",
+                    location: { "@type": "location", latitude: lat, longitude: lon, horizontal_accuracy: accuracy || 0 },
+                    live_period: livePeriod || 900,
+                    heading: 0,
+                    proximity_alert_radius: 0
+                }
+            }
+        }
+        if (replyTo)
+            req.reply_to = { "@type": "inputMessageReplyToMessage", message_id: replyTo }
+        send(req, done || check)
+    }
+
+    // TDLib 1.8.68 inputMessageContact
+    function sendContact(chatId, user, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic, done) {
+        if (!user)
+            return
+        const req = {
+            "@type": "sendMessage",
+            chat_id: chatId,
+            topic_id: topic(thread, directTopic, forumTopic),
+            options: sendOpts(silent, paidStars, schedule),
+            input_message_content: {
+                "@type": "inputMessageContact",
+                contact: {
+                    "@type": "contact",
+                    phone_number: user.phone_number || "",
+                    first_name: user.first_name || "",
+                    last_name: user.last_name || "",
+                    vcard: "",
+                    user_id: user.id || 0
+                }
+            }
+        }
+        if (replyTo)
+            req.reply_to = { "@type": "inputMessageReplyToMessage", message_id: replyTo }
+        send(req, done || check)
+    }
+
+    // --- agy/stiker-gif-qidiruv ---
+    // Sticker/GIF panel search & sticker set sheet helpers (TDLib 1.8.68:
+    // getStickers, searchStickers, searchStickerSets, getStickerSet, changeStickerSet,
+    // updateInstalledStickerSets, searchPublicChat, getInlineQueryResults, sendInlineQueryResultMessage)
+    signal installedStickerSetsChanged(var stickerType, var setIds)
+    property var _gifBotId: 0
+    property bool _gifBotAsking: false
+    property var _gifBotWait: []
+
+    function stickerSearchLangs() {
+        const primary = Prefs.lang || Tr.lang || "uz"
+        return primary === "en" ? ["en"] : [primary, "en"]
+    }
+
+    function searchStickersLocal(query, chatId, limit, done) {
+        send({
+            "@type": "getStickers",
+            sticker_type: { "@type": "stickerTypeRegular" },
+            query: query || "",
+            limit: limit || 40,
+            chat_id: chatId || 0
+        }, (r) => {
+            if (!done)
+                return
+            done(r && r["@type"] === "stickers" ? (r.stickers || []) : [])
+        })
+    }
+
+    function searchStickersRemote(emojis, query, offset, limit, done) {
+        send({
+            "@type": "searchStickers",
+            sticker_type: { "@type": "stickerTypeRegular" },
+            emojis: emojis || "",
+            query: query || "",
+            input_language_codes: stickerSearchLangs(),
+            offset: offset || 0,
+            limit: limit || 30
+        }, (r) => {
+            if (!done)
+                return
+            done(r && r["@type"] === "stickers" ? (r.stickers || []) : [])
+        })
+    }
+
+    function searchStickerSets(query, done) {
+        send({
+            "@type": "searchStickerSets",
+            sticker_type: { "@type": "stickerTypeRegular" },
+            query: query || ""
+        }, (r) => {
+            if (!done)
+                return
+            done(r && r["@type"] === "stickerSets" ? (r.sets || []) : [])
+        })
+    }
+
+    function getStickerSet(setId, done) {
+        send({ "@type": "getStickerSet", set_id: String(setId) }, (r) => {
+            if (!done)
+                return
+            if (r && r["@type"] === "stickerSet")
+                done(r, "")
+            else
+                done(null, (r && r.message) || "")
+        })
+    }
+
+    function changeStickerSet(setId, installed, done) {
+        send({
+            "@type": "changeStickerSet",
+            set_id: String(setId),
+            is_installed: !!installed,
+            is_archived: false
+        }, (r) => {
+            if (r && r["@type"] === "error") {
+                console.warn("nullgram: changeStickerSet", r.message)
+                if (done)
+                    done(false, r.message || "")
+                return
+            }
+            if (done)
+                done(true, "")
+        })
+    }
+
+    function _resolveGifBot(done) {
+        if (_gifBotId > 0) {
+            if (done)
+                done(_gifBotId)
+            return
+        }
+        if (done)
+            _gifBotWait.push(done)
+        if (_gifBotAsking)
+            return
+        _gifBotAsking = true
+        send({ "@type": "searchPublicChat", username: "gif" }, (r) => {
+            store._gifBotAsking = false
+            let uid = 0
+            if (r && r["@type"] === "chat" && r.type && r.type["@type"] === "chatTypePrivate")
+                uid = r.type.user_id || 0
+            if (uid > 0)
+                store._gifBotId = uid
+            const wait = store._gifBotWait
+            store._gifBotWait = []
+            for (const cb of wait)
+                cb(uid)
+        })
+    }
+
+    function searchGifInline(chatId, query, offset, done) {
+        _resolveGifBot((botId) => {
+            if (!botId) {
+                if (done)
+                    done("", [], "", "GIF bot not found")
+                return
+            }
+            send({
+                "@type": "getInlineQueryResults",
+                bot_user_id: botId,
+                chat_id: chatId || 0,
+                user_location: null,
+                query: query || "",
+                offset: offset || ""
+            }, (r) => {
+                if (!done)
+                    return
+                if (!r || r["@type"] !== "inlineQueryResults") {
+                    done("", [], "", (r && r.message) || "")
+                    return
+                }
+                const qid = r.inline_query_id ? String(r.inline_query_id) : ""
+                const items = []
+                for (const it of (r.results || [])) {
+                    if (it && it["@type"] === "inlineQueryResultAnimation" && it.animation)
+                        items.push({ id: String(it.id || ""), queryId: qid, title: it.title || "", animation: it.animation })
+                }
+                done(qid, items, r.next_offset || "", "")
+            })
+        })
+    }
+
+    function sendInlineGifResult(chatId, queryId, resultId, replyTo, thread, silent, directTopic, paidStars, schedule, forumTopic, done) {
+        send({
+            "@type": "sendInlineQueryResultMessage",
+            chat_id: chatId,
+            topic_id: topic(thread, directTopic, forumTopic),
+            reply_to: replyTo ? { "@type": "inputMessageReplyToMessage", message_id: replyTo } : null,
+            options: sendOpts(silent, paidStars, schedule),
+            query_id: String(queryId),
+            result_id: String(resultId),
+            hide_via_bot: false
+        }, done || check)
+    }
 }

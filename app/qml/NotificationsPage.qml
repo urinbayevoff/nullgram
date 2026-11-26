@@ -3,7 +3,7 @@
 // reactions (Xabarlar, Hikoyalar: updateReactionNotificationSettings) — each its page (NotifyScopePage); «ILOVA ICHIDAGI BILDIRISHNOMALAR»: the banners' sound and the
 // banners themselves while the app is in front; the names in banners; «NISHON HISOBLAGICHI»: the Start tile's count (channels in
 // it, messages or chats); «Yangi kontaktlar» (disable_contact_registered_notifications); «Barcha bildirishnomalarni tiklash»
-// (asked: resetAllNotificationSettings). The scopes' settings from TDLib (getScopeNotificationSettings, kept by Store.scopes).
+// (asked: resetAllNotificationSettings); with 2+ accounts «Barcha hisoblardan» (the others kept on, notifying). The scopes' settings from TDLib (getScopeNotificationSettings, kept by Store.scopes).
 // (iOS's «In-App Vibrate»: no vibrator the app can reach on the phone yet — not here.)
 import QtQuick
 
@@ -120,6 +120,20 @@ SubPage {
             sub: page.reacted
             value: page.reactions ? (page.reacted ? Tr.t("Yoqilgan") : Tr.t("O'chiq")) : ""
             onClicked: page.open("reactions")
+        }
+    }
+
+    // (0.9.7, 2+ accounts: Telegram-iOS's «SHOW NOTIFICATIONS FROM · All Accounts»; off: the others not kept on at all)
+    SettingsGroup {
+        visible: accounts.count > 1
+        title: Tr.t("Bildirishnomalar manbasi")
+        note: Tr.t("O'chirilsa, bildirishnomalar faqat hozir ochiq hisobdan keladi, boshqa hisoblar fonda ishlamaydi.")
+        SettingsRow {
+            text: Tr.t("Barcha hisoblardan"); toggle: true; on: Prefs.allAccounts; last: true
+            onClicked: {
+                Prefs.allAccounts = !Prefs.allAccounts
+                accounts.watch(Prefs.allAccounts, Tr.lang)
+            }
         }
     }
 

@@ -16,14 +16,19 @@ Item {
     property var chosen: []             // paths, in the order picked
     property string tab: "media"
     property var rights: null           // ChatPage's (null: anything may be sent)
+    property bool allowPoll: true       // groups, channels, saved messages, bots
     property var veiled: ({})           // path -> true: to go as a spoiler
     signal send(var picked, bool asFiles, bool apart)   // asFiles: from Fayllar -- as they are, not compressed; apart: not as an album
     signal refused(string text)         // a kind the group bars, tapped
+    signal pickLocation()
+    signal pickPoll()
+    signal pickContact()
 
     readonly property bool mayPhotos: !rights || rights.photos
     readonly property bool mayVideos: !rights || rights.videos
     readonly property bool mayFiles: !rights || rights.files
     readonly property bool mayGifs: !rights || rights.other     // (a GIF goes as an animation: Telegram's «stickers and GIFs»)
+    readonly property bool mayPolls: !rights || rights.polls !== false
     readonly property bool spoilt: chosen.some((p) => veiled[p])
     // what a tab says instead when none of it may go (Telegram-iOS: Conversation.(Default)RestrictedMedia)
     readonly property string barText: {
@@ -60,6 +65,15 @@ Item {
         rise.stop()
         fall.to = height
         fall.restart()
+    }
+
+    function closeNow() {
+        open = false
+        menu.visible = false
+        rise.stop()
+        fall.stop()
+        dim.opacity = 0
+        visible = false
     }
 
     function toggle(path) {
@@ -287,6 +301,85 @@ Item {
             MouseArea {
                 anchors.fill: parent
                 onClicked: sheet.go(sheet.tab === "files", false)
+            }
+        }
+
+        Rectangle {          // Telegram-iOS attachment dock: Location, Poll, Contact (shown when nothing is picked)
+            id: kindDock
+            visible: sheet.chosen.length === 0
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 78 + safe.bottom
+            color: Theme.bg
+            Rectangle {
+                width: parent.width; height: 0.5
+                color: Theme.separator
+            }
+            readonly property var items: {
+                const list = [
+                    { key: "location", label: Tr.t("Joylashuv"), icon: "place", tint: "#34c759", enabled: true }
+                ]
+                if (sheet.allowPoll)
+                    list.push({ key: "poll", label: Tr.t("So'rovnoma"), icon: "poll", tint: "#f5a623", enabled: sheet.mayPolls })
+                list.push({ key: "contact", label: Tr.t("Kontakt"), icon: "person", tint: "#007aff", enabled: true })
+                return list
+            }
+            Row {
+                anchors.top: parent.top; anchors.topMargin: 8
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 0
+                Repeater {
+                    model: kindDock.items
+                    Item {
+                        required property var modelData
+                        width: Math.min(116, Math.floor((kindDock.width - 24) / Math.max(1, kindDock.items.length)))
+                        height: 64
+                        opacity: !modelData.enabled ? 0.45 : dockHit.pressed ? 0.55 : 1
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 2
+                            width: 40; height: 40; radius: 20
+                            color: parent.modelData.tint
+                            Icon {
+                                anchors.centerIn: parent
+                                width: 20; height: 20
+                                name: parent.parent.modelData.icon
+                                color: "white"
+                            }
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 46
+                            width: parent.width - 6
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                            text: parent.modelData.label
+                            color: Theme.text
+                            font.family: Theme.font; font.pixelSize: 12; font.weight: Font.Medium
+                        }
+                        MouseArea {
+                            id: dockHit
+                            anchors.fill: parent
+                            onClicked: {
+                                const k = parent.modelData.key
+                                if (k === "poll") {
+                                    if (!sheet.mayPolls)
+                                        return sheet.refused(sheet.rights && sheet.rights.mine
+                                            ? Tr.t("Adminlar sizga bu guruhda so'rovnoma yuborishni cheklagan")
+                                            : Tr.t("Bu guruhda so'rovnoma yuborib bo'lmaydi"))
+                                    sheet.closeNow()
+                                    sheet.pickPoll()
+                                } else if (k === "location") {
+                                    sheet.closeNow()
+                                    sheet.pickLocation()
+                                } else if (k === "contact") {
+                                    sheet.closeNow()
+                                    sheet.pickContact()
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

@@ -200,6 +200,7 @@ Rectangle {
     // database: a signed-in start made the sign-in page there, for the ~0.3 s until Ready, for nothing)
     property string base: store.auth === "Ready" ? "chats"
                         : store.auth === "NeedApiKey" ? "apikey"
+                        : store.renewing ? "login"
                         : store.auth === "" || store.auth === "LoggingOut" || store.auth === "Closed"
                           || (store.auth === "WaitTdlibParameters" && store.error === "") ? "" : "login"
     onBaseChanged: {

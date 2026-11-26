@@ -248,6 +248,18 @@ SubPage {
     SettingsGroup {
         visible: page.data
         title: Tr.t("Kontaktlar")
+        note: Tr.t("Telefondagi kontaktlar shu hisob uchun Telegram serverlariga yuboriladi va yangilanib turadi. Boshqa hisoblarda alohida yoqiladi.")
+        // (0.9.7: each account's own, Telegram Android's «Sync Contacts»; on: synced now and on each change)
+        SettingsRow {
+            text: Tr.t("Kontaktlarni sinxronlash"); toggle: true; on: accounts.sync
+            onClicked: {
+                accounts.setSync(!accounts.sync)
+                if (accounts.sync) {
+                    store.syncContacts()
+                    page.nav.say(Tr.t("Kontaktlar sinxronlanmoqda…"))
+                }
+            }
+        }
         SettingsRow { text: Tr.t("Sinxronlangan kontaktlarni o'chirish"); danger: true; chevron: false; last: true; onClicked: page.askClear("contacts") }
     }
     SettingsGroup {

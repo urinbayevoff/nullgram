@@ -33,7 +33,9 @@ Page {
             : [{ icon: "person", text: Tr.t("Kontaktlar") }, { icon: "chats", text: Tr.t("Chatlar") },
                { icon: "settings", text: Tr.t("Sozlamalar") }]
         current: Math.max(0, home.order.indexOf(home.tab))
-        badges: Prefs.callsTab ? [0, 0, chats.unreadChats, 0] : [0, chats.unreadChats, 0]
+        // (Sozlamalar's: the other accounts' unread chats, as iOS's)
+        badges: Prefs.callsTab ? [0, 0, chats.unreadChats, accounts.othersUnread] : [0, chats.unreadChats, accounts.othersUnread]
+        onHeld: (i) => { if (home.order[i] === 2) accountsSheet.open = true }
         onPicked: (i) => {
             const t = home.order[i]
             if (t === home.tab && t === 1)
@@ -132,6 +134,33 @@ Page {
                 restart()
         }
     }
+    AccountsSheet { id: accountsSheet; floor: tabs.height + tabs.gap; nav: home.nav; alert: accountAlert }
+    Alert { id: accountAlert; anchors.fill: parent; z: 70 }
+    Rectangle {             // switching accounts: the app is about to start again with the other one
+        anchors.fill: parent
+        z: 60
+        visible: home.store.switchingTo !== 0
+        color: Theme.bg
+        MouseArea { anchors.fill: parent }
+        Column {
+            anchors.centerIn: parent
+            spacing: 14
+            readonly property var to: accounts.list.find((a) => a.slot === home.store.switchingTo) || null
+            Avatar {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 72; height: 72
+                letters: parent.to ? home.store.letters(parent.to.name || "?") : ""
+                tint: parent.to ? home.store.tints[Math.abs(parent.to.userId) % home.store.tints.length] : Theme.accent
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: Tr.t("Hisob ochilmoqda…")
+                color: Theme.grey
+                font.family: Theme.font; font.pixelSize: 15
+            }
+        }
+    }
+
     Component { id: devChat; ChatPage {} }
     function devPush(id) {
         if (td.fps)

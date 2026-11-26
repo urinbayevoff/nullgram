@@ -62,7 +62,7 @@ EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram
 EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
 EMOJI_GET = os.path.join(HERE, "emoji_get.py")
 EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -93,6 +93,86 @@ def _load():
 	lib.td_execute.argtypes = [ctypes.c_char_p]
 	lib.td_execute.restype = ctypes.c_char_p
 	return lib
+
+
+def reexec():
+	"""The app started again in this same process (a sign-out, another account), as it was started: «python3
+	…/nullgram.py» stays what the shell, the launcher and pkill know it by (sys.executable's full path as argv[0]
+	would make it another process to them)."""
+	try:
+		with open("/proc/self/cmdline", "rb") as f:
+			argv0 = f.read().split(b"\0")[0].decode() or sys.executable
+	except OSError:
+		argv0 = sys.executable
+	os.execv(sys.executable, [argv0] + sys.argv)
+
+
+class Accounts:
+	"""The Telegram accounts signed in here (0.9.7; Telegram's apps: 3, 4 with Premium on any of them), each in a
+	slot of its own: slot 1 is DATA itself, where 0.9.6 and before kept the only account (its db/ and files/ never
+	move, so going back to 0.9.6 opens it as before), slots 2-4 are DATA/accounts/<n>. accounts.json (beside the
+	keys, 0600) lists them in their order and names the active one, the one the app shows; it holds no phone
+	number, key or token (those are TDLib's, in each slot's db/). No file yet: slot 1 alone, as before."""
+	MAX = 4
+
+	def __init__(self):
+		self.path = os.path.join(DATA, "accounts.json")
+		self.slots, self.active = [{"slot": 1}], 1
+		try:
+			with open(self.path) as f:
+				saved = json.load(f)
+			slots = [s for s in saved.get("slots", []) if isinstance(s, dict) and s.get("slot") in range(1, self.MAX + 1)]
+			if slots:		# (none left -- the last one signed out: slot 1 again, to sign in)
+				self.slots = slots
+			if any(s["slot"] == saved.get("active") for s in self.slots):
+				self.active = saved["active"]
+			else:
+				self.active = self.slots[0]["slot"]
+		except (OSError, ValueError, AttributeError, TypeError):
+			pass
+		# (a sign-in left unfinished in another slot -- the app closed on it: gone, as Telegram Android never
+		# lists one; the active one being added keeps its folder, made anew if it is not there yet)
+		for st in [st for st in self.slots if st.get("adding")]:
+			if st["slot"] == self.active:
+				os.makedirs(self.dir(st["slot"]), exist_ok=True)
+			elif len(self.slots) > 1:
+				self.slots.remove(st)
+				self.wipe(st["slot"])
+				self.save()
+		# (a slot's folder gone by hand: the first one's, which always is)
+		if self.active != 1 and not os.path.isdir(self.dir(self.active)):
+			self.active = 1
+
+	@staticmethod
+	def dir(slot):
+		return DATA if slot == 1 else os.path.join(DATA, "accounts", str(slot))
+
+	@staticmethod
+	def wipe(slot):
+		"""What is left of a slot's account after it is gone (TDLib has emptied its db/ and files/ itself): a
+		slot 2-4's whole folder; slot 1's -- the data folder, the keys in it -- only the app's own round/ and voice/."""
+		d = Accounts.dir(slot)
+		if slot >= 2 and os.path.dirname(d) == os.path.join(DATA, "accounts"):
+			shutil.rmtree(d, ignore_errors=True)
+		elif slot == 1:
+			for sub in ("round", "voice"):
+				shutil.rmtree(os.path.join(DATA, sub), ignore_errors=True)
+
+	def save(self):
+		os.makedirs(DATA, exist_ok=True)
+		tmp = self.path + ".new"
+		fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+		with os.fdopen(fd, "w") as f:
+			json.dump({"slots": self.slots, "active": self.active}, f)
+		os.replace(tmp, self.path)
+
+
+ACCOUNTS = Accounts()
+HERE_DATA = Accounts.dir(ACCOUNTS.active)	# the active account's folder: its db/, files/, round/, voice/
+# The phone's contacts (ztMETRO's People: name, mobile, other, e-mail, note, uid; tab-separated), for Kontaktlarni
+# sinxronlash (0.9.7). On the test servers never the phone's own: NULLGRAM_CONTACTS's file, or none.
+PHONE_BOOK = os.environ.get("NULLGRAM_CONTACTS", "") if TEST else \
+	os.path.join(os.path.expanduser("~"), ".local/share/ztmetro/contacts")
 
 
 def read_key():
@@ -375,9 +455,11 @@ class Td(QObject):
 		self.client = self.lib.td_create_client_id()
 		self._id, self._hash, self._key_path = read_key()
 		self._device, self._system = device_names()
-		os.makedirs(DATA, exist_ok=True)
+		os.makedirs(HERE_DATA, exist_ok=True)
 		self.closed = threading.Event()
 		self._stream = None
+		self.others = {}		# client id -> Watcher: the other accounts, kept on in the background (AccountList)
+		self.accounts = None
 
 	def start(self):
 		"""Once QML listens: a signal sent before anyone is connected is lost, and with it
@@ -395,6 +477,9 @@ class Td(QObject):
 				# new client's; TDLib puts "@client_id" last
 				m = CLIENT_ID.search(r, max(0, len(r) - 40))
 				if m and int(m.group(1)) != self.client:
+					w = self.others.get(int(m.group(1)))		# (another account's: its watcher, 0.9.7)
+					if w is not None:
+						w.take(r)
 					continue
 				if '"authorizationStateClosed"' in r:
 					self.closed.set()
@@ -430,9 +515,15 @@ class Td(QObject):
 		return self._stream.url(file_id, size)
 
 	def close(self, wait: float):
-		"""TDLib asked to close (its database written out), waiting for it at most `wait` seconds."""
+		"""TDLib asked to close (its database written out), the other accounts' too, waiting for them
+		all at most `wait` seconds."""
+		end = time.monotonic() + wait
 		self.send(json.dumps({"@type": "close"}))
-		self.closed.wait(wait)
+		for w in list(self.others.values()):
+			w.send({"@type": "close"})
+		self.closed.wait(max(0.0, end - time.monotonic()))
+		for w in list(self.others.values()):
+			w.closed.wait(max(0.0, end - time.monotonic()))
 
 	@Slot(str)
 	def send(self, request: str):
@@ -457,7 +548,7 @@ class Td(QObject):
 		tile_clear()
 		sys.stdout.flush()
 		sys.stderr.flush()
-		os.execv(sys.executable, [sys.executable] + sys.argv)
+		reexec()
 
 	@Slot(str, result="QVariantList")
 	def qrHigh(self, text: str) -> list:
@@ -607,7 +698,7 @@ class Td(QObject):
 	@Slot(str, int, int, bool, str)
 	def roundNote(self, src: str, start: int, dur: int, mirrored: bool, audio: str):
 		"""round_note_file on a thread of its own (ffmpeg takes a second or two): roundMade when done."""
-		out = os.path.join(DATA, "round", "%d.mp4" % int(time.time() * 1000))
+		out = os.path.join(HERE_DATA, "round", "%d.mp4" % int(time.time() * 1000))
 		def work():
 			self.roundMade.emit(round_note_file(src, start, dur, mirrored, audio, out), max(1, round(dur / 1000)))
 		threading.Thread(target=work, daemon=True).start()
@@ -628,7 +719,7 @@ class Td(QObject):
 	@Slot(result=str)
 	def voicePath(self) -> str:
 		"""Where the next voice note is recorded."""
-		d = os.path.join(DATA, "voice")
+		d = os.path.join(HERE_DATA, "voice")
 		os.makedirs(d, exist_ok=True)
 		return os.path.join(d, "%d.ogg" % (len(os.listdir(d)) + 1))
 
@@ -639,7 +730,9 @@ class Td(QObject):
 		self._key_path, ""), constant=True)
 	deviceModel = Property(str, lambda self: self._device, constant=True)
 	systemVersion = Property(str, lambda self: self._system, constant=True)
-	appVersion = Property(str, lambda self: "Nullgram " + VERSION, constant=True)
+	# (to Telegram only the number: a session there reads «<the API app's name> 0.9.7», as «Telegram Android 13.2.2»;
+	# «Nullgram 0.9.7» beside the app's name showed «nullgram Nullgram 0.9.7» in Qurilmalar)
+	appVersion = Property(str, lambda self: VERSION, constant=True)
 
 	@Slot(str, str, result=bool)
 	def setOwnKey(self, api_id: str, api_hash: str) -> bool:
@@ -671,7 +764,7 @@ class Td(QObject):
 			return {"id": str(k.get("id", "")), "hash": str(k.get("hash", ""))}
 		except (OSError, ValueError):
 			return {}
-	dataDir = Property(str, lambda self: DATA, constant=True)
+	dataDir = Property(str, lambda self: HERE_DATA, constant=True)	# (the active account's)
 	testDc = Property(bool, lambda self: TEST, constant=True)
 	# NULLGRAM_FPS: QML counts what it does into the late frames' lines (only then: td.fps first)
 	fps = Property(bool, lambda self: FPS, constant=True)
@@ -746,6 +839,362 @@ class Td(QObject):
 	# or search it for this
 	devFind = Property(str, lambda self: os.environ.get("NULLGRAM_FIND", ""), constant=True)
 	testPhone = Property(str, lambda self: os.environ.get("NULLGRAM_TEST_PHONE", "") if TEST else "", constant=True)
+
+
+class Watcher:
+	"""Another account than the one on the screen (0.9.7), kept on in the background as Telegram's apps keep
+	them: its own TDLib client over its slot's folder, but nothing of it loaded but what notifies and counts.
+	TDLib's thread only picks its few updates out by their first characters (the rest -- the bulk of them --
+	is dropped unread) and hands them over; AccountList reads them on the UI thread."""
+	KEEP = ('{"@type":"updateAuthorizationState"', '{"@type":"updateNotificationGroup"',
+	        '{"@type":"updateUnreadChatCount"', '{"@type":"updateUser"', '{"@type":"updateNewChat"',
+	        '{"@type":"updateChatTitle"')
+
+	def __init__(self, td, slot, handed):
+		self.td, self.slot, self.handed = td, slot, handed
+		self.closed = threading.Event()
+		self.client = td.lib.td_create_client_id()
+		td.others[self.client] = self
+		self.send({"@type": "getOption", "name": "version"})	# (TDLib starts the client on its first request)
+
+	def send(self, req):
+		self.td.lib.td_send(self.client, json.dumps(req).encode())
+
+	def take(self, r):
+		"""(TDLib's thread)"""
+		if '"authorizationStateClosed"' in r:
+			self.closed.set()
+		if r.startswith(self.KEEP) or '"@extra":"w:' in r:
+			self.handed.emit(self.slot, r)
+
+
+class AccountList(QObject):
+	"""The accounts (Accounts' slots) for QML, `accounts`: each one's name and unread chats, the others' kept
+	on by Watchers while `watch` says so (Bildirishnomalar › «Barcha hisoblardan»), their new messages told
+	by `notified` for Store to make the banner (its words, as the shown account's). Names and user ids are
+	kept in accounts.json (to show while nothing is on); phone numbers only here, in memory."""
+	changed = Signal()
+	notified = Signal(int, "QVariantMap")
+	contactsChanged = Signal()		# the phone's contacts changed, the shown account syncing them
+	_handed = Signal(int, str)
+
+	def __init__(self, td):
+		super().__init__()
+		self.td = td
+		td.accounts = self
+		self.watchers = {}			# slot -> Watcher
+		self.live = {}				# slot -> {"unread", "phone", "ready", "chats": {id: (title, kind)}, "users": {id: name}}
+		self._lang = "uz"
+		self._handed.connect(self._take, Qt.QueuedConnection)
+		self._book, self._bookSum = None, None
+		self._bookWait = QTimer(singleShot=True, interval=5000, timeout=self._bookCheck)
+		self._watchBook()
+
+	def _slot(self, n):
+		return next((s for s in ACCOUNTS.slots if s["slot"] == n), None)
+
+	def _list(self):
+		out = []
+		for s in ACCOUNTS.slots:
+			n = s["slot"]
+			live = self.live.get(n, {})
+			out.append({"slot": n, "name": s.get("name", ""), "username": s.get("username", ""),
+			            "userId": float(s.get("user_id", 0)), "premium": bool(s.get("premium")),
+			            "active": n == ACCOUNTS.active, "unread": live.get("unread", -1), "watched": n in self.watchers})
+		return out
+
+	list = Property("QVariantList", _list, notify=changed)
+	count = Property(int, lambda self: len(ACCOUNTS.slots), notify=changed)
+	active = Property(int, lambda self: ACCOUNTS.active, notify=changed)
+	# the other accounts' unread chats together (the Sozlamalar tab's badge, iOS's; the tile's count), those not
+	# known as 0; none while they are not kept on («Barcha hisoblardan» off: their last ones only in the list, dim)
+	othersUnread = Property(int, lambda self: sum(max(0, self.live.get(s["slot"], {}).get("unread", 0))
+	                                              for s in ACCOUNTS.slots if s["slot"] in self.watchers), notify=changed)
+
+	# a slot being added (0.9.7 Q5): signed in there with «Bekor qilish» back to the one it was added from
+	adding = Property(bool, lambda self: bool((self._slot(ACCOUNTS.active) or {}).get("adding")), notify=changed)
+	# Kontaktlarni sinxronlash, the shown account's (a new one's as chosen at its sign-in; one from before
+	# 0.9.7: off -- its phone's contacts were never sent, nor will be unasked)
+	sync = Property(bool, lambda self: bool((self._slot(ACCOUNTS.active) or {}).get("sync")), notify=changed)
+
+	@Slot(bool)
+	def setSync(self, on):
+		s = self._slot(ACCOUNTS.active)
+		if s is not None and bool(s.get("sync")) != on:
+			s["sync"] = on
+			ACCOUNTS.save()
+			self._watchBook()
+			self.changed.emit()
+
+	def _watchBook(self):
+		"""The phone's contacts watched while the shown account syncs them (the file, and its folder for one
+		written anew), a change told 5 s after the last write; else not looked at at all."""
+		on = self.sync and bool(PHONE_BOOK)
+		if on and self._book is None:
+			d = os.path.dirname(PHONE_BOOK)
+			self._book = QFileSystemWatcher()
+			if os.path.isdir(d):
+				self._book.addPath(d)		# (ztcontacts writes a new file over it)
+			if os.path.exists(PHONE_BOOK):
+				self._book.addPath(PHONE_BOOK)	# (one written in place)
+			self._book.directoryChanged.connect(lambda _: self._bookWait.start())
+			self._book.fileChanged.connect(lambda _: self._bookWait.start())
+		elif not on and self._book is not None:
+			self._book.deleteLater()
+			self._book, self._bookSum = None, None
+			self._bookWait.stop()
+
+	def _readBook(self):
+		try:
+			with open(PHONE_BOOK, "rb") as f:
+				return f.read()
+		except OSError:
+			return None
+
+	def _bookCheck(self):
+		if self._book is not None and PHONE_BOOK not in self._book.files() and os.path.exists(PHONE_BOOK):
+			self._book.addPath(PHONE_BOOK)		# (the new one, after a rename)
+		raw = self._readBook()
+		if self.sync and raw is not None and hash(raw) != self._bookSum:
+			self.contactsChanged.emit()
+
+	@Slot(result="QVariantList")
+	def phoneContacts(self):
+		"""The phone's contacts as TDLib's importedContacts (changeImportedContacts: the whole list each time, TDLib
+		works out what changed), a number each (a person's mobile and other number both); [] when the shown
+		account does not sync them (the file then not even read) or there is none to read."""
+		if not self.sync or not PHONE_BOOK:
+			return []
+		raw = self._readBook()
+		if raw is None:
+			return []
+		self._bookSum = hash(raw)
+		out, seen = [], set()
+		for line in raw.decode("utf-8", "replace").splitlines():
+			f = line.split("\t")
+			name = f[0].strip()
+			for number in f[1:3]:
+				digits = re.sub(r"\D", "", number)
+				if len(digits) < 5 or digits in seen:
+					continue
+				seen.add(digits)
+				first, _, last = (name or number.strip()).partition(" ")
+				out.append({"@type": "importedContact", "phone_number": number.strip(), "first_name": first[:64],
+				            "last_name": last.strip()[:64], "note": None})
+		return out
+
+	@Slot(float, str, str, bool, result=int)
+	def setMe(self, user_id, name, username, premium):
+		"""The shown account's own (Store, at Ready): kept for the list. (Its id comes as a JS number: a
+		Slot's int is 32 bits, and Telegram's ids are past that.) An account just added that is one already
+		here (signed in again, by QR or a code): that one's slot, for Store to sign this new session out and
+		go there (Telegram Android's LoginActivity does the same); else 0."""
+		uid = int(user_id)
+		s = self._slot(ACCOUNTS.active)
+		if s is not None and s.get("adding"):
+			same = next((o for o in ACCOUNTS.slots if o is not s and o.get("user_id") == uid), None)
+			if same is not None:
+				print("nullgram: account", ACCOUNTS.active, "is account", same["slot"], "again", flush=True)
+				s["back"] = same["slot"]
+				ACCOUNTS.save()
+				return same["slot"]
+			s.pop("adding", None)
+			s.pop("back", None)
+			print("nullgram: account", ACCOUNTS.active, "added", flush=True)
+		self._remember(ACCOUNTS.active, uid, name, username, premium)
+		return 0
+
+	@Slot(bool, result=bool)
+	def add(self, sync):
+		"""Another account: the first free slot (a 2-4 one's folder made anew), the app started again there at
+		the sign-in, «Bekor qilish» back here. `sync`: its Kontaktlarni sinxronlash to begin with."""
+		used = {s["slot"] for s in ACCOUNTS.slots}
+		free = [n for n in range(1, Accounts.MAX + 1) if n not in used]
+		if not free:
+			return False
+		n = free[0]
+		Accounts.wipe(n)			# (a cancelled or signed-out one's leftovers)
+		os.makedirs(Accounts.dir(n), exist_ok=True)	# (its folder there before the restart, or it is not opened)
+		print("nullgram: adding account", n, flush=True)
+		ACCOUNTS.slots.append({"slot": n, "adding": True, "back": ACCOUNTS.active, "sync": sync})
+		self._restart(n)
+		return True
+
+	@Slot(int)
+	def cancelAdd(self, to):
+		"""«Bekor qilish» at a new account's sign-in: its slot gone, back to the one it was added from (or to
+		slot `to`: the number typed is that account's -- «O'tish»)."""
+		s = self._slot(ACCOUNTS.active)
+		if s is None or not s.get("adding"):
+			return
+		print("nullgram: adding account", s["slot"], "cancelled", flush=True)
+		back = to or s.get("back")
+		ACCOUNTS.slots.remove(s)
+		self.td.close(1.5)
+		Accounts.wipe(s["slot"])
+		self._restart(back if self._slot(back) else (ACCOUNTS.slots[0]["slot"] if ACCOUNTS.slots else 1), closed=True)
+
+	@Slot()
+	def signedOut(self):
+		"""The shown account signed out (here, or from another device; TDLib has emptied its folders): off the
+		list, and the next one shown -- the one an added duplicate was of, else the first (Android's
+		performLogout); none left: slot 1 at the sign-in. Store then starts the app again (td.restart)."""
+		s = self._slot(ACCOUNTS.active)
+		if s is None:
+			return
+		print("nullgram: account", s["slot"], "signed out", flush=True)
+		back = s.get("back")
+		ACCOUNTS.slots.remove(s)
+		Accounts.wipe(s["slot"])
+		if not ACCOUNTS.slots:
+			ACCOUNTS.slots = [{"slot": 1}]
+		ACCOUNTS.active = back if self._slot(back) else ACCOUNTS.slots[0]["slot"]
+		ACCOUNTS.save()
+
+	@Slot(str, result=int)
+	def phoneUsed(self, phone):
+		"""The slot of another account signed in here with this number (its watcher's getMe), else 0."""
+		digits = re.sub(r"\D", "", phone)
+		for n, live in self.live.items():
+			if n != ACCOUNTS.active and digits and re.sub(r"\D", "", live.get("phone", "")) == digits:
+				return n
+		return 0
+
+	@Slot(result="QVariantList")
+	def otherIds(self):
+		"""The other accounts' user ids (requestQrCodeAuthentication's other_user_ids), as JS numbers."""
+		return [float(s["user_id"]) for s in ACCOUNTS.slots if s["slot"] != ACCOUNTS.active and s.get("user_id")]
+
+	def _restart(self, n, closed=False):
+		ACCOUNTS.active = n
+		ACCOUNTS.save()
+		if not closed:
+			self.td.close(1.5)
+		sys.stdout.flush()
+		sys.stderr.flush()
+		reexec()
+
+	def _remember(self, n, user_id, name, username, premium):
+		s = self._slot(n)
+		if s is None:
+			return
+		new = {"user_id": user_id, "name": name, "username": username, "premium": premium}
+		if any(s.get(k) != v for k, v in new.items()):
+			s.update(new)
+			ACCOUNTS.save()
+		self.changed.emit()
+
+	@Slot(int)
+	def switchTo(self, n):
+		"""Another account on the screen: as Telegram Android's switchToAccount, nothing of this one's pages kept --
+		the app starts again (exec'd, as after signing out) with that one active; every client closed first
+		(their databases written out)."""
+		if n == ACCOUNTS.active or self._slot(n) is None:
+			return
+		print("nullgram: switching to account", n, flush=True)
+		self._restart(n)
+
+	@Slot(bool, str)
+	def watch(self, on, lang):
+		"""The other accounts on (each a Watcher) or off."""
+		self._lang = lang or "uz"
+		for s in ACCOUNTS.slots:
+			n = s["slot"]
+			if n == ACCOUNTS.active:
+				continue
+			if on and n not in self.watchers and os.path.isdir(os.path.join(Accounts.dir(n), "db")):
+				print("nullgram: account", n, "watched", flush=True)
+				self.live[n] = {"unread": -1, "chats": {}, "users": {}}
+				self.watchers[n] = Watcher(self.td, n, self._handed)
+			elif not on and n in self.watchers:
+				self._stop(n)
+		self.changed.emit()
+
+	def _stop(self, n):
+		w = self.watchers.pop(n, None)
+		if w is not None:
+			w.send({"@type": "close"})		# (its Closed still comes to it: it stays in td.others)
+
+	def _params(self, n):
+		td = self.td
+		d = Accounts.dir(n)
+		return {"@type": "setTdlibParameters", "use_test_dc": TEST, "database_directory": d + "/db",
+		        "files_directory": d + "/files", "use_file_database": True, "use_chat_info_database": True,
+		        "use_message_database": True, "api_id": td._id, "api_hash": td._hash,
+		        "system_language_code": self._lang, "device_model": td._device, "system_version": td._system,
+		        "application_version": VERSION}
+
+	def _take(self, n, r):
+		"""(the UI thread) One of a watched account's updates."""
+		w, live = self.watchers.get(n), self.live.get(n)
+		if w is None or live is None:
+			return
+		u = json.loads(r)
+		k = u.get("@type")
+		if k == "updateAuthorizationState":
+			st = u["authorization_state"]["@type"]
+			if st == "authorizationStateWaitTdlibParameters":
+				w.send(self._params(n))
+			elif st == "authorizationStateReady":
+				live["ready"] = True
+				for name, v in (("notification_group_count_max", 10), ("notification_group_size_max", 3)):
+					w.send({"@type": "setOption", "name": name, "value": {"@type": "optionValueInteger", "value": v}})
+				w.send({"@type": "getMe", "@extra": "w:me"})
+			elif st == "authorizationStateClosed":
+				# (asked to, or its database not opened -- another program has it: kept on the list, off)
+				print("nullgram: account", n, "closed", flush=True)
+				self.watchers.pop(n, None)
+				live["ready"] = False
+			elif st in ("authorizationStateWaitPhoneNumber", "authorizationStateLoggingOut"):
+				# signed out elsewhere (a session ended from another device), or never signed in: off the list
+				# (its folder is TDLib's, emptied by TDLib)
+				print("nullgram: account", n, "is signed out:", st, flush=True)
+				self._stop(n)
+				self.live.pop(n, None)
+				ACCOUNTS.slots = [s for s in ACCOUNTS.slots if s["slot"] != n]
+				ACCOUNTS.save()
+				self.changed.emit()
+		elif u.get("@extra") == "w:me" and k == "user":
+			live["phone"] = u.get("phone_number", "")
+			names = (u.get("usernames") or {}).get("active_usernames") or [""]
+			self._remember(n, u["id"], u.get("first_name", ""), names[0], bool(u.get("is_premium")))
+		elif k == "updateUser":
+			v = u["user"]
+			live["users"][v["id"]] = (v.get("first_name", "") + " " + v.get("last_name", "")).strip()
+			if v["id"] == self._slot(n).get("user_id"):
+				names = (v.get("usernames") or {}).get("active_usernames") or [""]
+				self._remember(n, v["id"], v.get("first_name", ""), names[0], bool(v.get("is_premium")))
+		elif k == "updateNewChat":
+			c = u["chat"]
+			live["chats"][c["id"]] = [c.get("title", ""), self._kind(c["type"])]
+		elif k == "updateChatTitle":
+			if u["chat_id"] in live["chats"]:
+				live["chats"][u["chat_id"]][0] = u["title"]
+		elif k == "updateUnreadChatCount":
+			if u["chat_list"]["@type"] == "chatListMain" and live.get("unread") != u["unread_unmuted_count"]:
+				live["unread"] = u["unread_unmuted_count"]
+				print("nullgram: account", n, "unread", live["unread"], flush=True)
+				self.changed.emit()
+		elif k == "updateNotificationGroup":
+			title, kind = live["chats"].get(u["chat_id"], ["", "private"])
+			for x in u.get("added_notifications", []):
+				nt = x.get("type", {})
+				if nt.get("@type") != "notificationTypeNewMessage" or x.get("is_silent") or time.time() - x.get("date", 0) >= 120:
+					continue
+				m = nt["message"]
+				sid = m.get("sender_id", {})
+				who = live["users"].get(sid.get("user_id"), "") if sid.get("@type") == "messageSenderUser" \
+				      else live["chats"].get(sid.get("chat_id"), [""])[0]
+				self.notified.emit(n, {"slot": n, "account": self._slot(n).get("name", ""), "chatId": u["chat_id"],
+				                       "chat": title, "kind": kind, "sender": who, "content": m.get("content", {}),
+				                       "preview": bool(nt.get("show_preview", True))})
+
+	@staticmethod
+	def _kind(t):
+		k = t.get("@type", "")
+		if k == "chatTypeSupergroup":
+			return "channel" if t.get("is_channel") else "group"
+		return "group" if k == "chatTypeBasicGroup" else "private"
 
 
 class Osk(QObject):
@@ -1933,6 +2382,8 @@ def main():
 	view = QQuickView()
 	view.setColor("black")
 	view.rootContext().setContextProperty("td", td)
+	accounts = AccountList(td)
+	view.rootContext().setContextProperty("accounts", accounts)
 	osk = Osk()
 	view.rootContext().setContextProperty("osk", osk)
 	safe = Safe()

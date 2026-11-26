@@ -30,6 +30,10 @@ Page {
     property var directTopic: 0         // a subscriber's thread in an administered channel direct messages chat
     property var directSender: null     // MessageSender of that directTopic
     property bool directCanUnpaid: false
+    property int forumTopic: 0          // TDLib 1.8.68 forum_topic_id when opened from ForumTopicsPage
+    property bool forumGeneral: false   // General topic: regular chat history
+    property string forumTitle: ""
+    property bool forumClosed: false
     property int paidMessageStars: 0    // Stars required per message in a subscriber DM / paid supergroup
     readonly property bool isDirectChat: (store.seen, store.isDirect(chat))
     readonly property bool isDirectAdmin: (store.seen, store.isDirectAdmin(chat))
@@ -55,9 +59,52 @@ Page {
     readonly property var paidAlert: paidAlertLoader.item
     readonly property var sendMenu: sendMenuLoader.item
     readonly property var scheduleSheet: scheduleSheetLoader.item
+    readonly property var lpMenu: lpMenuLoader.item
     property bool hasScheduled: false
     property var pendingSchedule: null
     property string pendingAttachMode: ""
+    property var lpFiles: ({})          // message id -> link_preview photo/thumb file
+    property var composeLp: null        // normalized Store.linkPreviewInfo for the compose field
+    property string composeLpPic: ""
+    property string composeLpUrl: ""
+    property bool composeLpDisabled: false
+    property bool composeLpAbove: false
+    property string composeLpMedia: ""  // "" auto | "small" force_small_media | "large" force_large_media
+    property bool composeLpHasOrig: false
+    property int lpReqSeq: 0
+    readonly property var translateSheet: translateSheetLoader.item
+    readonly property var giftView: giftViewLoader.item
+    readonly property var stickerSetSheet: stickerSetLoader.item
+    property var stickerSets: ({})
+    property var cardRaw: ({})
+    property var _cardExtraAsked: ({})
+    readonly property var badgeMenu: badgeMenuLoader.item
+    readonly property var botReplyKbView: botReplyKbLoader.item
+    readonly property var botCommandsView: botCommandsLoader.item
+    readonly property var botStartView: botStartLoader.item
+    readonly property var inlinePanel: inlineLoader.item
+    readonly property string inlinePlaceholder: inlinePanel ? inlinePanel.placeholder : ""
+    property string botBusyBtn: ""
+    property var botReplyKb: null
+    property bool botKbOpen: false
+    property var botForceReply: null
+    property var _lastReplyMarkupId: 0
+    property var botCommands: []
+    property string botDescription: ""
+    property bool botCmdForced: false
+    readonly property real botKbH: botReplyKbView ? botReplyKbView.panelH : Math.max(page.panelH, 240)
+    readonly property string botPlaceholder: (botForceReply && botForceReply.placeholder) || (botReplyKb && botReplyKb.placeholder) || ""
+    readonly property bool showBotStart: bot && !blocked && ready && messages.count === 0 && !loading && !searching && !selecting
+    readonly property bool botCmdSlash: !editing && !textBarred && /^\/[^\s]*$/.test(field.text)
+    readonly property string botCmdQuery: botCmdSlash ? field.text.slice(1) : ""
+    readonly property bool botCmdOpen: canPost && !searching && !selecting && !editing && !showBotStart && botCommands.length > 0 && (botCmdSlash || (botCmdForced && field.text === ""))
+    onBotChanged: if (bot && !spare) loadBotInfo()
+    property int unreadMentions: chat ? (chat.unread_mention_count || 0) : 0
+    property int unreadReactions: chat ? (chat.unread_reaction_count || 0) : 0
+    property var _seenMentions: ({})
+    property var _seenReactions: ({})
+    property bool _mentionBusy: false
+    property bool _reactionBusy: false
     readonly property var devices: voiceRecLoader.item ? voiceRecLoader.item.devices : null
     readonly property var mic: voiceRecLoader.item ? voiceRecLoader.item.mic : null
     readonly property var recorder: voiceRecLoader.item ? voiceRecLoader.item.recorder : null
@@ -72,10 +119,120 @@ Page {
     function askReport(st) { reportMenuLoader.active = true; reportMenuLoader.item.ask(st) }
     function showTransMenu() { transMenuLoader.active = true; transMenuLoader.item.show() }
     function showSendMenu(origin) { sendMenuLoader.active = true; sendMenuLoader.item.show(origin || "field") }
+    function showLpMenu() { lpMenuLoader.active = true; lpMenuLoader.item.show() }
+    function resetComposePreview() {
+        lpTimer.stop()
+        lpReqSeq++
+        composeLp = null
+        composeLpPic = ""
+        composeLpUrl = ""
+        composeLpDisabled = false
+        composeLpAbove = false
+        composeLpMedia = ""
+        composeLpHasOrig = false
+        if (lpMenu)
+            lpMenu.visible = false
+    }
+    function findComposeUrl(text, entityMarks) {
+        for (const e of (entityMarks || []))
+            if (e && e.type && e.type["@type"] === "textEntityTypeTextUrl" && e.type.url)
+                return e.type.url
+        const m = (text || "").match(/(?:https?:\/\/|tg:\/\/)[^\s<>"]+|(?:^|[\s(])((?:www\.|t\.me\/|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:[a-z0-9-]+\.)*[a-z]{2,10}(?:\/|(?=$|[\s),.;:!?])))[^\s<>"]*)/i)
+        if (!m)
+            return ""
+        const raw = m[1] || m[0]
+        return raw.replace(/[.,;:!?)\]}]+$/, "")
+    }
+    function composeLinkPreviewOpts() {
+        if (!composeLpUrl)
+            return null
+        if (composeLpDisabled)
+            return store.linkPreviewOptions({ is_disabled: true, url: composeLpUrl })
+        if (composeLpAbove || composeLpMedia !== "" || composeLpHasOrig)
+            return store.linkPreviewOptions({
+                is_disabled: false,
+                url: composeLpUrl,
+                force_small_media: composeLpMedia === "small",
+                force_large_media: composeLpMedia === "large",
+                show_above_text: composeLpAbove
+            })
+        return null
+    }
+    function scheduleComposePreview() {
+        if (textBarred) {
+            resetComposePreview()
+            return
+        }
+        const u = findComposeUrl(field.text, marks)
+        if (!u) {
+            resetComposePreview()
+            return
+        }
+        if (u !== composeLpUrl) {
+            composeLpUrl = u
+            composeLpDisabled = false
+            composeLpAbove = false
+            composeLpMedia = ""
+            composeLpHasOrig = false
+            composeLp = null
+            composeLpPic = ""
+            lpTimer.restart()
+        } else if (!composeLpDisabled && !composeLp && !lpTimer.running) {
+            lpTimer.restart()
+        }
+    }
+    function fetchComposePreview() {
+        if (composeLpDisabled || !composeLpUrl)
+            return
+        const w = fieldWords()
+        if (!w.text)
+            return
+        const seq = ++lpReqSeq
+        store.getLinkPreview(w.text, w.marks, composeLinkPreviewOpts(), (lp) => {
+            if (!page || seq !== page.lpReqSeq || page.composeLpDisabled)
+                return
+            if (!lp) {
+                page.composeLp = null
+                page.composeLpPic = ""
+                return
+            }
+            const info = store.linkPreviewInfo(lp)
+            page.composeLp = info
+            if (info && info.file) {
+                if (info.file.local && info.file.local.is_downloading_completed)
+                    page.composeLpPic = info.file.local.path
+                else {
+                    page.composeLpPic = ""
+                    store.fetch(info.file, 2, (path) => { if (page && page.lpReqSeq === seq) page.composeLpPic = path })
+                }
+            } else {
+                page.composeLpPic = ""
+            }
+        })
+    }
+    Timer { id: lpTimer; interval: 500; onTriggered: page.fetchComposePreview() }
     function openScheduleSheet(payload) {
         pendingSchedule = payload
         scheduleSheetLoader.active = true
         scheduleSheetLoader.item.show(0, false, false)
+    }
+    function openTranslate(m) {
+        if (!m || !m.text)
+            return
+        keyboardDown()
+        translateSheetLoader.active = true
+        translateSheetLoader.item.show(page.chatId, m.id, m.text, Tr.lang)
+    }
+    function openStickerSet(setId) {
+        if (!setId || String(setId) === "0")
+            return
+        keyboardDown()
+        stickerSetLoader.active = true
+        stickerSetLoader.item.show(String(setId))
+    }
+    function showBadgeMenu(kind, btnY) {
+        badgeMenuLoader.active = true
+        badgeMenuLoader.item.show(kind, btnY)
     }
     property Component infoPageMaker: null
     property Component joinPageMaker: null
@@ -94,6 +251,63 @@ Page {
         if (!scheduledPageMaker)
             scheduledPageMaker = Qt.createComponent("ScheduledPage.qml")
         page.nav.push(scheduledPageMaker, { chatId: page.chatId })
+    }
+    property Component pollPageMaker: null
+    property Component locPageMaker: null
+    property Component contactPickMaker: null
+    function sendAttached(runSend) {
+        const replyId = page.replying ? page.replying.id : 0
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            runSend(replyId)
+            page.replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            page.askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
+    }
+    function openPollCreate() {
+        if (!pollPageMaker)
+            pollPageMaker = Qt.createComponent("PollCreatePage.qml")
+        const p = page.nav.push(pollPageMaker, { chatId: page.chatId, isChannel: page.channel })
+        if (p)
+            p.submitted.connect((q, opts, cfg) => {
+                page.nav.pop()
+                page.sendAttached((replyId) => store.sendPoll(page.chatId, q, opts, cfg, replyId, page.thread, page.silent,
+                                                              page.directTopic, page.paidMessageStars, null, page.forumTopic))
+            })
+    }
+    function openLocationPick() {
+        if (!locPageMaker)
+            locPageMaker = Qt.createComponent("LocationPickPage.qml")
+        const p = page.nav.push(locPageMaker, { chatId: page.chatId })
+        if (p) {
+            p.pickedLocation.connect((lat, lon, acc) => {
+                page.nav.pop()
+                page.sendAttached((replyId) => store.sendLocation(page.chatId, lat, lon, acc, replyId, page.thread, page.silent,
+                                                                  page.directTopic, page.paidMessageStars, null, page.forumTopic))
+            })
+            p.pickedLiveLocation.connect((lat, lon, acc, period) => {
+                page.nav.pop()
+                page.sendAttached((replyId) => store.sendLiveLocation(page.chatId, lat, lon, acc, period, replyId, page.thread, page.silent,
+                                                                      page.directTopic, page.paidMessageStars, null, page.forumTopic))
+            })
+        }
+    }
+    function openContactPick() {
+        if (!contactPickMaker)
+            contactPickMaker = Qt.createComponent("ContactPickPage.qml")
+        const p = page.nav.push(contactPickMaker, { chatId: page.chatId })
+        if (p)
+            p.pickedContact.connect((u) => {
+                page.nav.pop()
+                page.sendAttached((replyId) => store.sendContact(page.chatId, u, replyId, page.thread, page.silent,
+                                                                 page.directTopic, page.paidMessageStars, null, page.forumTopic))
+            })
     }
     // a channel we may write in (its owner, or an admin who posts); the others have its bar instead of the field
     readonly property bool canPost: {
@@ -122,14 +336,15 @@ Page {
         const may = (key, old) => [mine, chat.permissions].every((p) => !p || (p[key] !== undefined ? p[key] : old ? p[old] : true) !== false)
         const r = { mine: !!mine, text: may("can_send_basic_messages", "can_send_messages"), photos: may("can_send_photos"),
                     videos: may("can_send_videos"), voice: may("can_send_voice_notes"), round: may("can_send_video_notes"),
-                    files: may("can_send_documents"), music: may("can_send_audios"), other: may("can_send_other_messages") }
-        r.some = r.photos || r.videos || r.voice || r.round || r.files || r.music || r.other
+                    files: may("can_send_documents"), music: may("can_send_audios"), other: may("can_send_other_messages"),
+                    polls: may("can_send_polls") }
+        r.some = r.photos || r.videos || r.voice || r.round || r.files || r.music || r.other || r.polls
         return r
     }
     // text barred, something else not (pictures, files...): the field stays, locked (Telegram-iOS's «Text not
     // allowed»); a tap on it says what may be sent, 📎 and the mic send what they may
     readonly property bool textBarred: !!rights && !rights.text && rights.some && !editing
-    readonly property bool canAttach: !rights || rights.photos || rights.videos || rights.files || rights.music || rights.other
+    readonly property bool canAttach: !rights || rights.photos || rights.videos || rights.files || rights.music || rights.other || rights.polls
     readonly property bool canVoice: !rights || rights.voice
     readonly property bool canRound: !rights || rights.round
     // as Telegram-iOS words it (restrictedSendingContentsText): "only allow to send photos, videos and files"
@@ -157,6 +372,8 @@ Page {
         }
         if (t !== "chatTypeBasicGroup" && t !== "chatTypeSupergroup")
             return ""
+        if (forumTopic > 0 && forumClosed && !store.canManageTopics(chat))
+            return Tr.t("Bu mavzu yopilgan")
         const g = (store.seen, store.groups[t === "chatTypeBasicGroup" ? "b" + chat.type.basic_group_id : "s" + chat.type.supergroup_id])
         const k = g && g.status ? g.status["@type"] : ""
         if (!k || k === "chatMemberStatusCreator" || k === "chatMemberStatusAdministrator")
@@ -178,7 +395,7 @@ Page {
     }
     // a post's comments: chatId is then the channel's discussion group and this its thread there
     property var thread: 0
-    readonly property real foot: (selecting ? pickBar.height : searching ? findBar.height : input.visible ? input.height : chanBar.height) + safe.bottom    // what is under the messages
+    readonly property real foot: (selecting ? pickBar.height : searching ? findBar.height : showBotStart ? 60 : input.visible ? input.height : chanBar.height) + safe.bottom    // what is under the messages
     readonly property real barLift: Math.max(kb, safe.bottom)    // the bars: over the keyboard, or clear of the shell's nav line
     readonly property real toastFloor: kb + foot    // (Main's Toast stands over it)
     function isMuted() {
@@ -356,14 +573,15 @@ Page {
     // The emoji/sticker panel (🙂) stands where the keyboard was, as tall as it was: `kb` is either's.
     // From the panel to the keyboard the panel's height is held until the keyboard's comes (no dip).
     property real kb: kbTo
-    readonly property real kbTo: Math.max(osk.h, panelOpen || panelHold ? panelH : 0)
+    readonly property real kbTo: Math.max(osk.h, panelOpen || panelHold ? panelH : (botKbOpen && botReplyKb ? botKbH : 0))
     Behavior on kb { NumberAnimation { duration: osk.ms; easing.type: Easing.OutExpo } }
     property bool panelOpen: false
     property bool panelHold: false
     property real panelH: 280           // the keyboard's height once seen (at least 280: room for the grid)
-    Connections { target: osk; function onChanged() { if (osk.h > 0) { page.panelH = Math.max(280, osk.h); page.panelHold = false } } }
+    Connections { target: osk; function onChanged() { if (osk.h > 0) { page.panelH = Math.max(280, osk.h); page.panelHold = false; page.botKbOpen = false } } }
     Timer { id: holdAway; interval: 700; onTriggered: page.panelHold = false }
     function showPanel() {
+        botKbOpen = false
         if (page.kb > 0 && !panelOpen) {
             field.focus = false
             osk.hide()
@@ -372,9 +590,25 @@ Page {
         emojiPanelLoader.active = true
         emojiPanelLoader.item.load()
     }
+    function showBotKb() {
+        if (!botReplyKb)
+            return
+        panelOpen = false
+        panelHold = false
+        if (osk.h > 0) {
+            field.focus = false
+            osk.hide()
+        }
+        botReplyKbLoader.active = true
+        botKbOpen = true
+    }
+    function hideBotKb() {
+        botKbOpen = false
+    }
     function keyboardUp() {          // from the panel: the field's focus brings the keyboard; held till it comes
         panelHold = panelOpen
         panelOpen = false
+        botKbOpen = false
         holdAway.restart()
         field.forceActiveFocus()
     }
@@ -399,7 +633,7 @@ Page {
     // the newest pinned message, in a bar under the header (a tap goes to it)
     property var pinned: null           // { id, text }
     function loadPinned() {
-        if (thread)         // (the discussion group's pinned message is not the post's)
+        if (thread || (forumTopic > 0 && !forumGeneral))         // (the discussion group's pinned message is not the post's or topic's)
             return
         store.send({ "@type": "getChatPinnedMessage", chat_id: chatId }, (m) => {
             if (page)
@@ -555,16 +789,35 @@ Page {
                         page.paidMessageStars = r.outgoing_paid_message_star_count || (g ? g.paid_message_star_count || 0 : 0)
                 })
         }
-        readTo = chat ? chat.last_read_inbox_message_id : 0
+        const fTopicObj = forumTopic > 0 ? store.forumTopicOf(chatId, forumTopic) : null
+        readTo = fTopicObj ? (fTopicObj.last_read_inbox_message_id || 0) : (chat ? chat.last_read_inbox_message_id : 0)
+        if (fTopicObj && fTopicObj.last_read_outbox_message_id)
+            readUpTo = fTopicObj.last_read_outbox_message_id
         hasScheduled = !!(chat && chat.has_scheduled_messages)
+        unreadMentions = fTopicObj ? (fTopicObj.unread_mention_count || 0) : (forumTopic > 0 ? 0 : (chat ? (chat.unread_mention_count || 0) : 0))
+        unreadReactions = fTopicObj ? (fTopicObj.unread_reaction_count || 0) : (forumTopic > 0 ? 0 : (chat ? (chat.unread_reaction_count || 0) : 0))
+        _seenMentions = {}
+        _seenReactions = {}
+        _mentionBusy = false
+        _reactionBusy = false
         pendingAttachMode = ""
         pendingSchedule = null
+        botBusyBtn = ""
+        botReplyKb = null
+        botKbOpen = false
+        botForceReply = null
+        _lastReplyMarkupId = 0
+        botCommands = []
+        botDescription = ""
+        botCmdForced = false
+        loadBotInfo()
+        syncChatReplyMarkup()
         loadDraft()
         openLog("draft")
-        const spot = thread || directTopic ? null : store.spots[chatId]
+        const spot = thread || directTopic || forumTopic ? null : store.spots[chatId]
         if (target)
             openAt(target, false)
-        else if (chat && chat.unread_count > 0 && readTo && !thread)
+        else if (chat && chat.unread_count > 0 && readTo && !thread && !forumTopic)
             openAt(readTo, true)
         else if (spot)
             openAt(spot.id, false, spot)
@@ -621,8 +874,9 @@ Page {
                     page.finishOlder()
             })
         }
-        const asked = () => store.history(chatId, 0, 30, (got, failed) => shown(got, failed, false), null, thread, directTopic)
-        if (thread || directTopic)
+        const fTopic = forumTopic > 0 ? forumTopic : 0
+        const asked = () => store.history(chatId, 0, 30, (got, failed) => shown(got, failed, false), null, thread, directTopic, false, fTopic)
+        if (thread || directTopic || fTopic)
             return asked()
         // from 0, as the server path: not from chat.last_message.id -- that left the newest message out
         // (a just-sent one was missing on reopen till another was sent); TDLib answers the last one alone
@@ -646,6 +900,8 @@ Page {
         const offset = unread ? -30 : -20, limit = unread ? 50 : 40
         store.send(directTopic ? { "@type": "getDirectMessagesChatTopicHistory", chat_id: chatId, topic_id: directTopic,
                                    from_message_id: id, offset: offset, limit: limit }
+                 : (forumTopic > 0) ? { "@type": "getForumTopicHistory", chat_id: chatId, forum_topic_id: forumTopic,
+                                                         from_message_id: id, offset: offset, limit: limit }
                  : thread ? { "@type": "getMessageThreadHistory", chat_id: chatId, message_id: thread,
                               from_message_id: id, offset: offset, limit: limit }
                  : { "@type": "getChatHistory", chat_id: chatId, from_message_id: id, offset: offset,
@@ -745,7 +1001,7 @@ Page {
     // the row at the top and how far under the header, when the newest were out of sight (as Telegram-iOS
     // keeps a chat's place); at the bottom it is forgotten: opened at the newest again
     function leave() {
-        if (thread || directTopic || !ready)
+        if (thread || directTopic || forumTopic || !ready)
             return
         let at = -1
         for (let y = bar.height + 1; away && at < 0 && y < list.height / 2; y += 16)   // (over the oldest: the list's head)
@@ -1048,7 +1304,7 @@ Page {
             rich: store.rich(ft, !!bared[id]),
             text: words !== null ? words : t === "messageVenue" ? content.venue.title + (content.venue.address ? "\n" + content.venue.address : "")
                 : t === "messageLiveLocation" ? Tr.t("Jonli joylashuv") : (content.caption ? content.caption.text : ""),
-            kind: words !== null || pictured.indexOf(t) >= 0 ? ""
+            kind: words !== null || pictured.indexOf(t) >= 0 || store.isCardType(t) ? ""
                 : store.kindOf(t)
         }
     }
@@ -1127,6 +1383,15 @@ Page {
             // a map from Telegram's own servers (getMapThumbnailFile, loadPic asks for it), the pin over it;
             // a live one: `dur` is when it stops (unix time)
             Object.assign(r, { picKind: "map", picW: 300, picH: 180 })
+        } else if (t === "messageDice" && page.diceSticker(c)) {
+            // a thrown dice: as Telegram's apps draw it, an animated sticker with no bubble, its own animation
+            // ending on the value (final_state); 🎰's background here, its reels and lever over it (diceSlots)
+            const st = page.diceSticker(c)
+            Object.assign(r, { picKind: "sticker", picW: st.width || 512, picH: st.height || 512, file: still(st.thumbnail),
+                               main: st.sticker, anim: true, auto: true, emo: c.emoji || "🎲" })
+        } else if (store.isCardType(t)) {
+            r.rowKind = "card"
+            r.file = store.cardFile(c)
         }
         return r
     }
@@ -1137,6 +1402,16 @@ Page {
     // animated emoji played once in this chat (Telegram-iOS's seenOneTimeAnimatedMedia): back on the
     // screen they stay on their last frame; the chat opened again, they play again
     property var seenEmo: ({})
+    // thrown dice in this chat: message id -> true; 🎰's: id -> its reels' and lever's files (over the background)
+    property var diceIds: ({})
+    property var diceSlots: ({})
+    function diceSticker(c) {
+        const fs = c && c.final_state
+        if (!fs)
+            return null
+        const st = fs["@type"] === "diceStickersSlotMachine" ? fs.background : fs.sticker
+        return st && st.format && st.format["@type"] === "stickerFormatTgs" ? st : null
+    }
     property int burstSeq: 0        // (an emoji's effects told apart)
     function unveil(id) {
         unveiled[id] = true
@@ -1233,12 +1508,26 @@ Page {
             item.blow(x, y)
             return
         }
+        if (item.emo && page.diceIds[item.msgId]) {     // a dice: its throw again, and «send one» (Telegram's tip)
+            item.replay()
+            showDiceTip(item.emo)
+            return
+        }
         if (item.emo) {         // an animated emoji: once more (Telegram-iOS plays it again on a tap), and its effect
             item.replay()
             clickEmoji(item.msgId)
             return
         }
         const k = item.rowKind || item.picKind
+        if (k === "card")
+            return
+        if (k === "sticker") {
+            const sid = stickerSets[item.msgId]
+            if (sid) {
+                openStickerSet(sid)
+                return
+            }
+        }
         if (k === "map") {
             showPlaceMenu(maps[item.msgId], item.text)
             return
@@ -1432,17 +1721,440 @@ Page {
                     messages.setProperty(i, "pic", path)
             })
     }
+    function lpPack(content, id) {
+        const lp = content && content["@type"] === "messageText" && content.link_preview
+                   ? store.linkPreviewInfo(content.link_preview) : null
+        if (!lp) {
+            delete lpFiles[id]
+            return { lp: "", lpPic: "" }
+        }
+        if (lp.file)
+            lpFiles[id] = lp.file
+        else
+            delete lpFiles[id]
+        return {
+            lp: JSON.stringify({
+                url: lp.url, site: lp.site, title: lp.title, desc: lp.desc,
+                showLarge: lp.showLarge, mediaAbove: lp.mediaAbove, aboveText: lp.aboveText,
+                isVideo: lp.isVideo, hasMedia: lp.hasMedia, mini: lp.mini, w: lp.w, h: lp.h
+            }),
+            lpPic: lp.file && lp.file.local && lp.file.local.is_downloading_completed ? lp.file.local.path : ""
+        }
+    }
+    function loadLpPic(id) {
+        const f = lpFiles[id]
+        if (f)
+            store.fetch(f, 1, (path) => {
+                if (!page)
+                    return
+                const i = page.indexOf(id)
+                if (i >= 0)
+                    messages.setProperty(i, "lpPic", path)
+            })
+    }
+
+    function ikbPack(rm) {
+        const rows = store.inlineKeyboardRows(rm)
+        return rows ? JSON.stringify(rows) : ""
+    }
+    // --- agy/kartochkalar ---
+    function cardPack(m) {
+        const d = store.cardData(m)
+        if (!d) {
+            delete cardRaw[m.id]
+            return ""
+        }
+        if (d.kind === "gift")
+            cardRaw[m.id] = { kind: "gift", gift: store.cardGiftForSheet(m) }
+        else if (d.kind === "story")
+            cardRaw[m.id] = { kind: "story", chatId: d.chatId, storyId: d.storyId }
+        else if (d.kind === "contact" && d.userId > 0)
+            cardRaw[m.id] = { kind: "contact", userId: d.userId }
+        else
+            delete cardRaw[m.id]
+        return JSON.stringify(d)
+    }
+    function loadCardExtra(id) {
+        const raw = cardRaw[id]
+        if (!raw || _cardExtraAsked[id])
+            return
+        _cardExtraAsked[id] = true
+        if (raw.kind === "story" && raw.chatId && raw.storyId) {
+            store.story(raw.chatId, raw.storyId, (s) => {
+                if (!page)
+                    return
+                const i = page.indexOf(id)
+                if (i < 0)
+                    return
+                const row = messages.get(i)
+                if (!row.card)
+                    return
+                let d
+                try { d = JSON.parse(row.card) } catch (e) { return }
+                const ch = store.chats[raw.chatId]
+                if (ch && ch.title)
+                    d.author = ch.title
+                if (!s) {
+                    d.expired = true
+                    messages.setProperty(i, "card", JSON.stringify(d))
+                    return
+                }
+                let f = null
+                if (s.content && s.content["@type"] === "storyContentPhoto" && s.content.photo) {
+                    if (s.content.photo.minithumbnail)
+                        d.mini = s.content.photo.minithumbnail.data || ""
+                    const sz = s.content.photo.sizes || []
+                    f = sz.length ? sz[0].photo : null
+                } else if (s.content && s.content["@type"] === "storyContentVideo" && s.content.video) {
+                    d.isVideo = true
+                    if (s.content.video.minithumbnail)
+                        d.mini = s.content.video.minithumbnail.data || ""
+                    f = s.content.video.thumbnail ? s.content.video.thumbnail.file : null
+                }
+                messages.setProperty(i, "card", JSON.stringify(d))
+                if (f) {
+                    page.files[id] = f
+                    page.loadPic(id)
+                }
+            })
+        } else if (raw.kind === "contact" && raw.userId > 0) {
+            const applyUser = (u) => {
+                if (!page || !u)
+                    return
+                if (u.profile_photo && u.profile_photo.small && !page.files[id]) {
+                    page.files[id] = u.profile_photo.small
+                    page.loadPic(id)
+                }
+                const i = page.indexOf(id)
+                if (i >= 0 && messages.get(i).card) {
+                    try {
+                        const d = JSON.parse(messages.get(i).card)
+                        if (d.kind === "contact" && d.isContact !== !!u.is_contact) {
+                            d.isContact = !!u.is_contact
+                            messages.setProperty(i, "card", JSON.stringify(d))
+                        }
+                    } catch (e) {}
+                }
+            }
+            if (store.users[raw.userId])
+                applyUser(store.users[raw.userId])
+            else
+                store.send({ "@type": "getUser", user_id: raw.userId }, (u) => {
+                    if (u && u["@type"] === "user") {
+                        store.users[u.id] = u
+                        applyUser(u)
+                    }
+                })
+        }
+    }
+    function openCardContactChat(userId) {
+        if (!userId)
+            return
+        store.chatWith(userId, (cid) => {
+            if (page && cid)
+                page.openChat({ "@type": "chat", id: cid }, 0)
+        })
+    }
+    function askAddCardContact(msgId, info) {
+        if (!info)
+            return
+        showBotAlert(
+            Tr.t("Kontakt qo'shish"),
+            Tr.f("%1 (%2) kontaktlaringiz ro'yxatiga qo'shilsinmi?", info.name || "", info.phone || ""),
+            [
+                { t: Tr.t("Bekor qilish") },
+                { t: Tr.t("Qo'shish"), bold: true, run: () => page.doAddCardContact(msgId, info) }
+            ]
+        )
+    }
+    function doAddCardContact(msgId, info) {
+        const rawPhone = info.rawPhone || info.phone || ""
+        const digits = String(rawPhone).replace(/[^0-9]/g, "")
+        if (digits.length < 7 || digits.length > 15) {
+            toast(Tr.t("Raqam noto'g'ri. Qaytadan tekshiring."))
+            return
+        }
+        const firstName = info.first || info.name || ""
+        const lastName = info.last || ""
+        store.importContact("+" + digits, firstName, lastName, (uid, err) => {
+            if (!page)
+                return
+            if (err) {
+                page.toast(err.indexOf("PHONE_NUMBER_INVALID") >= 0
+                    ? Tr.t("Raqam noto'g'ri. Qaytadan tekshiring.")
+                    : err)
+                return
+            }
+            if (!uid) {
+                page.toast(Tr.t("Bu raqam Telegram'da ro'yxatdan o'tmagan."))
+                return
+            }
+            const i = page.indexOf(msgId)
+            if (i >= 0 && messages.get(i).card) {
+                try {
+                    const d = JSON.parse(messages.get(i).card)
+                    d.isContact = true
+                    if (!d.userId)
+                        d.userId = uid
+                    messages.setProperty(i, "card", JSON.stringify(d))
+                } catch (e) {}
+            }
+            page.toast(Tr.f("%1 endi kontaktlaringiz ro'yxatida.", firstName))
+        })
+    }
+    function openCardStory(chatId, storyId) {
+        if (!chatId || !storyId) {
+            toast(Tr.t("Hikoya mavjud emas"))
+            return
+        }
+        store.story(chatId, storyId, (s) => {
+            if (!page)
+                return
+            if (!s) {
+                page.toast(Tr.t("Hikoya mavjud emas"))
+                return
+            }
+            const sv = page.nav ? page.nav.stories() : null
+            if (sv)
+                sv.showOne(chatId, [storyId], 0, [])
+        })
+    }
+    function openCardGift(msgId) {
+        const raw = cardRaw[msgId]
+        if (!raw || !raw.gift)
+            return
+        keyboardDown()
+        giftViewLoader.active = true
+        giftViewLoader.item.show(raw.gift, null, [], false, false)
+    }
+    function toggleChecklistTask(msgId, taskId, doneNow) {
+        store.markChecklistTask(chatId, msgId, taskId, doneNow, (r) => {
+            if (page && r && r["@type"] === "error")
+                page.toast(r.message || Tr.t("Bo'lmadi"))
+        })
+    }
+    function loadBotInfo() {
+        if (thread || directTopic || channel)
+            return
+        if (!bot && !group)
+            return
+        store.loadBotCommands(chatId, (cmds, desc) => {
+            if (!page)
+                return
+            page.botCommands = cmds || []
+            page.botDescription = desc || ""
+        })
+    }
+    function syncChatReplyMarkup() {
+        if (thread || directTopic || !chat)
+            return
+        const rmId = chat.reply_markup_message_id || 0
+        if (!rmId) {
+            _lastReplyMarkupId = 0
+            botReplyKb = null
+            botKbOpen = false
+            botForceReply = null
+            return
+        }
+        if (rmId === _lastReplyMarkupId)
+            return
+        _lastReplyMarkupId = rmId
+        store.send({ "@type": "getMessage", chat_id: chatId, message_id: rmId }, (m) => {
+            if (!page || page._lastReplyMarkupId !== rmId)
+                return
+            if (m && m["@type"] === "message")
+                page.applyReplyMarkup(m)
+        })
+    }
+    function applyReplyMarkup(m) {
+        const rm = m && m.reply_markup
+        if (!rm)
+            return
+        const t = rm["@type"]
+        if (t === "replyMarkupShowKeyboard") {
+            const info = store.replyKeyboardInfo(rm, m.id)
+            botForceReply = null
+            botReplyKb = info
+            if (info) {
+                botReplyKbLoader.active = true
+                if (osk.h === 0 && !panelOpen)
+                    botKbOpen = true
+            } else {
+                botKbOpen = false
+            }
+        } else if (t === "replyMarkupRemoveKeyboard") {
+            botReplyKb = null
+            botKbOpen = false
+            botForceReply = null
+        } else if (t === "replyMarkupForceReply") {
+            botReplyKb = null
+            botKbOpen = false
+            botForceReply = { msgId: m.id, placeholder: rm.input_field_placeholder || "" }
+            editing = null
+            replying = { id: m.id, name: m.is_outgoing ? Tr.t("Siz") : store.senderName(m.sender_id, false) || (chat ? chat.title : ""),
+                         text: store.preview(m.content, chat) }
+            field.forceActiveFocus()
+        }
+    }
+    function showBotAlert(title, text, answers) {
+        paidAlertLoader.active = true
+        paidAlert.show(title, text, answers, false)
+    }
+    function askUrlConfirm(url) {
+        if (!url)
+            return
+        showBotAlert(Tr.t("Havolani ochish"), Tr.f("Havolani ochish: %1?", url), [
+            { t: Tr.t("Bekor qilish") },
+            { t: Tr.t("Ochish"), bold: true, run: () => { page.lastOpenedUrl = url; Qt.openUrlExternally(url) } }
+        ])
+    }
+    function tapInlineButton(msgId, senderKey, btn, btnKey) {
+        if (!btn)
+            return
+        const kind = btn.kind || ""
+        if (kind === "url") {
+            askUrlConfirm(btn.url)
+        } else if (kind === "callback") {
+            const fullKey = msgId + ":" + btnKey
+            botBusyBtn = fullKey
+            store.botCallback(chatId, msgId, { "@type": "callbackQueryPayloadData", data: btn.data || "" }, (r) => {
+                if (!page)
+                    return
+                if (page.botBusyBtn === fullKey)
+                    page.botBusyBtn = ""
+                if (!r || r["@type"] === "error") {
+                    page.toast(r && r.message ? r.message : Tr.t("Bo'lmadi"))
+                    return
+                }
+                if (r.show_alert && r.text)
+                    page.showBotAlert(Tr.t("Bot javobi"), r.text, [{ t: Tr.t("OK"), bold: true }])
+                else if (r.text)
+                    page.toast(r.text)
+                if (r.url)
+                    page.askUrlConfirm(r.url)
+            })
+        } else if (kind === "copy") {
+            copy(btn.copyText || "")
+            toast(Tr.t("Nusxalandi"))
+        } else if (kind === "switch_inline") {
+            let uid = 0
+            try { uid = JSON.parse(senderKey).user_id || 0 } catch (e) {}
+            let uname = store.botUsernameOf(uid)
+            if (!uname && chat && chat.type["@type"] === "chatTypePrivate")
+                uname = store.botUsernameOf(chat.type.user_id)
+            const q = (uname ? "@" + uname + " " : "") + (btn.query || "")
+            field.text = q
+            field.cursorPosition = field.length
+            field.forceActiveFocus()
+        } else if (kind === "user") {
+            if (btn.userId > 0)
+                follow("user:" + btn.userId, msgId)
+        } else {
+            toast(Tr.t("Rasmiy ilovada oching"))
+        }
+    }
+    function sendBotPlain(txt) {
+        if (!txt)
+            return
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendText(page.chatId, txt, page.replying ? page.replying.id : 0, page.thread, page.silent,
+                           [], page.directTopic, page.paidMessageStars, null, null, page.forumTopic)
+            page.replying = null
+            page.botForceReply = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            page.askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
+    }
+    function tapReplyKbButton(btn) {
+        if (!btn)
+            return
+        if (btn.kind !== "text") {
+            toast(Tr.t("Rasmiy ilovada oching"))
+            return
+        }
+        sendBotPlain(btn.text)
+        if (botReplyKb && botReplyKb.oneTime)
+            botKbOpen = false
+    }
+    function runBotCommand(cmd) {
+        if (!cmd || !cmd.command)
+            return
+        const txt = "/" + cmd.command + (page.group && cmd.botUsername ? "@" + cmd.botUsername : "")
+        botCmdForced = false
+        resetComposePreview()
+        field.text = ""
+        sendBotPlain(txt)
+    }
+    function startInlineBot(uname) {
+        if (!uname || page.textBarred || !input.visible)
+            return
+        field.text = "@" + uname + " "
+        field.cursorPosition = field.length
+        if (!inlineLoader.active)
+            inlineLoader.active = true
+        field.forceActiveFocus()
+    }
+    function sendInlineResult(queryId, resultId) {
+        if (!resultId)
+            return
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendInlineResult(page.chatId, queryId, resultId, page.replying ? page.replying.id : 0,
+                                   page.thread, page.silent, page.directTopic, page.paidMessageStars,
+                                   page.forumTopic, false)
+            page.replying = null
+            page.botForceReply = null
+            page.resetComposePreview()
+            field.text = ""
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            page.askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
+    }
+    function handleInlineStartBot(botUserId, startParam) {
+        if (!botUserId)
+            return
+        store.chatWith(botUserId, (cid) => {
+            if (!page || !cid)
+                return
+            store.startBot(botUserId, cid, startParam || "")
+            const c = store.chats[cid]
+            if (c)
+                page.openChat(c, 0)
+        })
+    }
 
     function row(m) {
         const s = shown(m.content, m.id)
         const p = media(m.content)
         const ct = m.content["@type"]
+        const thrown = ct === "messageDice" && p.picKind === "sticker"
+        if (thrown) {
+            diceIds[m.id] = true
+            if ((m.date || 0) < Date.now() / 1000 - 30)     // (played as it comes; an old one shows its value)
+                seenEmo[m.id] = true
+            const fs = m.content.final_state
+            if (fs["@type"] === "diceStickersSlotMachine")
+                diceSlots[m.id] = [fs.left_reel, fs.center_reel, fs.right_reel, fs.lever].filter((x) => x && x.sticker).map((x) => x.sticker)
+        }
         if (p.picKind === "map") {
             const live = ct === "messageLiveLocation"
             maps[m.id] = ct === "messageVenue" ? m.content.venue.location : live ? m.content.location.location : m.content.location
             if (live)       // (its period from when it was sent; 0x7FFFFFFF: for good)
                 p.dur = m.content.location.live_period >= 0x7FFFFFFF ? 0x7FFFFFFF : m.date + m.content.location.live_period
         }
+        if (ct === "messageSticker" && m.content.sticker && m.content.sticker.set_id && String(m.content.sticker.set_id) !== "0")
+            stickerSets[m.id] = String(m.content.sticker.set_id)
         if (p.file && p.picKind === "photo" && !files[m.id] && !store.autoOk("photo", 0, chatId))
             held[m.id] = p.file             // (auto-download off for photos here: its tiny preview till it is opened)
         else if (p.file)
@@ -1474,6 +2186,7 @@ Page {
             quote = { name: "", text: store.preview(r.content, store.chats[r.chat_id]) }
         }
         const badge = page.group && !m.is_outgoing && !root ? rankOf(m) : null
+        const lpp = lpPack(m.content, m.id)
         return {
             msgId: m.id, out: m.is_outgoing, date: m.date, text: p.emo ? "" : s.text, rich: p.emo ? "" : s.rich, kind: s.kind, said: store.service(m, chat) || "",
             sender: page.group && !m.is_outgoing && !root ? nameOf(m.sender_id) : "",
@@ -1499,6 +2212,7 @@ Page {
             path: p.main && p.main.local.is_downloading_completed ? p.main.local.path : "",
             jumbo: Prefs.largeEmoji && words !== null && !m.forward_info && !p.emo ? store.emojiCount(words.trim()) : 0,     // (Stikerlar va emoji: «Katta emoji»)
             fwd: root ? "" : store.origin(m.forward_info),
+            viaId: root ? 0 : (m.via_bot_user_id || 0),
             reacts: JSON.stringify(store.reactions(m.interaction_info, page.chat)),
             isPinned: !!m.is_pinned,
             // sent together (one media_album_id): one bubble — photos and videos a mosaic, files or
@@ -1508,7 +2222,8 @@ Page {
                                                                      || p.rowKind === "file" || p.rowKind === "audio")
                    ? String(m.media_album_id) : "",
             veiled: p.spoiler && !unveiled[m.id],
-            heard: p.heard || page.channel      // (a channel's post is not marked played)
+            heard: p.heard || page.channel,     // (a channel's post is not marked played)
+            lp: lpp.lp, lpPic: lpp.lpPic, ikb: ikbPack(m.reply_markup), card: thrown ? "" : cardPack(m)
         }
     }
 
@@ -1789,8 +2504,11 @@ Page {
         newering = true
         const gen = feedGen
         const from = messages.get(0).msgId
-        store.send({ "@type": "getChatHistory", chat_id: chatId, from_message_id: from, offset: -40, limit: 41,
-                     only_local: false }, (r) => {
+        store.send((forumTopic > 0)
+                   ? { "@type": "getForumTopicHistory", chat_id: chatId, forum_topic_id: forumTopic,
+                       from_message_id: from, offset: -40, limit: 41 }
+                   : { "@type": "getChatHistory", chat_id: chatId, from_message_id: from, offset: -40, limit: 41,
+                       only_local: false }, (r) => {
             if (!page || gen !== page.feedGen)
                 return
             if (r["@type"] === "error") {
@@ -1836,7 +2554,7 @@ Page {
                 if (!failed)
                     Qt.callLater(page.nearTop)  // still near the top (a short page, a fast flick): the next ones
             })
-        }, null, thread, directTopic)
+        }, null, thread, directTopic, false, forumTopic > 0 ? forumTopic : 0)
     }
 
     // older messages while the top of the list is still 15 messages away, not only once it is reached:
@@ -1921,6 +2639,109 @@ Page {
             openAt(id, false)
         }
     }
+    // Jump to the next unread mention (@) or unread reaction (❤) using searchChatMessages + goTo/openAt,
+    // remembering where the user was in backTo (like openReply) and marking the target message viewed.
+    function currentBottomId() {
+        if (!messages.count)
+            return 0
+        let i = list.indexAt(list.width / 2, list.contentY + list.height - page.foot - 14)
+        if (i < 0)
+            i = list.atYBeginning ? 0 : -1
+        return i >= 0 ? messages.get(i).msgId : 0
+    }
+    function jumpUnread(kind) {
+        const isMention = kind === "mention"
+        if (isMention ? _mentionBusy : _reactionBusy)
+            return
+        if (isMention)
+            _mentionBusy = true
+        else
+            _reactionBusy = true
+        const done = (msgs) => {
+            if (!page)
+                return
+            if (isMention)
+                page._mentionBusy = false
+            else
+                page._reactionBusy = false
+            if (!msgs || !msgs.length) {
+                if (isMention && page.unreadMentions > 0)
+                    page.readAllMentions(true)
+                else if (!isMention && page.unreadReactions > 0)
+                    page.readAllReactions(true)
+                return
+            }
+            const seenMap = isMention ? page._seenMentions : page._seenReactions
+            let pick = null
+            // the oldest unread first (msgs come newest first), like Telegram
+            for (let k = msgs.length - 1; k >= 0; k--) {
+                if (!seenMap[msgs[k].id]) {
+                    pick = msgs[k]
+                    break
+                }
+            }
+            if (!pick) {
+                if (isMention)
+                    page._seenMentions = {}
+                else
+                    page._seenReactions = {}
+                pick = msgs[msgs.length - 1]
+            }
+            const targetId = pick.id
+            if (isMention)
+                page._seenMentions[targetId] = true
+            else
+                page._seenReactions[targetId] = true
+            const from = page.currentBottomId()
+            if (from && from !== targetId && page.backTo[page.backTo.length - 1] !== from)
+                page.backTo = page.backTo.concat([from])
+            page.goTo(targetId)
+            store.viewMessage(page.chatId, targetId)
+        }
+        if (isMention) {
+            if (forumTopic > 0)
+                store.searchForumUnreadMentions(chatId, forumTopic, 0, done)
+            else
+                store.searchUnreadMentions(chatId, 0, done)
+        } else {
+            if (forumTopic > 0)
+                store.searchForumUnreadReactions(chatId, forumTopic, 0, done)
+            else
+                store.searchUnreadReactions(chatId, 0, done)
+        }
+    }
+    function jumpUnreadMention() { jumpUnread("mention") }
+    function jumpUnreadReaction() { jumpUnread("reaction") }
+    function readAllMentions(silent) {
+        _seenMentions = {}
+        const onDone = (r) => {
+            if (!page)
+                return
+            if (r["@type"] === "error")
+                return page.toast(Tr.t("Bo'lmadi"))
+            if (!silent)
+                page.toast(Tr.t("Barcha eslatmalar o'qildi"))
+        }
+        if (forumTopic > 0)
+            store.readAllForumTopicMentions(chatId, forumTopic, onDone)
+        else
+            store.readAllMentions(chatId, onDone)
+    }
+    function readAllReactions(silent) {
+        _seenReactions = {}
+        const onDone = (r) => {
+            if (!page)
+                return
+            if (r["@type"] === "error")
+                return page.toast(Tr.t("Bo'lmadi"))
+            if (!silent)
+                page.toast(Tr.t("Barcha reaksiyalar o'qildi"))
+        }
+        if (forumTopic > 0)
+            store.readAllForumTopicReactions(chatId, forumTopic, onDone)
+        else
+            store.readAllReactions(chatId, onDone)
+    }
 
     // ---- searching in the chat (Telegram-iOS: the field in the header, ↑ ↓ and "1 of N" under) ----
     property bool searching: false
@@ -1933,7 +2754,7 @@ Page {
         searched = false
         if (!q.trim())
             return
-        store.send({ "@type": "searchChatMessages", chat_id: chatId, topic_id: store.topic(thread), query: q,
+        store.send({ "@type": "searchChatMessages", chat_id: chatId, topic_id: store.topic(thread, directTopic, forumTopic > 0 ? forumTopic : 0), query: q,
                      sender_id: null, from_message_id: 0, offset: 0, limit: 100, filter: null }, (r) => {
             if (!page || !searching || q !== findField.text)
                 return
@@ -2006,7 +2827,9 @@ Page {
     // a tap on a link in a message's words (Words' hrefs, Store.rich): a spoiler shows, @name, a
     // t.me link and a user open their chat (a message link at the message), #tag is looked for in
     // this chat, /command is sent; the rest goes to the browser
+    property string lastOpenedUrl: ""
     function follow(url, id) {
+        lastOpenedUrl = url
         if (url === "spoiler") {
             bared[id] = true
             const i = indexOf(id)
@@ -2021,7 +2844,7 @@ Page {
             return
         }
         if (c === "/") {
-            store.sendText(chatId, url, 0, thread)
+            store.sendText(chatId, url, 0, thread, false, [], directTopic, 0, null, null, forumTopic)
             return
         }
         if (c === "@") {
@@ -2091,6 +2914,9 @@ Page {
     function keyboardDown() {
         panelOpen = false
         panelHold = false
+        botKbOpen = false
+        if (emojiPanel)
+            emojiPanel.blurSearch()
         if (page.kb > 0) {
             field.focus = false
             osk.hide()
@@ -2130,10 +2956,10 @@ Page {
             acts.push({ text: Tr.t("Nusxalash"), glyph: "⧉", run: () => page.copy(m.copy) })
         if (ok && p.can_be_edited && !m.kind && !item.media && !item.rowKind)
             acts.push({ text: Tr.t("Tahrirlash"), glyph: "✎", run: () => page.edit(m) })
-        if (m.text && !page.translating && (Prefs.translateButton || page.originals[m.id] !== undefined))   // this one alone in Uzbek, and back
+        if (m.text && !page.translating && (Prefs.translateButton || page.originals[m.id] !== undefined))   // single-message translation sheet (and back if translated inline)
             acts.push(page.originals[m.id] !== undefined
                       ? { text: Tr.t("Asl nusxasi"), glyph: "🌐", run: () => page.untranslateOne(m.id) }
-                      : { text: Tr.t("Tarjima qilish"), glyph: "🌐", run: () => { page.ones[m.id] = true; page.translateId(m.id) } })
+                      : { text: Tr.t("Tarjima qilish"), glyph: "🌐", run: () => page.openTranslate(m) })
         if (ok && p.can_get_message_thread && !page.thread)     // Telegram-iOS's «View Thread»: the answers around it
             acts.push({ text: Tr.t("Javoblarni ochish"), glyph: "💬", run: () => page.openComments(m.id) })
         if (ok && p.can_get_link)
@@ -2247,8 +3073,9 @@ Page {
     // Swipe-to-reply (Telegram-iOS): dragging a message row left reveals ↩ on the right; releasing
     // past swipeThreshold (~60 pt) opens the reply bar via page.reply(), and the row glides back.
     // Single page-level PointHandler (0 extra objects in row delegates).
-    readonly property bool canSwipeReply: !channel && canPost && !selecting && !picking && !searching
+    readonly property bool canSwipeReply: !channel && canPost && !selecting && !picking && !searching && !showBotStart
         && !holding && !(menu && menu.open) && !(viewer && viewer.open)
+        && !(translateSheet && translateSheet.open) && !(badgeMenu && badgeMenu.visible)
     readonly property real swipeThreshold: 50
     property bool swiping: false        // horizontal swipe-to-reply active: cancels list MouseAreas & scrolling
     property Item swipeRow: null        // delegate shell currently swiped (or returning)
@@ -2348,17 +3175,52 @@ Page {
 
     function edit(m) {
         replying = null
+        resetComposePreview()
         editing = { id: m.id }
         field.text = m.text
         field.cursorPosition = field.length
         field.forceActiveFocus()
-        // its formatting comes along (TDLib has the message at hand), unless already typed over
+        // its formatting and existing link preview come along (TDLib has the message at hand), unless already typed over
         store.send({ "@type": "getMessage", chat_id: chatId, message_id: m.id }, (r) => {
             const ft = r && r.content && store.formatted(r.content)
             if (!page || !editing || editing.id !== m.id || !ft || field.text !== ft.text)
                 return
             marks = ft.entities.filter((e) => store.given.indexOf(e.type["@type"]) >= 0)
             ink.paint(field.textDocument, marks, Theme.accent)
+            if (r.content["@type"] === "messageText") {
+                const lpo = r.content.link_preview_options
+                const lp = r.content.link_preview
+                if (lp) {
+                    lpTimer.stop()
+                    const info = store.linkPreviewInfo(lp)
+                    composeLpUrl = (lpo && lpo.url) || lp.url || findComposeUrl(ft.text, marks)
+                    composeLpDisabled = false
+                    composeLpAbove = !!(lpo ? lpo.show_above_text : lp.show_above_text)
+                    composeLpMedia = lpo && lpo.force_large_media ? "large"
+                                   : lpo && lpo.force_small_media ? "small"
+                                   : lp.show_large_media ? "large" : ""
+                    composeLpHasOrig = true
+                    composeLp = info
+                    if (info && info.file) {
+                        if (info.file.local && info.file.local.is_downloading_completed)
+                            composeLpPic = info.file.local.path
+                        else {
+                            const seq = ++lpReqSeq
+                            composeLpPic = ""
+                            store.fetch(info.file, 2, (path) => { if (page && page.lpReqSeq === seq) page.composeLpPic = path })
+                        }
+                    } else {
+                        composeLpPic = ""
+                    }
+                } else if (lpo && lpo.is_disabled) {
+                    lpTimer.stop()
+                    composeLpUrl = lpo.url || findComposeUrl(ft.text, marks)
+                    composeLpDisabled = true
+                    composeLpHasOrig = true
+                    composeLp = null
+                    composeLpPic = ""
+                }
+            }
         })
     }
 
@@ -2400,6 +3262,8 @@ Page {
         }
         marks = out.sort((p, q) => p.offset - q.offset)
         ink.paint(field.textDocument, marks, Theme.accent)
+        if (kind === "textEntityTypeTextUrl")
+            scheduleComposePreview()
     }
 
     // the field's formatting as TDLib's textEntity's, moved along as its words change: what is
@@ -2408,6 +3272,8 @@ Page {
     property string fieldWas: ""
     function reMark() {
         const was = fieldWas, now = field.text
+        if (was === now)
+            return
         fieldWas = now
         if (!marks.length)
             return
@@ -2572,7 +3438,7 @@ Page {
         if (key === draftKept)
             return
         draftKept = key
-        store.send({ "@type": "setChatDraftMessage", chat_id: chatId, topic_id: null,
+        store.send({ "@type": "setChatDraftMessage", chat_id: chatId, topic_id: store.topic(0, directTopic, forumTopic),
                      draft_message: !w.text && !to ? null : {
                          "@type": "draftMessage",
                          reply_to: to ? { "@type": "inputMessageReplyToMessage", message_id: to } : null,
@@ -2582,7 +3448,8 @@ Page {
     }
     Timer { id: draftLater; interval: 1500; onTriggered: page.saveDraft() }
     function loadDraft() {
-        const d = !thread && chat ? chat.draft_message : null
+        const fTopicObj = forumTopic > 0 ? store.forumTopicOf(chatId, forumTopic) : null
+        const d = thread ? null : forumTopic > 0 ? (fTopicObj ? fTopicObj.draft_message : null) : (chat ? chat.draft_message : null)
         const c = d && d.content
         const ft = c && c["@type"] === "draftMessageContentText" ? c.text : null
         if (ft && ft.text) {
@@ -2604,20 +3471,51 @@ Page {
     onReplyingChanged: if (ready) draftLater.restart()
 
     function cancelCompose() {
-        if (editing)
+        if (editing) {
+            resetComposePreview()
             field.text = ""
+        }
         editing = null
         replying = null
+        botForceReply = null
     }
 
     // the back button: the menu first, then a reply or edit being written (Main asks)
     function dismiss() {
+        if (inlineLoader.item && inlineLoader.item.open) {
+            inlineLoader.item.close()
+            return true
+        }
+        if (acLoader.item && acLoader.item.open) {
+            acLoader.item.close()
+            return true
+        }
         if (paidAlert && paidAlert.open) {
             paidAlert.open = false
             return true
         }
+        if (translateSheet && translateSheet.open) {
+            translateSheet.close()
+            return true
+        }
+        if (giftView && giftView.open) {
+            giftView.backOne()
+            return true
+        }
+        if (stickerSetSheet && stickerSetSheet.open) {
+            stickerSetSheet.close()
+            return true
+        }
+        if (badgeMenu && badgeMenu.visible) {
+            badgeMenu.visible = false
+            return true
+        }
         if (scheduleSheet && scheduleSheet.open) {
             scheduleSheet.close(true)
+            return true
+        }
+        if (lpMenu && lpMenu.visible) {
+            lpMenu.visible = false
             return true
         }
         if (sendMenu && sendMenu.visible) {
@@ -2665,7 +3563,13 @@ Page {
             if (placeMenu) placeMenu.visible = false
             return true
         }
-        if (panelOpen) {         // the emoji panel down, as the keyboard would go
+        if (botCmdForced) {
+            botCmdForced = false
+            return true
+        }
+        if (panelOpen && emojiPanel && emojiPanel.dismissSearch())
+            return true
+        if (panelOpen || botKbOpen) {         // the emoji or bot keyboard panel down, as the keyboard would go
             keyboardDown()
             return true
         }
@@ -2694,6 +3598,12 @@ Page {
         if (page.directTopic && !(m.topic_id && m.topic_id["@type"] === "messageTopicDirectMessages"
                                   && m.topic_id.direct_messages_chat_topic_id === page.directTopic))
             return
+        if (page.forumTopic > 0) {
+            const matchForum = !!(m.topic_id && m.topic_id["@type"] === "messageTopicForum"
+                                  && m.topic_id.forum_topic_id === page.forumTopic)
+            if (page.forumGeneral ? (!!m.topic_id && !matchForum) : !matchForum)
+                return
+        }
         if (page.newerQueue.length) {
             page.pendingLive.push(m)
             return
@@ -2707,6 +3617,10 @@ Page {
         const was = list.contentY
         page.remember(m)
         messages.insert(0, page.row(m))
+        if (m.reply_markup && m.reply_markup["@type"] !== "replyMarkupInlineKeyboard") {
+            page._lastReplyMarkupId = m.id
+            page.applyReplyMarkup(m)
+        }
         if (bottom) {            // keep the newest in sight: scroll to it on the sent bubble's vertical curve
             list.positionViewAtBeginning()
             const to = list.contentY
@@ -2737,6 +3651,38 @@ Page {
                 page.muted = page.isMuted()
                 page.blocked = page.isBlocked()
                 page.hasScheduled = !!(page.chat && page.chat.has_scheduled_messages)
+                if (!page.forumTopic) {
+                    page.unreadMentions = page.chat ? (page.chat.unread_mention_count || 0) : 0
+                    page.unreadReactions = page.chat ? (page.chat.unread_reaction_count || 0) : 0
+                    if (page.unreadMentions === 0)
+                        page._seenMentions = {}
+                    if (page.unreadReactions === 0)
+                        page._seenReactions = {}
+                }
+                page.syncChatReplyMarkup()
+            }
+        }
+        function onForumTopicInfoUpdated(info) {
+            if (!page.forumTopic || !info || info.chat_id !== page.chatId || info.forum_topic_id !== page.forumTopic)
+                return
+            if (info.name)
+                page.forumTitle = info.name
+            page.forumClosed = !!info.is_closed
+        }
+        function onForumTopicUpdated(u) {
+            if (!page.forumTopic || !u || u.chat_id !== page.chatId || u.forum_topic_id !== page.forumTopic)
+                return
+            if (u.last_read_outbox_message_id)
+                page.readUpTo = u.last_read_outbox_message_id
+            if (u.unread_mention_count !== undefined) {
+                page.unreadMentions = u.unread_mention_count || 0
+                if (page.unreadMentions === 0)
+                    page._seenMentions = {}
+            }
+            if (u.unread_reaction_count !== undefined) {
+                page.unreadReactions = u.unread_reaction_count || 0
+                if (page.unreadReactions === 0)
+                    page._seenReactions = {}
             }
         }
         function onScheduledMessage(m) {
@@ -2764,6 +3710,8 @@ Page {
                     const r = messages.get(i)
                     if (!r.pic)                     // (the delegate stays: it does not ask again by itself)
                         page.loadPic(m.id)
+                    if (r.lp !== "" && !r.lpPic)
+                        page.loadLpPic(m.id)
                     // nor bring down what comes down by itself: a GIF sent is the server's MP4 now, not
                     // the file that went (it stood still under a ↓)
                     if (r.auto && !r.path && r.got < 0)
@@ -2780,6 +3728,14 @@ Page {
             if (chatId !== page.chatId)
                 return
             const i = page.indexOf(id)
+            if (i >= 0 && content["@type"] === "messageDice") {
+                store.send({ "@type": "getMessage", chat_id: chatId, message_id: id }, (m) => {
+                    const j = page.indexOf(id)
+                    if (m["@type"] === "message" && j >= 0)
+                        messages.set(j, page.row(m))
+                })
+                return
+            }
             if (i >= 0) {
                 const s = page.shown(content, id)
                 delete page.translations[id]
@@ -2789,6 +3745,17 @@ Page {
                     page.translateId(id)
                 messages.setProperty(i, "kind", s.kind)
                 messages.setProperty(i, "poll", content["@type"] === "messagePoll" ? JSON.stringify(content.poll) : "")
+                if (store.isCardType(content["@type"])) {
+                    const row0 = messages.get(i)
+                    let sk = null
+                    try { sk = JSON.parse(row0.senderKey) } catch (e) {}
+                    messages.setProperty(i, "card", page.cardPack({ id: id, date: row0.date, is_outgoing: row0.out, sender_id: sk, content: content }))
+                }
+                const lpp = page.lpPack(content, id)
+                messages.setProperty(i, "lp", lpp.lp)
+                messages.setProperty(i, "lpPic", lpp.lpPic)
+                if (lpp.lp !== "" && !lpp.lpPic)
+                    page.loadLpPic(id)
                 const p = page.media(content)
                 messages.setProperty(i, "veiled", p.spoiler && !page.unveiled[id])
                 messages.setProperty(i, "heard", p.heard || page.channel)
@@ -2870,6 +3837,13 @@ Page {
             const i = page.indexOf(id)
             if (i >= 0)
                 messages.setProperty(i, "edited", true)
+        }
+        function onMessageReplyMarkup(chatId, id, rm) {
+            if (chatId !== page.chatId)
+                return
+            const i = page.indexOf(id)
+            if (i >= 0)
+                messages.setProperty(i, "ikb", page.ikbPack(rm))
         }
         function onMessagesDeleted(chatId, ids) {
             if (chatId !== page.chatId)
@@ -3010,6 +3984,7 @@ Page {
                 required property string path       // the file, here
                 required property int jumbo         // one to three emoji alone: big, no bubble
                 required property string fwd        // forwarded: who from
+                required property var viaId         // via inline bot user_id (0 for none)
                 required property string reacts     // its reactions, JSON: [{ e, n, mine }]
                 required property bool isPinned
                 required property int comments      // a channel post's comments (-1: none)
@@ -3019,13 +3994,17 @@ Page {
                 required property bool veiled       // a spoiler: the picture blurred under dust until tapped
                 required property string poll       // a poll: TDLib's, JSON (PollView)
                 required property bool heard        // a voice note or a round video played (else its dot)
+                required property string lp         // link_preview metadata JSON ("" for none)
+                required property string lpPic      // link_preview thumbnail/photo local path
+                required property string ikb        // inline keyboard rows JSON ("" for none)
+                required property string card       // rich card metadata JSON ("" for none)
                 // an album: its main one shows them all (a mosaic), the others are tucked away under it
                 readonly property var group: album !== "" ? (page.albumRev, page.albums[album] || null) : null
                 readonly property bool grouped: group !== null && group.ids.length > 1
                 readonly property bool tucked: grouped && group.main !== msgId
                 readonly property bool media: picKind !== ""
                 readonly property bool simpleText: !tucked && said === "" && picKind === "" && rowKind === "" &&
-                    jumbo === 0 && rich === "" && kind === "" && fwd === "" && rank === "" &&
+                    jumbo === 0 && rich === "" && kind === "" && fwd === "" && viaId === 0 && rank === "" && lp === "" && ikb === "" &&
                     reacts.length <= 2 && views === 0 && replies === 0 && comments < 0 &&
                     !page.channel && !page.picking && page.firstUnread !== msgId
                 readonly property Item view: look.item          // the row as the page asks it things (null: tucked)
@@ -3042,8 +4021,12 @@ Page {
                     }
                     if (page.translating || page.ones[msgId])
                         page.translateId(msgId)
-                    if ((media || rowKind === "file") && !pic)
+                    if ((media || rowKind === "file" || rowKind === "card") && !pic)
                         page.loadPic(msgId)
+                    if (rowKind === "card")
+                        page.loadCardExtra(msgId)
+                    if (lp !== "" && !lpPic)
+                        page.loadLpPic(msgId)
                     if (auto && !path && got < 0)
                         page.download(msgId, false)
                 }
@@ -3181,8 +4164,114 @@ Page {
             }
         }
 
+        // Unread mentions (@) and unread reactions (❤) floating buttons above ↓ (lazy: 0 objects when counts are 0)
+        Loader {
+            id: unreadBadgesLoader
+            z: 2
+            active: page.ready && !page.thread && !page.directTopic && !page.selecting && !page.searching
+                    && (page.unreadMentions > 0 || page.unreadReactions > 0)
+            anchors.fill: parent
+            sourceComponent: Item {
+                id: badgeStack
+                readonly property real baseBottom: page.height - page.kb - page.foot - 8 - (toNewest.visible ? toNewest.height + 14 : 0)
+                readonly property bool showMention: page.unreadMentions > 0
+                readonly property bool showReaction: page.unreadReactions > 0
+
+                Glass {          // @: jump to next unread mention; hold -> Mark all as read
+                    id: mentionBtn
+                    visible: badgeStack.showMention
+                    anchors.right: parent.right; anchors.rightMargin: 10
+                    y: badgeStack.baseBottom - height
+                    width: 40; height: 40
+                    opacity: mentionHit.pressed ? 0.72 : 1
+                    Text {
+                        anchors.centerIn: parent
+                        text: "@"
+                        color: Theme.accent
+                        font.family: Theme.font; font.pixelSize: 20; font.weight: Font.DemiBold
+                        anchors.verticalCenterOffset: -1
+                    }
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: -9
+                        width: Math.max(20, mentionCountText.implicitWidth + 10); height: 20; radius: 10
+                        color: Theme.badge
+                        Text {
+                            id: mentionCountText
+                            anchors.centerIn: parent
+                            text: store.count(page.unreadMentions)
+                            color: Theme.badgeText
+                            font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold
+                        }
+                    }
+                    MouseArea {
+                        id: mentionHit
+                        anchors.fill: parent; anchors.margins: -6
+                        property bool held: false
+                        Timer {
+                            id: mentionHold
+                            interval: 380
+                            onTriggered: {
+                                mentionHit.held = true
+                                page.showBadgeMenu("mention", mentionBtn.y)
+                            }
+                        }
+                        onPressed: { held = false; mentionHold.restart() }
+                        onReleased: mentionHold.stop()
+                        onCanceled: mentionHold.stop()
+                        onClicked: if (!held) page.jumpUnreadMention()
+                    }
+                }
+
+                Glass {          // ❤: jump to next unread reaction; hold -> Mark all as read
+                    id: reactionBtn
+                    visible: badgeStack.showReaction
+                    anchors.right: parent.right; anchors.rightMargin: 10
+                    y: badgeStack.baseBottom - (badgeStack.showMention ? 54 : 0) - height
+                    width: 40; height: 40
+                    opacity: reactionHit.pressed ? 0.72 : 1
+                    Icon {
+                        anchors.centerIn: parent
+                        width: 20; height: 20
+                        name: "heart"
+                        color: "#ff3b5c"
+                    }
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: -9
+                        width: Math.max(20, reactionCountText.implicitWidth + 10); height: 20; radius: 10
+                        color: "#ff3b5c"
+                        Text {
+                            id: reactionCountText
+                            anchors.centerIn: parent
+                            text: store.count(page.unreadReactions)
+                            color: "white"
+                            font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold
+                        }
+                    }
+                    MouseArea {
+                        id: reactionHit
+                        anchors.fill: parent; anchors.margins: -6
+                        property bool held: false
+                        Timer {
+                            id: reactionHold
+                            interval: 380
+                            onTriggered: {
+                                reactionHit.held = true
+                                page.showBadgeMenu("reaction", reactionBtn.y)
+                            }
+                        }
+                        onPressed: { held = false; reactionHold.restart() }
+                        onReleased: reactionHold.stop()
+                        onCanceled: reactionHold.stop()
+                        onClicked: if (!held) page.jumpUnreadReaction()
+                    }
+                }
+            }
+        }
+
         Rectangle {          // a chat with nothing in it yet: a card in the middle, as Telegram-iOS's
-            visible: page.ready && messages.count === 0
+            visible: page.ready && messages.count === 0 && !(page.showBotStart && page.botDescription !== "")
             anchors.centerIn: parent
             transform: Translate { y: -page.kb / 2 }
             width: Math.min(parent.width - 80, 240); height: emptyText.height + 32
@@ -3281,6 +4370,7 @@ Page {
                         elide: Text.ElideRight
                         text: page.selecting ? (page.pickedIds.length ? Tr.n("%1 ta tanlandi", page.pickedIds.length) : Tr.t("Xabarlarni tanlang"))
                             : page.directTopic && page.directSender ? (store.seen, store.senderName(page.directSender, false) || store.title(page.chat))
+                            : page.forumTopic ? (page.forumTitle || (page.forumGeneral ? Tr.t("Umumiy") : store.title(page.chat)))
                             : page.thread ? Tr.t("Izohlar") : store.title(page.chat)
                         color: Theme.text
                         font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
@@ -3291,6 +4381,7 @@ Page {
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
                         text: page.directTopic ? store.title(page.chat) + " · " + Tr.t("Kanalga xabarlar")
+                            : page.forumTopic ? (store.title(page.chat) + (page.forumClosed ? " · " + Tr.t("Yopiq") : ""))
                             : page.thread ? page.threadOf : (store.seen, store.acting, page.now, store.status(page.chat, page.now))     // (re-read when either changes)
                         visible: text !== "" && !page.selecting
                         color: text === Tr.t("onlayn") || text.endsWith("...") ? Theme.accent : Theme.grey
@@ -3767,11 +4858,11 @@ Page {
         Item {               // the field, with what it answers or edits over it: Telegram-iOS 26's glass
             id: input        // floating over the chat — 📎, the field, the mic, each its own piece
             z: 1
-            visible: page.canPost && !page.searching && !page.selecting
+            visible: page.canPost && !page.searching && !page.selecting && !page.showBotStart
             anchors.bottom: parent.bottom
             transform: Translate { y: -page.barLift }
             width: parent.width
-            height: visible ? compose.height + Math.max(60, field.contentHeight + 38) : 0
+            height: visible ? compose.height + lpBarWrap.height + Math.max(60, field.contentHeight + 38) : 0
             onHeightChanged: if (list.down && !scroll.running) Qt.callLater(list.positionViewAtBeginning)
             Glass {              // the field's menu (held): as iOS's edit menu, and Telegram's «Format»
                 id: fieldMenu
@@ -3960,16 +5051,45 @@ Page {
                         MouseArea { anchors.fill: parent; anchors.margins: -12; onClicked: page.cancelCompose() }
                     }
                 }
+                Loader {         // link preview bar above the field (loaded only when a link preview is active)
+                    id: lpBarWrap
+                    y: compose.height
+                    width: parent.width
+                    active: page.composeLp !== null && !page.composeLpDisabled && !page.textBarred
+                    visible: active
+                    height: active ? 46 : 0
+                    sourceComponent: LinkPreviewBar {
+                        width: parent.width
+                        info: page.composeLp
+                        picPath: page.composeLpPic
+                        showSeparator: compose.height > 0
+                        onOptionsRequested: page.showLpMenu()
+                        onDismissed: {
+                            page.composeLpDisabled = true
+                            page.composeLp = null
+                            page.composeLpPic = ""
+                            if (page.lpMenu)
+                                page.lpMenu.visible = false
+                        }
+                    }
+                }
                 TextEdit {
                     id: field
-                    x: 14; y: compose.height + 11
-                    width: parent.width - 28 - (schedBtn.visible ? 30 : 0) - (bell.visible ? 30 : 0) - (clock.visible ? 30 : 0) - (smiley.visible ? 30 : 0)
+                    x: 14; y: compose.height + lpBarWrap.height + 11
+                    width: parent.width - 28 - (botCmdBtn.visible ? 30 : 0) - (botKbBtn.visible ? 30 : 0) - (schedBtn.visible ? 30 : 0) - (bell.visible ? 30 : 0) - (clock.visible ? 30 : 0) - (smiley.visible ? 30 : 0)
                     wrapMode: TextEdit.Wrap
-                    onActiveFocusChanged: if (activeFocus && page.panelOpen) page.keyboardUp()
+                    onActiveFocusChanged: if (activeFocus) { if (page.panelOpen) page.keyboardUp(); if (page.botKbOpen) page.botKbOpen = false }
                     color: Theme.text
                     font.family: Theme.font; font.pixelSize: 16
                     onTextChanged: {
+                        if (field.text !== "" && page.botCmdForced)
+                            page.botCmdForced = false
                         page.reMark()
+                        page.scheduleComposePreview()
+                        if (!acLoader.active && /[@#:]/.test(field.text))
+                            acLoader.active = true
+                        if (!inlineLoader.active && /^@[a-zA-Z][a-zA-Z0-9_]{2,31}\s/.test(field.text))
+                            inlineLoader.active = true
                         if (page.ready)
                             draftLater.restart()
                     }
@@ -3995,9 +5115,24 @@ Page {
                     }
                     Text {
                         visible: !field.text && !field.preeditText && !page.textBarred
-                        text: page.paidMessageStars > 0 ? Tr.f("Xabar (⭐ %1)", store.count(page.paidMessageStars))
+                        width: field.width
+                        elide: Text.ElideRight
+                        text: page.botPlaceholder !== "" ? page.botPlaceholder
+                            : page.paidMessageStars > 0 ? Tr.f("Xabar (⭐ %1)", store.count(page.paidMessageStars))
                             : page.channel ? Tr.t("Xabar tarqatish") : Tr.t("Xabar")
                         color: page.paidMessageStars > 0 ? (Theme.dark ? "#ffc337" : "#c87000") : Theme.grey
+                        font: field.font
+                    }
+                    Text {
+                        visible: page.inlinePlaceholder !== "" && !page.textBarred && field.text !== ""
+                        readonly property rect curRect: visible ? field.positionToRectangle(field.length) : Qt.rect(0, 0, 0, 0)
+                        x: curRect.x + 2
+                        y: curRect.y
+                        width: Math.max(0, field.width - x)
+                        elide: Text.ElideRight
+                        text: page.inlinePlaceholder
+                        textFormat: Text.PlainText
+                        color: Theme.grey
                         font: field.font
                     }
                 }
@@ -4117,12 +5252,59 @@ Page {
                         onClicked: page.openScheduled()
                     }
                 }
+                Item {           // bot reply keyboard toggle (⌨/▾)
+                    id: botKbBtn
+                    visible: page.botReplyKb !== null && !page.editing
+                    anchors.right: schedBtn.visible ? schedBtn.left : bell.visible ? bell.left : clock.visible ? clock.left : smiley.visible ? smiley.left : parent.right
+                    anchors.rightMargin: schedBtn.visible || bell.visible || clock.visible || smiley.visible ? 8 : 12
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: (44 - height) / 2
+                    width: 24; height: 24
+                    opacity: botKbHit.pressed ? 0.5 : 1
+                    Text {
+                        anchors.centerIn: parent
+                        text: page.botKbOpen ? "▾" : "⌨"
+                        color: page.botKbOpen ? Theme.accent : Theme.grey
+                        font.family: Theme.font; font.pixelSize: page.botKbOpen ? 20 : 21
+                    }
+                    MouseArea {
+                        id: botKbHit
+                        anchors.fill: parent; anchors.margins: -10
+                        onClicked: page.botKbOpen ? page.hideBotKb() : page.showBotKb()
+                    }
+                }
+                Item {           // bot / commands trigger button
+                    id: botCmdBtn
+                    visible: page.botCommands.length > 0 && !page.editing && !page.textBarred && field.text === ""
+                    anchors.right: botKbBtn.visible ? botKbBtn.left : schedBtn.visible ? schedBtn.left : bell.visible ? bell.left : clock.visible ? clock.left : smiley.visible ? smiley.left : parent.right
+                    anchors.rightMargin: botKbBtn.visible || schedBtn.visible || bell.visible || clock.visible || smiley.visible ? 8 : 12
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: (44 - height) / 2
+                    width: 22; height: 22
+                    opacity: botCmdHit.pressed ? 0.5 : 1
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 20; height: 20; radius: 6
+                        color: page.botCmdForced ? Theme.accent : "transparent"
+                        border.color: page.botCmdForced ? Theme.accent : Theme.grey
+                        border.width: 1.5
+                        Text {
+                            anchors.centerIn: parent
+                            text: "/"
+                            color: page.botCmdForced ? Theme.badgeText : Theme.grey
+                            font.family: Theme.font; font.pixelSize: 13; font.weight: Font.Bold
+                        }
+                    }
+                    MouseArea {
+                        id: botCmdHit
+                        anchors.fill: parent; anchors.margins: -10
+                        onClicked: page.botCmdForced = !page.botCmdForced
+                    }
+                }
             }
             Loader {             // recording: the time, and how to let it go (over the clip and the field)
                 id: recBar
                 active: page.recording
-                x: 8; y: fieldBox.y + compose.height
-                width: parent.width - 66; height: fieldBox.height - compose.height
+                x: 8; y: fieldBox.y + compose.height + lpBarWrap.height
+                width: parent.width - 66; height: fieldBox.height - compose.height - lpBarWrap.height
                 sourceComponent: Rectangle {
                     radius: 22
                     color: Theme.glass
@@ -4167,8 +5349,8 @@ Page {
             Loader {             // the voice note stopped, before it goes: 🗑, ▶ and its waveform, its length (loaded only when previewing)
                 id: previewBar
                 active: page.preview !== null || page.roundPreview !== null || page.roundBusy
-                x: 8; y: fieldBox.y + compose.height
-                width: parent.width - 66; height: fieldBox.height - compose.height
+                x: 8; y: fieldBox.y + compose.height + lpBarWrap.height
+                width: parent.width - 66; height: fieldBox.height - compose.height - lpBarWrap.height
                 sourceComponent: Rectangle {
                     radius: 22
                     color: Theme.glass
@@ -4334,8 +5516,10 @@ Page {
                         if (!t)
                             return
                         if (page.editing) {
-                            store.editText(page.chatId, page.editing.id, t, w.marks)
+                            const lpo = page.composeLinkPreviewOpts()
+                            store.editText(page.chatId, page.editing.id, t, w.marks, lpo)
                             page.editing = null
+                            page.resetComposePreview()
                             field.text = ""
                             return
                         }
@@ -4701,7 +5885,11 @@ Page {
         anchors.fill: parent
         sourceComponent: AttachSheet {
             rights: page.rights
+            allowPoll: page.group || page.channel || store.isSaved(page.chat) || page.bot
             onRefused: (text) => page.toast(text)
+            onPickPoll: page.openPollCreate()
+            onPickLocation: page.openLocationPick()
+            onPickContact: page.openContactPick()
             onOpenChanged: if (!open) Qt.callLater(() => { page.pendingAttachMode = "" })
             onSend: (picked, asFiles, apart) => {
                 const mode = page.pendingAttachMode
@@ -4727,7 +5915,7 @@ Page {
                 if (!scheduleState && page.gap)
                     page.fresh()
                 store.sendVoice(page.chatId, p.path, p.dur, p.wave, page.replying ? page.replying.id : 0,
-                                page.thread, silentFlag, page.directTopic, page.paidMessageStars, scheduleState)
+                                page.thread, silentFlag, page.directTopic, page.paidMessageStars, scheduleState, page.forumTopic)
                 page.replying = null
                 if (scheduleState) {
                     page.hasScheduled = true
@@ -4753,7 +5941,7 @@ Page {
                 if (!scheduleState && page.gap)
                     page.fresh()
                 store.sendRound(page.chatId, rp.path, rp.dur, page.replying ? page.replying.id : 0,
-                                page.thread, silentFlag, page.directTopic, page.paidMessageStars, scheduleState)
+                                page.thread, silentFlag, page.directTopic, page.paidMessageStars, scheduleState, page.forumTopic)
                 page.replying = null
                 if (scheduleState) {
                     page.hasScheduled = true
@@ -4775,6 +5963,7 @@ Page {
         const w = page.fieldWords(), t = w.text
         if (!t)
             return
+        const lpo = page.composeLinkPreviewOpts()
         const doSend = () => {
             if (!scheduleState && page.gap)
                 page.fresh()
@@ -4783,8 +5972,11 @@ Page {
                 page.flying = { text: t, x: at.x, y: at.y }
             }
             store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, silentFlag,
-                           w.marks, page.directTopic, page.paidMessageStars, scheduleState)
+                           w.marks, page.directTopic, page.paidMessageStars, scheduleState, lpo, page.forumTopic)
+            store.recordHashtags(page.chatId, t)
             page.replying = null
+            page.botForceReply = null
+            page.resetComposePreview()
             field.text = ""
             if (scheduleState) {
                 page.hasScheduled = true
@@ -4807,7 +5999,8 @@ Page {
             if (!scheduleState && page.gap)
                 page.fresh()
             store.sendFiles(page.chatId, picked, caption, replyId, asFiles, page.thread, silentFlag, apart,
-                            page.directTopic, page.paidMessageStars, scheduleState)
+                            page.directTopic, page.paidMessageStars, scheduleState, page.forumTopic)
+            page.resetComposePreview()
             field.text = ""
             page.replying = null
             if (scheduleState) {
@@ -4829,14 +6022,17 @@ Page {
 
     Loader {
         id: emojiPanelLoader
-        z: 1
+        readonly property bool oskLifted: page.panelOpen && osk.h > 0
+        readonly property real liftedH: Math.min(Math.max(page.panelH, 280), Math.max(180, page.height - bar.height - osk.h))
+        z: oskLifted ? 4 : 1
         active: false
-        y: page.height - (page.panelOpen ? page.kb : Math.min(page.kb, page.panelH))
-        width: page.width; height: page.panelH
+        y: oskLifted ? page.height - osk.h - liftedH : page.height - (page.panelOpen ? page.kb : Math.min(page.kb, page.panelH))
+        width: page.width; height: oskLifted ? liftedH : page.panelH
         visible: active && (page.panelOpen || (page.kb > 1 && !page.panelHold && osk.h === 0 && y < page.height))
         sourceComponent: StickerPanel {
             anchors.fill: parent
             store: page.store
+            chatId: page.chatId
             emojiOk: !page.textBarred
             stickersOk: !page.rights || page.rights.other
             barredText: page.allowedText
@@ -4844,6 +6040,115 @@ Page {
             onBackspace: page.eraseBack()
             onSticker: (st) => page.sendSticker(st)
             onGif: (a) => page.sendGif(a)
+            onInlineGif: (qid, rid, a) => page.sendInlineGif(qid, rid, a)
+            onOpenStickerSet: (sid) => page.openStickerSet(sid)
+            onSay: (txt) => page.toast(txt)
+        }
+    }
+    Loader {             // bot reply keyboard (replyMarkupShowKeyboard) in place of OSK
+        id: botReplyKbLoader
+        z: 1
+        active: false
+        y: page.height - (page.botKbOpen ? page.kb : Math.min(page.kb, page.botKbH))
+        width: page.width
+        height: page.botKbH
+        visible: active && page.botReplyKb !== null && (page.botKbOpen || (page.kb > 1 && !page.panelOpen && !page.panelHold && osk.h === 0 && y < page.height))
+        sourceComponent: BotReplyKeyboard {
+            anchors.fill: parent
+            info: page.botReplyKb
+            maxPanelH: page.panelH
+            safeBottom: safe.bottom
+            onButtonTapped: (btn) => page.tapReplyKbButton(btn)
+        }
+    }
+    Loader {             // bot / commands popup above the composer
+        id: botCommandsLoader
+        z: 3
+        active: page.botCmdOpen
+        visible: active && item !== null && item.count > 0
+        x: 8
+        width: page.width - 16
+        height: item ? item.implicitHeight : 0
+        anchors.bottom: page.bottom
+        anchors.bottomMargin: input.height + 6
+        transform: Translate { y: -page.barLift }
+        sourceComponent: BotCommands {
+            width: parent.width
+            commands: page.botCommands
+            query: page.botCmdQuery
+            isGroup: page.group
+            onPicked: (cmd) => page.runBotCommand(cmd)
+        }
+    }
+    Loader {             // empty bot chat: optional description card + «Boshlash» (sendBotStartMessage)
+        id: botStartLoader
+        z: 2
+        active: page.showBotStart
+        visible: active
+        anchors.fill: parent
+        sourceComponent: Item {
+            Rectangle {
+                visible: page.botDescription !== ""
+                anchors.centerIn: parent
+                anchors.verticalCenterOffset: -20
+                width: Math.min(parent.width - 48, 300)
+                height: botDescCol.implicitHeight + 28
+                radius: 16
+                color: Theme.menu
+                border.width: 0.5
+                border.color: Theme.separator
+                Column {
+                    id: botDescCol
+                    x: 16; y: 14
+                    width: parent.width - 32
+                    spacing: 6
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        text: Tr.t("Bu bot nima qila oladi?")
+                        color: Theme.text
+                        font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                    }
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                        text: page.botDescription
+                        color: Theme.grey
+                        font.family: Theme.font; font.pixelSize: 14
+                    }
+                }
+            }
+            Rectangle {
+                id: startPill
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 8
+                transform: Translate { y: -page.barLift }
+                width: Math.min(parent.width - 32, 260)
+                height: 46
+                radius: 23
+                color: Theme.accent
+                opacity: startHit.pressed ? 0.75 : 1
+                Text {
+                    anchors.centerIn: parent
+                    text: Tr.t("Boshlash")
+                    color: Theme.badgeText
+                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                }
+                MouseArea {
+                    id: startHit
+                    anchors.fill: parent
+                    onClicked: {
+                        if (page.chat && page.chat.type["@type"] === "chatTypePrivate")
+                            store.startBot(page.chat.type.user_id, page.chatId, "", (r) => {
+                                if (r && r["@type"] === "error")
+                                    page.toast(r.message || Tr.t("Bo'lmadi"))
+                            })
+                    }
+                }
+            }
         }
     }
     // an emoji where the cursor is (the field keeps its cursor when it has no focus)
@@ -4892,7 +6197,7 @@ Page {
             if (page.gap)
                 page.fresh()
             store.sendSticker(page.chatId, st, page.replying ? page.replying.id : 0, page.thread, page.silent,
-                              page.directTopic, page.paidMessageStars)
+                              page.directTopic, page.paidMessageStars, null, page.forumTopic)
             page.replying = null
             list.down = true
             list.positionViewAtBeginning()
@@ -4907,7 +6212,26 @@ Page {
             if (page.gap)
                 page.fresh()
             store.sendGif(page.chatId, a, page.replying ? page.replying.id : 0, page.thread, page.silent,
-                          page.directTopic, page.paidMessageStars)
+                          page.directTopic, page.paidMessageStars, null, page.forumTopic)
+            page.replying = null
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            askPaid(page.paidMessageStars, doSend)
+        else
+            doSend()
+    }
+    function sendInlineGif(qid, rid, a) {
+        const doSend = () => {
+            if (page.gap)
+                page.fresh()
+            if (qid && rid)
+                store.sendInlineGifResult(page.chatId, qid, rid, page.replying ? page.replying.id : 0, page.thread, page.silent,
+                                          page.directTopic, page.paidMessageStars, null, page.forumTopic)
+            else if (a)
+                store.sendGif(page.chatId, a, page.replying ? page.replying.id : 0, page.thread, page.silent,
+                              page.directTopic, page.paidMessageStars, null, page.forumTopic)
             page.replying = null
             list.down = true
             list.positionViewAtBeginning()
@@ -4999,6 +6323,95 @@ Page {
     }
     Timer { id: toastAway; interval: 2200; onTriggered: toastBox.opacity = 0 }
 
+    // a dice tapped: Telegram's tip over the field -- «send a 🎲 to roll a die» and «Yuborish», which throws one
+    property string diceTip: ""
+    function diceTipText(e) {
+        const k = e.replace(/\uFE0F/g, "")
+        return k === "🎲" ? Tr.t("Kubik tashlash uchun 🎲 emojisini yuboring.")
+             : k === "🎯" ? Tr.t("Nishonga otish uchun 🎯 emojisini yuboring.")
+             : k === "🎰" ? Tr.t("Omadingizni sinash uchun o'yin avtomati emojisini yuboring.")
+             : Tr.f("Omadingizni sinash uchun %1 emojisini yuboring.", e)
+    }
+    function showDiceTip(e) {
+        if (!canPost || selecting || searching)
+            return
+        diceTip = e
+        diceTipLoader.active = true
+        diceTipAway.restart()
+    }
+    function throwDice(e) {
+        diceTip = ""
+        const go = () => {
+            if (page.gap)
+                page.fresh()
+            store.sendText(page.chatId, e, 0, page.thread, false, [], page.directTopic, page.paidMessageStars,
+                           null, null, page.forumTopic)
+            list.down = true
+            list.positionViewAtBeginning()
+        }
+        if (page.paidMessageStars > 0)
+            page.askPaid(page.paidMessageStars, go)
+        else
+            go()
+    }
+    Timer { id: diceTipAway; interval: 4000; onTriggered: page.diceTip = "" }
+    Loader {
+        id: diceTipLoader
+        z: 24
+        active: false
+        x: 10
+        width: page.width - 20
+        anchors.bottom: page.bottom
+        anchors.bottomMargin: page.barLift + page.foot - safe.bottom + 8      // over the field, as it stands
+        sourceComponent: Rectangle {
+            id: tip
+            width: parent ? parent.width : 0
+            height: tipRow.implicitHeight + 20
+            radius: 14
+            color: Qt.rgba(0, 0, 0, 0.75)
+            opacity: page.diceTip !== "" ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 200 } }
+            property string shownEmoji: ""
+            Connections {
+                target: page
+                function onDiceTipChanged() { if (page.diceTip !== "") tip.shownEmoji = page.diceTip }
+            }
+            Component.onCompleted: shownEmoji = page.diceTip
+            Row {
+                id: tipRow
+                x: 12; y: 10
+                width: parent.width - 24
+                spacing: 10
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: tip.shownEmoji
+                    font.pixelSize: 26
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - 36 - 10 - sendWord.width - 10
+                    wrapMode: Text.Wrap
+                    text: tip.shownEmoji ? page.diceTipText(tip.shownEmoji) : ""
+                    color: "white"
+                    font.family: Theme.font; font.pixelSize: 14
+                }
+                Text {
+                    id: sendWord
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Tr.t("Yuborish")
+                    color: Theme.dark ? Theme.accent : "#5ac8fa"
+                    font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                    MouseArea {
+                        anchors.fill: parent; anchors.margins: -12
+                        enabled: tip.visible
+                        onClicked: page.throwDice(tip.shownEmoji)
+                    }
+                }
+            }
+        }
+    }
+
     // ---- a voice note ----------------------------------------------------------
     // held: it records (Ogg Opus, what Telegram's voice notes are); let go: it is sent, its
     // waveform worked out from the file (td.voice); slid left: thrown away
@@ -5066,7 +6479,7 @@ Page {
         onTriggered: page.acting("chatActionRecordingVoiceNote")
     }
     function acting(what) {
-        store.send({ "@type": "sendChatAction", chat_id: chatId, action: what ? { "@type": what } : null })
+        store.send({ "@type": "sendChatAction", chat_id: chatId, topic_id: store.topic(thread, directTopic, forumTopic), action: what ? { "@type": what } : null })
     }
     function startVoice() {
         if (roundMode && !td.fakeCamera) {
@@ -5135,7 +6548,7 @@ Page {
         const doSend = () => {
             if (page.gap)
                 page.fresh()
-            store.sendVoice(chatId, at, v.duration, v.waveform, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars)
+            store.sendVoice(chatId, at, v.duration, v.waveform, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars, null, forumTopic)
             replying = null
             list.down = true
             list.positionViewAtBeginning()
@@ -5151,7 +6564,7 @@ Page {
         const doSend = () => {
             if (page.gap)
                 page.fresh()
-            store.sendVoice(chatId, p.path, p.dur, p.wave, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars)
+            store.sendVoice(chatId, p.path, p.dur, p.wave, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars, null, forumTopic)
             replying = null
             list.down = true
             list.positionViewAtBeginning()
@@ -5171,7 +6584,7 @@ Page {
         const doSend = () => {
             if (page.gap)
                 page.fresh()
-            store.sendRound(chatId, path, secs, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars)
+            store.sendRound(chatId, path, secs, replying ? replying.id : 0, thread, silent, directTopic, paidMessageStars, null, forumTopic)
             replying = null
             list.down = true
             list.positionViewAtBeginning()
@@ -5311,6 +6724,143 @@ Page {
         }
     }
 
+    Loader {             // compose-field autocomplete (@, #, :); lazy-loaded on first trigger
+        id: acLoader
+        z: 28
+        active: false
+        anchors.fill: parent
+        sourceComponent: Autocomplete {
+            store: page.store
+            editor: field
+            chatId: page.chatId
+            isGroup: page.group && !page.isDirectChat
+            thread: page.thread
+            directTopic: page.directTopic
+            forumTopic: page.forumTopic
+            bottomInset: page.barLift + input.height
+            activeInput: input.visible && !page.textBarred && !page.recording && page.preview === null && page.roundPreview === null
+            inlineMode: !!(page.inlinePanel && page.inlinePanel.isInlineBot)
+            onMentionNamePicked: (offset, length, userId) => {
+                const out = page.marks.filter((e) => !(e.type["@type"] === "textEntityTypeMentionName"
+                                                       && e.offset < offset + length && e.offset + e.length > offset))
+                out.push({ "@type": "textEntity", offset: offset, length: length,
+                           type: { "@type": "textEntityTypeMentionName", user_id: userId } })
+                page.marks = out.sort((p, q) => p.offset - q.offset)
+                ink.paint(field.textDocument, page.marks, Theme.accent)
+            }
+        }
+    }
+
+    Loader {             // inline bot results panel (@bot query); lazy-loaded on first trigger
+        id: inlineLoader
+        z: 28
+        active: false
+        anchors.fill: parent
+        sourceComponent: InlineResults {
+            store: page.store
+            editor: field
+            chatId: page.chatId
+            bottomInset: page.barLift + input.height
+            activeInput: input.visible && !page.textBarred && !page.recording && !page.editing
+                         && page.preview === null && page.roundPreview === null
+            onResultPicked: (queryId, resultId) => page.sendInlineResult(queryId, resultId)
+            onStartBotRequested: (botUserId, startParam) => page.handleInlineStartBot(botUserId, startParam)
+            onWebAppRequested: () => page.toast(Tr.t("Rasmiy ilovada oching"))
+        }
+    }
+
+    Loader {             // link preview options menu: above/below text, small/large media, remove
+        id: lpMenuLoader
+        z: 30
+        active: false
+        anchors.fill: parent
+        sourceComponent: Item {
+            id: lpMenuItem
+            visible: false
+            readonly property bool hasMedia: !!(page.composeLp && page.composeLp.hasMedia)
+            readonly property bool effLarge: page.composeLpMedia === "large" ? true
+                                           : page.composeLpMedia === "small" ? false
+                                           : !!(page.composeLp && page.composeLp.showLarge)
+            readonly property var items: {
+                const a = [
+                    { key: "pos", text: page.composeLpAbove ? Tr.t("Pastda ko'rsatish") : Tr.t("Tepada ko'rsatish"), icon: "sort", danger: false }
+                ]
+                if (hasMedia)
+                    a.push({ key: "size", text: effLarge ? Tr.t("Kichik rasm") : Tr.t("Katta rasm"), icon: "expand", danger: false })
+                a.push({ key: "off", text: Tr.t("Ko'rinishni o'chirish"), icon: "cross", danger: true })
+                return a
+            }
+            function show() {
+                visible = true
+                lpCard.scale = 0.01
+                lpGrow.start()
+            }
+            function pick(k) {
+                visible = false
+                if (k === "pos") {
+                    page.composeLpAbove = !page.composeLpAbove
+                } else if (k === "size") {
+                    page.composeLpMedia = effLarge ? "small" : "large"
+                    page.fetchComposePreview()
+                } else if (k === "off") {
+                    page.composeLpDisabled = true
+                    page.composeLp = null
+                    page.composeLpPic = ""
+                }
+            }
+            MouseArea { anchors.fill: parent; onClicked: lpMenuItem.visible = false }
+            Rectangle {
+                id: lpCard
+                x: Math.max(10, Math.min(parent.width - width - 10, fieldBox.x))
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: page.barLift + input.height + 6
+                width: 244; height: lpChoices.implicitHeight
+                radius: 16
+                color: Theme.menu
+                border.width: 0.5; border.color: Theme.separator
+                clip: true
+                transformOrigin: Item.BottomLeft
+                ScaleAnimator {
+                    id: lpGrow; target: lpCard; from: 0.01; to: 1; duration: 360
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring
+                }
+                Column {
+                    id: lpChoices
+                    width: parent.width
+                    Repeater {
+                        model: lpMenuItem.items
+                        Rectangle {
+                            required property var modelData
+                            required property int index
+                            width: lpChoices.width; height: 46
+                            color: lpOptHit.pressed ? Theme.highlight : "transparent"
+                            Rectangle { visible: index > 0; width: parent.width; height: 0.5; color: Theme.separator }
+                            Icon {
+                                x: 16; anchors.verticalCenter: parent.verticalCenter
+                                width: 18; height: 18
+                                name: modelData.icon
+                                color: modelData.danger ? Theme.danger : Theme.text
+                            }
+                            Text {
+                                x: 46; anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - 58
+                                elide: Text.ElideRight
+                                text: modelData.text
+                                color: modelData.danger ? Theme.danger : Theme.text
+                                font.family: Theme.font; font.pixelSize: 16
+                            }
+                            MouseArea {
+                                id: lpOptHit
+                                anchors.fill: parent
+                                onClicked: lpMenuItem.pick(modelData.key)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Loader {             // date + time picker for scheduling text or attachments
         id: scheduleSheetLoader
         z: 31
@@ -5328,6 +6878,120 @@ Page {
                     page.sendFieldWith(page.silent, st)
             }
             onCancelled: page.pendingSchedule = null
+        }
+    }
+
+    Loader {             // long-press popover for @ / ❤ floating buttons: Mark All as Read
+        id: badgeMenuLoader
+        z: 30
+        active: false
+        anchors.fill: parent
+        sourceComponent: Item {
+            id: badgeMenuItem
+            visible: false
+            property string kind: "mention"
+            property real anchorY: 0
+            function show(k, btnY) {
+                kind = k || "mention"
+                anchorY = btnY || (height - page.foot - 80)
+                visible = true
+                badgeCard.scale = 0.01
+                badgeGrow.start()
+            }
+            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, Theme.dark ? 0.25 : 0.10) }
+            MouseArea { anchors.fill: parent; onClicked: badgeMenuItem.visible = false }
+            Rectangle {
+                id: badgeCard
+                anchors.right: parent.right; anchors.rightMargin: 10
+                y: Math.max(68, badgeMenuItem.anchorY - height - 10)
+                width: Math.max(196, badgeActionText.implicitWidth + 64)
+                height: 46
+                radius: 16
+                color: Theme.menu
+                border.width: 0.5
+                border.color: Theme.separator
+                clip: true
+                transformOrigin: Item.BottomRight
+                ScaleAnimator {
+                    id: badgeGrow; target: badgeCard; from: 0.01; to: 1; duration: 360
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring
+                }
+                Rectangle {
+                    anchors.fill: parent
+                    color: badgeActionHit.pressed ? Theme.highlight : "transparent"
+                }
+                Icon {
+                    x: 16; anchors.verticalCenter: parent.verticalCenter
+                    width: 20; height: 20
+                    name: "check"
+                    color: Theme.accent
+                }
+                Text {
+                    id: badgeActionText
+                    x: 46; anchors.verticalCenter: parent.verticalCenter
+                    text: Tr.t("Hammasi o'qildi")
+                    color: Theme.text
+                    font.family: Theme.font; font.pixelSize: 16
+                }
+                MouseArea {
+                    id: badgeActionHit
+                    anchors.fill: parent
+                    onClicked: {
+                        badgeMenuItem.visible = false
+                        if (badgeMenuItem.kind === "reaction")
+                            page.readAllReactions(false)
+                        else
+                            page.readAllMentions(false)
+                    }
+                }
+            }
+        }
+    }
+
+    Loader {             // single-message translation sheet (TranslateSheet.qml)
+        id: translateSheetLoader
+        z: 32
+        active: false
+        anchors.fill: parent
+        sourceComponent: TranslateSheet {
+            store: page.store
+            onCopied: (txt) => {
+                page.copy(txt)
+                page.toast(Tr.t("Tarjima nusxalandi"))
+            }
+        }
+    }
+
+    Loader {             // gift card detail sheet (GiftViewSheet.qml, lazy)
+        id: giftViewLoader
+        z: 32
+        active: false
+        anchors.fill: parent
+        sourceComponent: GiftViewSheet {
+            store: page.store
+            onSay: (txt) => page.toast(txt)
+            onOpenSender: (s) => {
+                if (!s)
+                    return
+                if (s["@type"] === "messageSenderUser")
+                    page.openCardContactChat(s.user_id)
+                else if (s["@type"] === "messageSenderChat")
+                    page.openChat({ "@type": "chat", id: s.chat_id }, 0)
+            }
+        }
+    }
+
+    Loader {             // sticker pack sheet when tapping a sticker (StickerSetSheet.qml, lazy)
+        id: stickerSetLoader
+        z: 32
+        active: false
+        anchors.fill: parent
+        sourceComponent: StickerSetSheet {
+            store: page.store
+            canSend: !page.rights || page.rights.other
+            safeBottom: safe.bottom
+            onPicked: (st) => page.sendSticker(st)
+            onChanged: (_sid, installed) => page.toast(installed ? Tr.t("Stiker to'plami qo'shildi") : Tr.t("Stiker to'plami o'chirildi"))
         }
     }
 
@@ -5835,6 +7499,53 @@ Page {
         }
     }
     Component {
+        id: headViaComp
+        Item {
+            id: headViaItem
+            readonly property Item host: parent
+            readonly property Item msg: host.msg
+            readonly property Item sh: msg.shell
+            readonly property bool showWho: sh.sender !== "" && msg.first && !msg.bare
+            readonly property string botName: {
+                void page.store.seen
+                return page.store.viaBotName(sh.viaId)
+            }
+            readonly property string viaLabel: botName !== "" ? Tr.f("@%1 orqali", botName) : ""
+            readonly property real wants: showWho
+                ? Math.min(host.room, whoV.implicitWidth + (viaLabel !== "" ? viaT.implicitWidth + 6 : 0))
+                : Math.min(host.room, viaT.implicitWidth)
+            implicitWidth: Math.max(wants, 1)
+            implicitHeight: Math.max(showWho ? whoV.height : 0, viaLabel !== "" ? viaT.height : 0)
+            width: implicitWidth
+            height: implicitHeight
+            Text {
+                id: whoV
+                visible: headViaItem.showWho
+                width: Math.min(implicitWidth, Math.max(24, headViaItem.host.room - (viaT.visible ? viaT.implicitWidth + 6 : 0)))
+                elide: Text.ElideRight
+                text: headViaItem.sh.sender
+                color: headViaItem.sh.tint
+                font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+            }
+            Text {
+                id: viaT
+                visible: headViaItem.viaLabel !== ""
+                x: headViaItem.showWho ? whoV.width + 6 : 0
+                width: Math.min(implicitWidth, Math.max(24, headViaItem.host.room - x))
+                elide: Text.ElideRight
+                text: headViaItem.viaLabel
+                textFormat: Text.PlainText
+                color: headViaItem.sh.out ? Theme.check : Theme.accent
+                font.family: Theme.font; font.pixelSize: 14; font.weight: Font.Medium
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    onClicked: page.startInlineBot(headViaItem.botName)
+                }
+            }
+        }
+    }
+    Component {
         id: quoteComp
         Rectangle {
             id: answer
@@ -5869,6 +7580,36 @@ Page {
                 font.family: Theme.font; font.pixelSize: 14
             }
             MouseArea { anchors.fill: parent; onClicked: page.openReply(answer.sh.msgId, answer.sh.replyId, answer.sh.replyChat) }
+        }
+    }
+    Component {
+        id: linkPreviewComp
+        LinkPreview {
+            required property Item msg
+            readonly property Item sh: msg.shell
+            info: msg.lpData
+            picPath: sh.lpPic
+            out: msg.out
+            room: msg.most - 24
+            x: 10
+            width: Math.max(80, msg.bubbleWidth - 20)
+            y: msg.lpY
+            onOpened: (url) => page.follow(url, msg.msgId)
+            onTouched: (down) => msg.touchBubble(down)
+            onHeld: page.openMenu(msg, 0)
+        }
+    }
+    Component {
+        id: botKeyboardComp
+        BotKeyboard {
+            required property Item msg
+            readonly property Item sh: msg.shell
+            rows: msg.ikbRows
+            busyKey: page.botBusyBtn.startsWith(msg.msgId + ":") ? page.botBusyBtn.slice(String(msg.msgId).length + 1) : ""
+            x: msg.bubbleX
+            y: msg.bubbleY + msg.bubbleHeight + 4
+            width: msg.bubbleWidth
+            onButtonTapped: (btn, key) => page.tapInlineButton(msg.msgId, sh.senderKey, btn, key)
         }
     }
     Component {
@@ -6311,6 +8052,46 @@ Page {
             // (played once already in this chat: on its last frame, as on iOS)
             atEnd: host.emo && !!page.seenEmo[host.msgId]
             onEnded: page.seenEmo[host.msgId] = true
+            // 🎰: the reels and the lever over the background, played with it (a tap replays them too)
+            Loader {
+                anchors.fill: parent
+                active: !!page.diceSlots[parent.host.msgId]
+                sourceComponent: Item {
+                    id: slotLayers
+                    readonly property Item bg: parent.parent
+                    property var paths: []
+                    Component.onCompleted: {
+                        const parts = page.diceSlots[bg.host.msgId] || []
+                        const got = parts.map(() => "")
+                        parts.forEach((f, k) => store.fetch(f, 1, (path) => {
+                            got[k] = path
+                            if (got.every((x) => x !== ""))
+                                slotLayers.paths = got.slice()
+                        }))
+                    }
+                    Connections {
+                        target: slotLayers.bg
+                        function onOverChanged() {      // replay(): `over` back to false
+                            if (slotLayers.bg.over)
+                                return
+                            for (let k = 0; k < reels.count; k++)
+                                if (reels.itemAt(k)) reels.itemAt(k).replay()
+                        }
+                    }
+                    Repeater {
+                        id: reels
+                        model: slotLayers.paths
+                        Lottie {
+                            required property string modelData
+                            anchors.fill: parent
+                            path: modelData
+                            running: slotLayers.bg.running
+                            once: true
+                            atEnd: slotLayers.bg.atEnd
+                        }
+                    }
+                }
+            }
         }
     }
     Component {
@@ -6614,6 +8395,25 @@ Page {
             onVote: (ids) => page.vote(sh.msgId, ids)
             onVoters: page.showVoters(sh.msgId, poll)
             onExplain: (t) => page.toast(t)
+            onHeld: page.openMenu(msg)
+        }
+    }
+    Component {
+        id: cardRowComp
+        MessageCard {
+            readonly property Item msg: parent.msg
+            readonly property Item sh: msg.shell
+            info: sh.card !== "" ? JSON.parse(sh.card) : null
+            picPath: sh.pic
+            out: sh.out
+            room: msg.most - 24
+            hasCaption: sh.text !== "" || sh.rich !== ""
+            onOpenContactChat: (uid) => page.openCardContactChat(uid)
+            onAddContact: (cinfo) => page.askAddCardContact(sh.msgId, cinfo)
+            onOpenStory: (cid, sid) => page.openCardStory(cid, sid)
+            onOpenGift: page.openCardGift(sh.msgId)
+            onToggleTask: (tid, doneNow) => page.toggleChecklistTask(sh.msgId, tid, doneNow)
+            onNotice: (t) => page.toast(t)
             onHeld: page.openMenu(msg)
         }
     }
@@ -7139,10 +8939,46 @@ Page {
                 }
             }
             onNeedStampBgChanged: syncStampBg()
+            property Item lpItem: null
+            readonly property bool hasLp: shell.lp !== "" && !media && rowKind === "" && !bare
+            readonly property var lpData: hasLp ? JSON.parse(shell.lp) : null
+            readonly property bool lpAbove: !!(lpData && lpData.aboveText)
+            readonly property real bubbleWidth: bubble.width
+            readonly property real bubbleX: bubble.x
+            readonly property real bubbleY: bubble.y
+            readonly property real bubbleHeight: bubble.height
+            property Item ikbItem: null
+            readonly property bool hasIkb: shell.ikb !== "" && !shell.tucked
+            readonly property var ikbRows: hasIkb ? JSON.parse(shell.ikb) : []
+            function syncIkb() {
+                if (hasIkb) {
+                    if (!ikbItem)
+                        ikbItem = botKeyboardComp.createObject(mover, { msg: item })
+                } else if (ikbItem) {
+                    ikbItem.destroy()
+                    ikbItem = null
+                }
+            }
+            onHasIkbChanged: syncIkb()
+            readonly property real lpY: lpAbove
+                ? (quote.visible && !bare ? quote.y + quote.height + 4 : headLoad.visible ? headLoad.y + headLoad.height + 4 : 8)
+                : body.y + body.height + (body.height > 0 ? 6 : 0)
+            function syncLp() {
+                if (hasLp) {
+                    if (!lpItem)
+                        lpItem = linkPreviewComp.createObject(bubble, { msg: item })
+                } else if (lpItem) {
+                    lpItem.destroy()
+                    lpItem = null
+                }
+            }
+            onHasLpChanged: syncLp()
             function initRow() {
                 if (roundBig) { roundK = 1; page.roundSeen = roundShown }
                 syncFlash()
                 syncStampBg()
+                syncLp()
+                syncIkb()
             }
             Component.onDestruction: cleanup()      // (as the plain text row's)
             function cleanup() {
@@ -7197,7 +9033,7 @@ Page {
             readonly property real moved: pickable && !out ? 40 : 0       // (and narrower by as much)
             readonly property real above: (newDay ? 38 : 0) + (unreadBar ? 36 : 0) + (first ? 8 : 2)
             width: shell.width
-            height: bubble.height + above
+            height: bubble.height + (ikbItem ? ikbItem.height + 4 : 0) + above
 
             Loader {
                 id: dayPill
@@ -7238,17 +9074,23 @@ Page {
                     // the time goes in the last line's corner when it fits there, else under it
                     readonly property real stampRoom: stamp.implicitWidth + 8
                     readonly property real tail: item.talk >= 0 && !item.bare ? 42 : 0     // the comments row
+                    readonly property real lpW: item.lpItem ? item.lpItem.wants : 0
+                    readonly property real lpH: item.lpItem ? item.lpItem.height : 0
+                    readonly property bool lpBelow: item.hasLp && !item.lpAbove
 
                     readonly property bool stampUnder: !item.overlaid && item.lastLine + stampRoom > (item.media ? width : item.most) - 24
                     width: item.shell.jumbo ? Math.max(body.implicitWidth, stamp.implicitWidth + 12) + 8
                          : item.bare ? item.pw : item.media ? item.pw + 6
                          : Math.min(item.most, Math.max(body.implicitWidth, headLoad.visible ? headLoad.wants : 0, quote.visible ? quote.wants : 0,
                                                         attach.visible ? attach.attW : 0,
+                                                        item.hasLp ? Math.max(0, lpW - 4) : 0,
+                                                        item.hasIkb ? Math.max(0, Math.min(item.most, 240) - 24) : 0,
                                                         item.reacted ? reactRow.wants + stamp.implicitWidth + 6 : 0,
-                                                        stampUnder ? stamp.implicitWidth : item.lastLine + stampRoom, tail ? 196 : 0) + 24)
+                                                        stampUnder || lpBelow ? stamp.implicitWidth : item.lastLine + stampRoom, tail ? 196 : 0) + 24)
                     height: tail + (item.shell.jumbo ? body.y + body.height + 26
                           : item.overlaid ? picture.y + item.ph + (item.bare ? 0 : 3)
                           : item.reacted ? reactRow.y + reactRow.height + 6
+                          : lpBelow ? (item.lpItem ? item.lpItem.y + lpH : body.y + body.height) + 22
                           : body.y + body.height + (stampUnder ? 24 : 8))
 
                     BorderImage {   // the bubble, stretched from a small picture (nullgram_app.py Bubble), drawn
@@ -7331,9 +9173,10 @@ Page {
                     readonly property real headRoom: (item.media ? item.pw + 6 : item.most) - 24
                     readonly property bool hasWho: item.sender !== "" && item.first && !item.bare
                     readonly property bool hasFwd: item.shell.fwd !== "" && !item.bare
+                    readonly property bool hasVia: item.shell.viaId > 0 && !item.bare
                     Loader {
                         id: headLoad
-                        active: bubble.hasWho || bubble.hasFwd
+                        active: bubble.hasWho || bubble.hasFwd || bubble.hasVia
                         visible: active
                         x: 12; y: 7
                         readonly property Item msg: item
@@ -7341,6 +9184,7 @@ Page {
                         readonly property real bubW: bubble.width
                         readonly property real wants: headLoad.item ? headLoad.item.wants : 0
                         sourceComponent: bubble.hasFwd ? headFwdComp
+                                       : bubble.hasVia ? headViaComp
                                        : item.shell.rank !== "" ? headRankComp
                                        : headNameComp
                     }
@@ -7373,6 +9217,7 @@ Page {
                         id: attach
                         visible: item.rowKind !== ""
                         active: !item.shell.tucked && item.rowKind !== "" && (item.rowKind !== "poll" || item.shell.poll !== "")
+                                && (item.rowKind !== "card" || item.shell.card !== "")
                         x: 12
                         y: quote.visible ? quote.y + quote.height + 6 : headLoad.visible ? headLoad.y + headLoad.height + 4 : 6
                         readonly property Item msg: item
@@ -7381,6 +9226,7 @@ Page {
                         sourceComponent: item.stacked ? stackComp
                                        : item.rowKind === "voice" || item.rowKind === "audio" ? audioRowComp
                                        : item.rowKind === "poll" ? pollRowComp
+                                       : item.rowKind === "card" ? cardRowComp
                                        : item.rowKind === "file" ? fileRowComp : null
                     }
                     Words {
@@ -7389,6 +9235,7 @@ Page {
                         visible: !item.overlaid
                         x: item.shell.jumbo ? 4 : 12
                         y: item.media ? picture.y + picture.height + 5 : attach.visible ? attach.y + attach.attH + (text || parts ? 4 : 0)
+                         : item.hasLp && item.lpAbove && item.lpItem ? item.lpItem.y + item.lpItem.height + 5
                          : quote.visible && !item.bare ? quote.y + quote.height + 4 : headLoad.visible ? headLoad.y + headLoad.height + 2 : item.shell.jumbo ? 0 : 8
                         height: (attach.visible || item.media) && !text && !parts ? 0 : implicitHeight
                         width: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.attW, Math.min(implicitWidth, item.most - 24))
@@ -7412,7 +9259,7 @@ Page {
                         active: item.reacted        // (made only when there are; its height is the Flow's)
                         visible: active
                         x: item.bare ? 0 : 10
-                        y: body.y + body.height + (body.height ? 6 : 4)
+                        y: (bubble.lpBelow && item.lpItem ? item.lpItem.y + bubble.lpH : body.y + body.height) + (body.height || bubble.lpBelow ? 6 : 4)
                         readonly property real wants: item.reacted ? item.reactList.reduce((w, r, k) =>
                             w + page.chipWidth(r) + (k ? 4 : 0), 0) : 0
                         width: Math.min(wants + 1, bubble.width - x - 10)

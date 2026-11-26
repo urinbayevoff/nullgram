@@ -2,8 +2,10 @@
 // Settings in ~/.config/OmonullOS/Nullgram.conf.
 pragma Singleton
 import QtQuick
+import QtCore
 
 QtObject {
+    id: prefsRoot
     property bool autoGif: true         // GIFs come down and play by themselves
     property bool autoVoice: true       // voice notes and round videos come down by themselves
     property string silent: ""          // the channels whose posts go without a sound (their 🔔 off): ids, comma between
@@ -17,6 +19,7 @@ QtObject {
     property bool inAppSounds: true
     property bool inAppPreview: true
     property bool lockNames: true
+    property bool allAccounts: true     // Bildirishnomalar › «Barcha hisoblardan» (0.9.7): the other accounts kept on and notifying
     property bool badgeChannels: true
     property bool badgeMessages: false
 
@@ -145,4 +148,16 @@ QtObject {
     readonly property bool stickers: loopStickers && !saving
     readonly property bool emoji: loopEmoji && !saving
     readonly property bool fx: effects && !saving
+
+    // 0.9.6/4 autocomplete: per-chat recent hashtags JSON ({ "<chatId>": ["tag", ...] }, up to 50 per chat)
+    property string recentHashtags: "{}"
+    property Settings _acSettings: Settings {
+        category: "autocomplete"
+        property alias recentHashtags: prefsRoot.recentHashtags
+    }
+    // 0.9.7: the accounts' own (not per account)
+    property Settings _accSettings: Settings {
+        category: "accounts"
+        property alias allAccounts: prefsRoot.allAccounts
+    }
 }

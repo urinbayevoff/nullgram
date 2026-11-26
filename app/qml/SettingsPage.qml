@@ -169,6 +169,19 @@ Page {
                 }
             }
 
+            SettingsGroup {         // the other accounts and «Hisob qo'shish» (0.9.7; Telegram-iOS's SettingsController)
+                Repeater {
+                    model: accounts.list.filter((a) => !a.active)
+                    AccountRow {
+                        required property var modelData
+                        required property int index
+                        account: modelData
+                        last: accounts.count >= 4 && index === accounts.count - 2
+                        onClicked: store.switchAccount(modelData.slot)
+                    }
+                }
+                AccountRow { add: true; last: true; visible: accounts.count < 4; onClicked: store.addAccount(page.nav, { show: page.openAlert }) }
+            }
             SettingsGroup {
                 SettingsRow { art: "profile"; text: Tr.t("Mening profilim"); last: true; onClicked: page.openQml("ProfilePage.qml") }
             }
@@ -205,7 +218,7 @@ Page {
                 note: Tr.t("Nullgram — OmonullOS uchun Telegram (Qt Quick + TDLib).")
                 SettingsRow {
                     text: Tr.t("Ilova haqida"); chevron: false; last: true
-                    value: "0.9" + (page.tdVersion ? " · TDLib " + page.tdVersion : "")
+                    value: td.appVersion + (page.tdVersion ? " · TDLib " + page.tdVersion : "")
                 }
             }
             SettingsGroup {
@@ -395,7 +408,9 @@ Page {
                     wrapMode: Text.Wrap
                     horizontalAlignment: Text.AlignHCenter
                     textFormat: Text.StyledText
-                    text: "<b>" + Tr.t("Hisobdan chiqasizmi?") + "</b><br>" + Tr.t("Kirish uchun raqamingiz yoki QR kod kerak bo'ladi.")
+                    text: "<b>" + Tr.t("Hisobdan chiqasizmi?") + "</b><br>" + (accounts.count > 1   // (0.9.7: the others stay)
+                          ? Tr.t("Faqat shu hisobdan chiqasiz. Boshqa hisoblaringiz qoladi.")
+                          : Tr.t("Kirish uchun raqamingiz yoki QR kod kerak bo'ladi."))
                     color: Theme.text
                     font.family: Theme.font; font.pixelSize: 15
                 }
