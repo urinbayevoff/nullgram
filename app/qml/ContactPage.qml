@@ -101,7 +101,22 @@ SubPage {
         })
     }
     function askDelete() {
+        sheetMode = "delete"
         sheet.open = true
+    }
+    function askStartSecret() {
+        sheetMode = "secret"
+        sheet.open = true
+    }
+    function startSecret() {
+        store.startSecretChat(userId, (cid, err) => {
+            if (!page)
+                return
+            if (cid)
+                page.nav.openCreatedChat(cid)
+            else if (err)
+                page.said(err)
+        })
     }
     function remove() {
         store.send({ "@type": "removeContacts", user_ids: [userId] }, (r) => {
@@ -383,6 +398,15 @@ SubPage {
         }
     }
     SettingsGroup {
+        visible: page.canSuggest && !(page.store.me && page.userId === page.store.me.id)
+        SettingsRow {
+            icon: "lock"; bare: true
+            text: Tr.t("Maxfiy chat boshlash")
+            accent: true; chevron: false; last: true
+            onClicked: page.askStartSecret()
+        }
+    }
+    SettingsGroup {
         visible: !page.adding && !page.byPhone
         SettingsRow {
             text: Tr.t("Kontaktni o'chirish")
@@ -397,7 +421,8 @@ SubPage {
         width: 1; height: Math.max(osk.h, safe.bottom) + 16
     }
 
-    // iOS's action sheet: «Kontaktni o'chirish» in red on a card, «Bekor qilish» under it
+    property string sheetMode: "delete" // "delete" | "secret"
+    // iOS's action sheet: «Kontaktni o'chirish» in red (or «Maxfiy chat boshlash») on a card, «Bekor qilish» under it
     Item {
         id: sheet
         parent: page
@@ -420,7 +445,9 @@ SubPage {
                 easing.bezierCurve: [0.0744, 0.0298, 0.1307, 0.7931, 0.3680, 0.9301, 0.4409, 0.9722, 0.4273, 0.9999, 1.0, 1.0] } }
             spacing: 8
             Repeater {
-                model: [{ t: Tr.t("Kontaktni o'chirish"), red: true }, { t: Tr.t("Bekor qilish"), red: false }]
+                model: page.sheetMode === "secret"
+                    ? [{ t: Tr.t("Maxfiy chat boshlash"), act: "secret", red: false }, { t: Tr.t("Bekor qilish"), act: "", red: false }]
+                    : [{ t: Tr.t("Kontaktni o'chirish"), act: "delete", red: true }, { t: Tr.t("Bekor qilish"), act: "", red: false }]
                 Rectangle {
                     required property var modelData
                     width: parent.width; height: 57
@@ -430,20 +457,23 @@ SubPage {
                         anchors.centerIn: parent
                         text: parent.modelData.t
                         color: parent.modelData.red ? Theme.danger : Theme.accent
-                        font.family: Theme.font; font.pixelSize: 20; font.weight: parent.modelData.red ? Font.Normal : Font.DemiBold
+                        font.family: Theme.font; font.pixelSize: 20; font.weight: parent.modelData.act ? Font.Normal : Font.DemiBold
                     }
                     MouseArea {
                         id: sheetHit
                         anchors.fill: parent
                         onClicked: {
                             sheet.open = false
-                            if (parent.modelData.red)
-                                page.remove()
+                            page.runSheetAct(parent.modelData.act)
                         }
                     }
                 }
             }
         }
+    }
+    function runSheetAct(act) {
+        if (act === "delete") remove()
+        else if (act === "secret") startSecret()
     }
     // the shell's back: the sheet closes first
     function dismiss() {

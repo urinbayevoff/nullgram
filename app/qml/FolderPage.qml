@@ -16,6 +16,8 @@ SubPage {
     property bool moreIn: false
     property bool moreOut: false
     property bool saving: false
+    property var inviteLinks: []
+    property bool linkBusy: false
     readonly property bool premium: !!store.me && !!store.me.is_premium
     readonly property var included: f ? f.pinned_chat_ids.concat(f.included_chat_ids) : []
     readonly property bool changed: !!f && JSON.stringify(f) !== was
@@ -50,6 +52,61 @@ SubPage {
             page.was = JSON.stringify(r)
             page.f = r
             page.fetch(r.pinned_chat_ids.concat(r.included_chat_ids, r.excluded_chat_ids))
+            page.loadInviteLinks()
+        })
+    }
+    function loadInviteLinks() {
+        if (!folderId)
+            return
+        store.getFolderInviteLinks(folderId, (links) => {
+            if (page)
+                page.inviteLinks = links || []
+        })
+    }
+    function copyLink(url) {
+        if (!url)
+            return
+        clipCopy.text = url
+        clipCopy.selectAll()
+        clipCopy.copy()
+        say(Tr.t("Havola nusxalandi"))
+    }
+    function shareFolderLink() {
+        if (!folderId || linkBusy)
+            return
+        if (changed)
+            return say(Tr.t("Avval papkadagi o'zgarishlarni saqlang"))
+        linkBusy = true
+        store.getChatsForFolderInviteLink(folderId, (shareIds) => {
+            if (!page)
+                return
+            const ids = (shareIds && shareIds.length) ? shareIds : page.included
+            if (!ids.length) {
+                page.linkBusy = false
+                return page.say(Tr.t("Ulashish uchun kamida bitta chat kerak"))
+            }
+            store.createFolderInviteLink(page.folderId, "", ids, (linkObj, err) => {
+                if (!page)
+                    return
+                page.linkBusy = false
+                if (!linkObj || !linkObj.invite_link)
+                    return page.say(err || Tr.t("Havola yaratib bo'lmadi"))
+                page.inviteLinks = page.inviteLinks.concat([linkObj])
+                page.copyLink(linkObj.invite_link)
+            })
+        })
+    }
+    function removeInviteLink(url) {
+        revealed = ""
+        if (!folderId || !url)
+            return
+        store.deleteFolderInviteLink(folderId, url, (ok, err) => {
+            if (!page)
+                return
+            if (!ok)
+                return page.say(err || Tr.t("Bo'lmadi"))
+            page.inviteLinks = page.inviteLinks.filter((x) => x.invite_link !== url)
+            page.say(Tr.t("Havola o'chirildi"))
         })
     }
     // chats TDLib has not told us of yet (not in the lists loaded)
@@ -91,6 +148,8 @@ SubPage {
     function drop(key) {
         revealed = ""
         const [kind, v] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)]
+        if (kind === "link")
+            return removeInviteLink(v)
         if (kind === "in" || kind === "out")
             set({ [v]: false })
         else if (kind === "chat")
@@ -249,6 +308,48 @@ SubPage {
             visible: !!page.f && page.f.excluded_chat_ids.length >= 7 && !page.moreOut
             count: page.f ? page.f.excluded_chat_ids.length - 5 : 0
             onTapped: page.moreOut = true
+        }
+    }
+
+    // ---- shareable invite links (t.me/addlist/...) ----
+    SettingsGroup {
+        visible: page.folderId > 0 && !!page.f
+        title: Tr.t("Havola orqali ulashish")
+        note: Tr.t("Boshqalar ushbu havola orqali papkangizdagi chatlarni bitta bosishda qo'sha oladi.")
+        AddRow {
+            text: page.linkBusy ? Tr.t("Yuklanmoqda…") : Tr.t("Havola orqali ulashish")
+            onTapped: page.shareFolderLink()
+        }
+        Repeater {
+            model: page.inviteLinks
+            Swiped {
+                id: lrow
+                required property var modelData
+                key: "link:" + (modelData.invite_link || "")
+                Column {
+                    x: 16; anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - 32
+                    spacing: 2
+                    Text {
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: (lrow.modelData.invite_link || "").replace(/^https?:\/\//, "")
+                        color: Theme.accent
+                        font.family: Theme.font; font.pixelSize: 15; font.weight: Font.Medium
+                    }
+                    Text {
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: Tr.n("%1 ta chat", (lrow.modelData.chat_ids || []).length) + " · " + Tr.t("Nusxalash uchun bosing")
+                        color: Theme.grey
+                        font.family: Theme.font; font.pixelSize: 12
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: page.copyLink(lrow.modelData.invite_link)
+                }
+            }
         }
     }
 
@@ -448,6 +549,7 @@ SubPage {
     }
 
     // ---- over the page ----
+    TextEdit { id: clipCopy; visible: false }
     Alert { id: alert; parent: page; anchors.fill: parent }
     function say(text) {
         note.text = text
@@ -459,7 +561,7 @@ SubPage {
         parent: page
         z: 45
         x: 12; width: page.width - 24
-        y: page.height - height - 24
+        y: page.height - height - 24 - safe.bottom
         height: note.height + 24
         radius: 14
         color: Qt.rgba(0, 0, 0, 0.85)

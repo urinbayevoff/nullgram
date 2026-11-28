@@ -7,6 +7,7 @@ import QtQuick
 Page {
     id: page
     property int now: Date.now() / 1000
+    property bool secretMode: false     // picking a contact to start a secret chat (createNewSecretChat)
     property bool loaded: false
     property var allContacts: []        // [user] loaded from store.contacts
     property var searchUsers: []        // [user] from searchContacts
@@ -33,6 +34,10 @@ Page {
     }
 
     function dismiss() {
+        if (alert.open) {
+            alert.open = false
+            return true
+        }
         if (searchField.text !== "") {
             searchField.text = ""
             keyboardDown()
@@ -64,6 +69,28 @@ Page {
     function openUserChat(userId) {
         if (opening)
             return
+        if (secretMode) {
+            const u = store.users[userId]
+            const who = u ? ((u.first_name || "") + (u.last_name ? " " + u.last_name : "")).trim() : ""
+            keyboardDown()
+            alert.show(Tr.t("Maxfiy chat boshlash"),
+                       Tr.f("%1 bilan maxfiy chat boshlansinmi?", who || Tr.t("Foydalanuvchi")), [
+                { t: Tr.t("Bekor qilish") },
+                { t: Tr.t("Boshlash"), run: () => {
+                    if (page.opening)
+                        return
+                    page.opening = true
+                    store.startSecretChat(userId, (chatId, err) => {
+                        page.opening = false
+                        if (chatId)
+                            page.nav.openCreatedChat(chatId)
+                        else if (err)
+                            page.nav.say(err)
+                    })
+                } }
+            ], false)
+            return
+        }
         opening = true
         keyboardDown()
         store.chatWith(userId, (chatId) => {
@@ -81,8 +108,7 @@ Page {
     }
 
     function userPhotoNow(u) {
-        const f = u && u.profile_photo && u.profile_photo.small
-        return f && f.local && f.local.is_downloading_completed ? f.local.path : ""
+        return store.userPhotoNow(u)
     }
 
     function chatUsername(c) {
@@ -153,6 +179,8 @@ Page {
             kind: "head", userId: 0, chatId: 0, title: label, sub: "", photo: "", letters: "", tint: "", icon: ""
         })
         const pushUser = (u) => {
+            if (secretMode && (!u || (u.type && u.type["@type"] !== "userTypeRegular") || (store.me && u.id === store.me.id)))
+                return
             const full = (u.first_name + " " + u.last_name).trim()
             rows.append({
                 kind: "user", userId: u.id, chatId: 0, title: full,
@@ -160,11 +188,15 @@ Page {
                 photo: userPhotoNow(u), letters: store.letters(full),
                 tint: store.tints[Math.abs(u.id) % store.tints.length], icon: ""
             })
+            store.askUserPhoto(u, rows, "userId")
         }
         if (!query) {
-            rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Yangi guruh"), sub: "", photo: "", letters: "", tint: "", icon: "group" })
-            rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Yangi kanal"), sub: "", photo: "", letters: "", tint: "", icon: "channel" })
-            rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Kontakt qo'shish"), sub: "", photo: "", letters: "", tint: "", icon: "adduser" })
+            if (!secretMode) {
+                rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Yangi guruh"), sub: "", photo: "", letters: "", tint: "", icon: "group" })
+                rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Yangi kanal"), sub: "", photo: "", letters: "", tint: "", icon: "channel" })
+                rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Yangi maxfiy chat"), sub: "", photo: "", letters: "", tint: "", icon: "lock" })
+                rows.append({ kind: "action", userId: 0, chatId: 0, title: Tr.t("Kontakt qo'shish"), sub: "", photo: "", letters: "", tint: "", icon: "adduser" })
+            }
             if (allContacts.length > 0) {
                 pushHead(Tr.t("Kontaktlar"))
                 for (const u of allContacts)
@@ -177,7 +209,7 @@ Page {
             for (const u of searchUsers)
                 pushUser(u)
         }
-        if (globalIds.length > 0) {
+        if (!secretMode && globalIds.length > 0) {
             pushHead(Tr.t("Global qidiruv"))
             for (const cid of globalIds) {
                 const c = store.chats[cid]
@@ -214,7 +246,7 @@ Page {
         }
         Text {
             anchors.centerIn: parent
-            text: Tr.t("Yangi xabar")
+            text: page.secretMode ? Tr.t("Yangi maxfiy chat") : Tr.t("Yangi xabar")
             color: Theme.text
             font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
         }
@@ -396,6 +428,8 @@ Page {
                             page.openPage("NewGroupPage.qml", {})
                         else if (row.icon === "channel")
                             page.openPage("NewChannelPage.qml", {})
+                        else if (row.icon === "lock")
+                            page.openPage("NewChatPage.qml", { secretMode: true })
                         else if (row.icon === "adduser")
                             page.openAddContact()
                     } else if (row.kind === "user") {
@@ -423,5 +457,10 @@ Page {
         text: Tr.t("Kontaktlar yo'q")
         color: Theme.grey
         font.family: Theme.font; font.pixelSize: 15
+    }
+
+    Alert {
+        id: alert
+        anchors.fill: parent
     }
 }

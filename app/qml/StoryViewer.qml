@@ -1331,9 +1331,9 @@ Item {
                             : !viewersSheet.isMine
                               ? Tr.t("Hali hech kim reaksiya bildirmadi.")
                               : (viewersSheet.expired && viewersSheet.totalViews > 0)
-                                ? Tr.t(viewersSheet.isPremium
-                                       ? "Bu hikoyaning ko'ruvchilari yozib olinmagan."
-                                       : "Ko'ruvchilar ro'yxati muddati o'tgan. Telegram Premium bilan doimiy ko'rishlar tarixini oching.")
+                                ? (viewersSheet.isPremium
+                                   ? Tr.t("Bu hikoyaning ko'ruvchilari yozib olinmagan.")
+                                   : Tr.t("Ko'ruvchilar ro'yxati muddati o'tgan. Telegram Premium bilan doimiy ko'rishlar tarixini oching."))
                                 : Tr.t("Hali hech kim ko'rmadi.")
                     color: Theme.grey
                     font.family: Theme.font; font.pixelSize: 15
@@ -1373,9 +1373,9 @@ Item {
                         spacing: 6
                         Text {
                             width: parent.width; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
-                            text: Tr.t(viewersSheet.isPremium
-                                       ? "Bu hikoyaning barcha ko'ruvchilari saqlanib qolmagan."
-                                       : "To'liq ko'rishlar tarixi faqat Telegram Premium bilan saqlanadi.")
+                            text: viewersSheet.isPremium
+                                  ? Tr.t("Bu hikoyaning barcha ko'ruvchilari saqlanib qolmagan.")
+                                  : Tr.t("To'liq ko'rishlar tarixi faqat Telegram Premium bilan saqlanadi.")
                             color: Theme.grey
                             font.family: Theme.font; font.pixelSize: 13
                         }

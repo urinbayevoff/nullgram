@@ -368,6 +368,8 @@ Rectangle {
             storyView.back()
             return
         }
+        if (videoPip.dismiss())
+            return
         if (player.sheetOpen) {
             player.sheetOpen = false
             return
@@ -566,6 +568,8 @@ Rectangle {
         onActivated: root.back()
     }
 
+    readonly property alias videoPip: videoPip
+    VideoPip { id: videoPip; nav: root; player: player; store: store; z: 18 }
     PlayerSheet { player: player; store: store }     // a song's player, over every page
 
     // the speed changed: said at the foot (Telegram-iOS's Conversation.AudioRateTooltip…)

@@ -13,6 +13,7 @@ Rectangle {
     property real room: 220
 
     signal opened(string url)
+    signal instantView(string url)
     signal touched(bool down)
     signal held()
 
@@ -21,6 +22,8 @@ Rectangle {
     readonly property string site: info ? (info.site || "") : ""
     readonly property string title: info ? (info.title || "") : ""
     readonly property string desc: info ? (info.desc || "") : ""
+    readonly property bool hasIv: !!(info && info.iv > 0)
+    readonly property real ivBarH: hasIv ? 34 : 0
     readonly property bool hasMedia: !!(info && info.hasMedia)
     readonly property bool showLarge: hasMedia && !!(info && info.showLarge)
     readonly property bool mediaAbove: showLarge && !!(info && info.mediaAbove)
@@ -65,7 +68,7 @@ Rectangle {
     radius: 6
     clip: true
     color: Qt.rgba(ink.r, ink.g, ink.b, out ? (Theme.outLight ? 0.10 : 0.16) : (Theme.dark ? 0.14 : 0.09))
-    implicitHeight: Math.max(36, contentBottom + 6)
+    implicitHeight: Math.max(36, contentBottom + 6) + ivBarH
     height: implicitHeight
 
     Rectangle {
@@ -165,6 +168,7 @@ Rectangle {
     MouseArea {
         id: hit
         anchors.fill: parent
+        anchors.bottomMargin: box.ivBarH
         pressAndHoldInterval: 350
         property bool wasHeld: false
         onPressed: {
@@ -180,6 +184,39 @@ Rectangle {
         onClicked: {
             if (!wasHeld && box.url !== "")
                 box.opened(box.url)
+        }
+    }
+
+    Loader {
+        id: ivBtn
+        active: box.hasIv
+        visible: active
+        z: 2
+        x: 3
+        y: box.height - box.ivBarH
+        width: box.width - 3
+        height: box.ivBarH
+        sourceComponent: Item {
+            Rectangle {
+                anchors.fill: parent
+                color: Qt.rgba(box.ink.r, box.ink.g, box.ink.b, ivHit.pressed ? 0.18 : 0.0)
+            }
+            Rectangle {
+                x: 8; y: 0
+                width: parent.width - 16; height: 0.5
+                color: Qt.rgba(box.ink.r, box.ink.g, box.ink.b, 0.28)
+            }
+            Text {
+                anchors.centerIn: parent
+                text: "⚡ " + Tr.t("Tezkor ko'rish")
+                color: box.ink
+                font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
+            }
+            MouseArea {
+                id: ivHit
+                anchors.fill: parent
+                onClicked: if (box.url !== "") box.instantView(box.url)
+            }
         }
     }
 }

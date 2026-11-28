@@ -34,6 +34,8 @@ Item {
     }
     signal save()
     signal paged(var id)                // another message's picture shows now
+    signal enterPip(var info)           // regular video moved into corner PiP
+    signal videoOpened()                // a video started playing fullscreen (replaces any active video PiP)
 
     // paging: the chat, the slide shown (Store.slide; only its id for the first one) and its neighbours
     property var store: null
@@ -55,8 +57,8 @@ Item {
     // turned: how much bigger it then is (its height across the screen's width)
     readonly property real turnScale: Math.min(width / fitH, height / fitW)
 
-    // at: where a video starts, ms (a timestamp tapped in the words)
-    function show(item, aspect, source, video, id, at) {
+    // at: where a video starts, ms (a timestamp tapped in the words); rate: optional playback rate (from PiP)
+    function show(item, aspect, source, video, id, at, rate) {
         if (open)
             return
         from = item
@@ -64,9 +66,10 @@ Item {
         older = newer = null
         neighbours()
         viewer.video = video || ""
-        viewer.rate = 1
+        viewer.rate = rate > 0 ? rate : 1
         chrome = true
         if (viewer.video) {
+            videoOpened()
             player.from = at || 0
             player.source = "file://" + viewer.video
             player.play()
@@ -85,10 +88,56 @@ Item {
         turned = sideways = false
         turn.rotation = 0
         turn.scale = 1
-        item.opacity = 0
+        if (item)
+            item.opacity = 0
         going.stop()
         toX.to = fitX; toY.to = fitY; toScale.to = 1; toBack.to = 1
         coming.restart()
+    }
+
+    function closeImmediate() {
+        open = false
+        player.stop()
+        coming.stop()
+        going.stop()
+        settle.stop()
+        turning.stop()
+        paging.stop()
+        side.visible = false
+        turned = sideways = false
+        turn.rotation = 0
+        turn.scale = 1
+        if (from)
+            from.opacity = 1
+        from = null
+        visible = false
+        big.source = ""
+        video = ""
+        rate = 1
+        player.source = ""
+        current = older = newer = null
+        waiting = false
+        side.slide = null
+        frame.opacity = 1
+    }
+
+    function toPip() {
+        if (!open || !video)
+            return
+        const info = {
+            path: video,
+            poster: source,
+            aspect: aspect,
+            rate: rate,
+            position: player.position,
+            duration: player.duration,
+            playing: player.playbackState === MediaPlayer.PlayingState,
+            chatId: chatId,
+            msgId: current ? current.id : 0,
+            thread: thread
+        }
+        closeImmediate()
+        enterPip(info)
     }
 
     function close() {
@@ -111,8 +160,11 @@ Item {
     // where the bubble's picture is: the fitted picture scaled to cover it, centred on it
     // (a paged-to one not on the page: it shrinks a little where it is and fades)
     function start() {
-        if (!from)
-            return { s: 0.8, x: frame.x + fitW * 0.1, y: frame.y + fitH * 0.1 }
+        if (!from) {
+            const bx = open ? fitX : frame.x
+            const by = open ? fitY : frame.y
+            return { s: 0.8, x: bx + fitW * 0.1, y: by + fitH * 0.1 }
+        }
         const at = from.mapToItem(viewer, 0, 0)
         const s = Math.max(from.width / fitW, from.height / fitH)
         return { s: s, x: at.x + from.width / 2 - fitW * s / 2, y: at.y + from.height / 2 - fitH * s / 2 }
@@ -360,6 +412,7 @@ Item {
                     return
                 waiting = false
                 video = path
+                videoOpened()
                 player.source = "file://" + path
                 player.play()
                 hide.restart()
@@ -459,6 +512,32 @@ Item {
                         onPressed: (m) => seek(m)
                         onPositionChanged: (m) => seek(m)
                     }
+                }
+            }
+            Rectangle {          // PiP: move regular video into a floating corner window
+                id: pipButton
+                anchors.right: rateButton.left; anchors.rightMargin: 10
+                y: 14
+                width: 40; height: 40; radius: 20
+                color: Qt.rgba(0, 0, 0, 0.45)
+                opacity: pipHit.pressed ? 0.5 : 1
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 20; height: 15; radius: 3
+                    color: "transparent"
+                    border.color: "white"; border.width: 1.6
+                    Rectangle {
+                        anchors.right: parent.right; anchors.rightMargin: 2.5
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: 2.5
+                        width: 8; height: 5.5; radius: 1.4
+                        color: "white"
+                    }
+                }
+                MouseArea {
+                    id: pipHit
+                    anchors.fill: parent; anchors.margins: -6
+                    enabled: viewer.chrome
+                    onClicked: viewer.toPip()
                 }
             }
             Rectangle {          // playback speed: 1X → 1.5X → 2X → 0.5X → 1X (MiniPlayer's framed pill)

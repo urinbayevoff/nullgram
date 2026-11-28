@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 // A voice note or a song in its bubble, as Telegram-iOS's ChatMessageInteractiveFileNode lays
 // them out: the round button (down, the ring while it comes, play, pause), then the waveform
 // (a voice note) or the title and the performer (a song), the time under them.
@@ -18,7 +19,13 @@ Item {
     property real at: 0                 // where it is, ms (while current)
     property real dpr: 1                // the screen's (ChatPage's page.dpr): the waveform drawn that sharp
     property bool fresh: false          // a voice note not yet played: a dot after its time (Telegram-iOS)
-    width: 230; height: 50
+    property string speechState: ""     // "" | "pending" | "text" | "error"
+    property string speechText: ""
+    property bool speechOpen: false
+    signal transcribeTapped()
+    readonly property bool showSpeechBox: kind === "voice" && speechOpen && (speechState === "pending" || speechText !== "")
+    width: 230
+    height: 50 + (speechBox.active && speechBox.item ? speechBox.item.height + 6 : 0)
 
     readonly property color ink: out ? Theme.voiceOut : Theme.accent
     readonly property color faint: out ? Theme.voiceOutFaint : Theme.voiceInFaint
@@ -53,7 +60,7 @@ Item {
             const bit = i * 5, b = bit >> 3, s = bit & 7
             all.push(((raw[b] | ((b + 1 < raw.length ? raw[b + 1] : 0) << 8)) >> s) & 31)
         }
-        const bars = Math.floor((width - 56) / 4)
+        const bars = Math.max(8, Math.floor((width - 56 - (kind === "voice" ? 36 : 0)) / 4))
         const out = []
         for (let k = 0; k < bars; k++) {
             let top = 0
@@ -135,5 +142,57 @@ Item {
         text: (row.kind === "audio" && row.sub ? row.sub + " · " : "") + Math.floor(secs / 60) + ":" + String(secs % 60).padStart(2, "0")
         color: row.out ? Theme.outMeta : Theme.inMeta
         font.family: Theme.font; font.pixelSize: 13
+    }
+
+    // Voice-to-text button («→A»): tap to request recognizeSpeech or toggle transcript open/closed
+    Rectangle {
+        id: transcribeBtn
+        visible: row.kind === "voice"
+        x: row.width - width
+        y: 6
+        width: 30; height: 22; radius: 11
+        color: Qt.rgba(row.ink.r, row.ink.g, row.ink.b, transcribeHit.pressed ? 0.28 : 0.16)
+        Text {
+            anchors.centerIn: parent
+            text: row.speechState === "pending" ? "…"
+                : (row.speechState === "text" && row.speechOpen ? "⌃" : "→A")
+            color: row.ink
+            font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
+        }
+        MouseArea {
+            id: transcribeHit
+            anchors.fill: parent
+            anchors.margins: -6
+            onClicked: row.transcribeTapped()
+        }
+    }
+
+    Loader {
+        id: speechBox
+        active: row.showSpeechBox
+        visible: active
+        x: 0; y: 52
+        width: row.width
+        sourceComponent: Item {
+            width: row.width
+            height: speechTxt.implicitHeight + 24
+            Rectangle {
+                width: parent.width; height: 0.5
+                color: Qt.rgba(row.ink.r, row.ink.g, row.ink.b, 0.22)
+            }
+            Text {
+                id: speechTxt
+                y: 6
+                width: parent.width
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                text: row.speechState === "pending"
+                    ? (row.speechText !== "" ? (/[…\.]$/.test(row.speechText) ? row.speechText : row.speechText + " …") : Tr.t("Matnga o'girilmoqda…"))
+                    : row.speechText
+                color: row.out ? Theme.outText : Theme.inText
+                opacity: row.speechState === "pending" && row.speechText === "" ? 0.68 : 1
+                font.family: Theme.font; font.pixelSize: 14
+            }
+        }
     }
 }

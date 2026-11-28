@@ -55,8 +55,7 @@ Page {
     }
 
     function userPhotoNow(u) {
-        const f = u && u.profile_photo && u.profile_photo.small
-        return f && f.local && f.local.is_downloading_completed ? f.local.path : ""
+        return store.userPhotoNow(u)
     }
 
     function fullNameOf(u) {
@@ -124,6 +123,7 @@ Page {
                 letters: store.letters(full),
                 tint: store.tints[Math.abs(u.id) % store.tints.length]
             })
+            store.askUserPhoto(u, people, "userId")
         }
     }
 

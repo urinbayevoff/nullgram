@@ -25,6 +25,51 @@ Page {
     readonly property bool group: !!chat && (chat.type["@type"] === "chatTypeBasicGroup" ||
                                            (chat.type["@type"] === "chatTypeSupergroup" && !chat.type.is_channel))
     readonly property bool channel: !!chat && chat.type["@type"] === "chatTypeSupergroup" && chat.type.is_channel
+    readonly property bool secret: !!chat && chat.type["@type"] === "chatTypeSecret"
+    readonly property bool canEffect: !!chat && chat.type["@type"] === "chatTypePrivate" && !secret && !bot && !thread && !directTopic
+    readonly property var effectPicker: effectPickerLoader.item
+    property int effectPlayCount: 0
+    property string lastEffectPlayed: ""
+    readonly property var secretChat: store.secretSeen >= 0 && secret ? store.secretChatOf(chat) : null
+    readonly property string secretState: store.secretSeen >= 0 && secret ? store.secretState(chat) : ""
+    readonly property bool secretPending: secret && secretState === "pending"
+    readonly property bool secretReady: secret && secretState === "ready"
+    readonly property bool secretClosed: secret && secretState === "closed"
+    readonly property color secretGreen: Theme.dark ? "#34c759" : "#00a650"
+    property bool secretLpPrompt: false
+    property int expireTick: 0
+    property int expiringCount: 0
+    function expireLeft(at) {
+        void expireTick
+        return store.secretExpireText(Math.max(0, at - Math.floor(Date.now() / 1000)))
+    }
+    function syncExpiring() {
+        let n = 0
+        for (let i = 0; i < messages.count; i++)
+            if (messages.get(i).expireAt > 0)
+                n++
+        expiringCount = n
+    }
+    function sweepExpired() {
+        expireTick++
+        const nowSec = Math.floor(Date.now() / 1000)
+        let n = 0
+        for (let i = messages.count - 1; i >= 0; i--) {
+            const ea = messages.get(i).expireAt
+            if (ea > 0 && ea <= nowSec)
+                messages.remove(i)
+            else if (ea > 0)
+                n++
+        }
+        expiringCount = n
+    }
+    Timer {
+        id: expireTimer
+        interval: 1000
+        repeat: true
+        running: page.expiringCount > 0 && page.visible
+        onTriggered: page.sweepExpired()
+    }
     property bool canGift: false        // a gift may be sent to this channel (supergroupFullInfo.can_send_gift): 🎁 on its bar
     property var directChatId: 0        // a channel's direct messages chat (supergroupFullInfo.direct_messages_chat_id)
     property var directTopic: 0         // a subscriber's thread in an administered channel direct messages chat
@@ -34,11 +79,15 @@ Page {
     property bool forumGeneral: false   // General topic: regular chat history
     property string forumTitle: ""
     property bool forumClosed: false
+    property string forumIconEmojiId: ""
+    property string forumIconColor: ""
     property int paidMessageStars: 0    // Stars required per message in a subscriber DM / paid supergroup
     readonly property bool isDirectChat: (store.seen, store.isDirect(chat))
     readonly property bool isDirectAdmin: (store.seen, store.isDirectAdmin(chat))
     readonly property alias paidSheet: paidSheet
     readonly property alias messageList: messages
+    readonly property bool listMoving: list.moving
+    readonly property bool cePageActive: visible && (!nav || nav.topPage === page)
     readonly property var menuSpring: [0.0333, 0.0, 0.0667, 0.1058, 0.1, 0.2201, 0.14, 0.3573, 0.18, 0.5086,
                                        0.22, 0.6252, 0.28, 0.8001, 0.34, 0.9024, 0.4, 0.9553, 0.4833, 1.0287,
                                        0.5667, 1.024, 0.65, 1.0199, 0.7667, 1.0141, 0.8833, 1.0032, 1, 1.0]
@@ -46,6 +95,8 @@ Page {
     readonly property var giftSheet: giftSheetLoader.item
     readonly property var forwardSheet: forwardSheetLoader.item
     readonly property var sheet: sheetLoader.item
+    readonly property var sendMediaSheet: sendMediaLoader.item
+    property var replaceTarget: null
     readonly property var viewer: viewerLoader.item
     readonly property var menu: menuLoader.item
     readonly property var roundCam: roundViewLoader.item ? roundViewLoader.item.cam : null
@@ -78,6 +129,15 @@ Page {
     property var stickerSets: ({})
     property var cardRaw: ({})
     property var _cardExtraAsked: ({})
+    property var speechOpened: ({})
+    property var speechPending: ({})
+    property int speechTick: 0
+    readonly property bool isSavedChat: !thread && !directTopic && !forumTopic && store.isSaved(chat)
+    readonly property bool isPremium: !!store.me && !!store.me.is_premium
+    property var savedTags: []
+    property var activeSavedTag: null
+    property var savedTagNextId: 0
+    onIsPremiumChanged: if (isSavedChat && isPremium && !spare) loadSavedTags()
     readonly property var badgeMenu: badgeMenuLoader.item
     readonly property var botReplyKbView: botReplyKbLoader.item
     readonly property var botCommandsView: botCommandsLoader.item
@@ -109,16 +169,52 @@ Page {
     readonly property var mic: voiceRecLoader.item ? voiceRecLoader.item.mic : null
     readonly property var recorder: voiceRecLoader.item ? voiceRecLoader.item.recorder : null
     function ensureViewer() { viewerLoader.active = true; return viewerLoader.item }
+    function openPipVideo(info) {
+        const it = info.msgId ? shownAt(info.msgId) : null
+        ensureViewer().show(it && it.media ? it.picFace : null, info.aspect, info.poster, info.path, info.msgId, info.position, info.rate)
+        viewing = info.msgId || 0
+    }
     function ensureMenu() { menuLoader.active = true; return menuLoader.item }
     function openForward() { forwardSheetLoader.active = true; forwardSheetLoader.item.show() }
     function openGiftSheet() { giftSheetLoader.active = true; giftSheetLoader.item.show() }
     function openAttach() { sheetLoader.active = true; sheetLoader.item.show() }
+    function openSendMedia(picked, asFiles, apart, mode) {
+        sendMediaLoader.active = true
+        sendMediaLoader.item.show(picked, page.textBarred ? "" : field.text, asFiles, apart, mode)
+    }
+    function startReplaceMedia(m) {
+        const mid = m.one || m.id
+        replaceTarget = { id: mid, caption: { "@type": "formattedText", text: m.text || "", entities: [] } }
+        store.send({ "@type": "getMessage", chat_id: chatId, message_id: mid }, (r) => {
+            if (!page || !replaceTarget || replaceTarget.id !== mid)
+                return
+            if (r && r["@type"] === "message" && r.content && r.content.caption)
+                replaceTarget = { id: mid, caption: r.content.caption }
+        })
+        sheetLoader.active = true
+        sheetLoader.item.showReplace()
+    }
+    function finishReplaceMedia(file, asFiles) {
+        const tgt = replaceTarget
+        replaceTarget = null
+        if (!tgt || !file)
+            return
+        store.editMessageMedia(page.chatId, tgt.id, file, tgt.caption, asFiles, (ok) => {
+            if (ok && page)
+                page.toast(Tr.t("Media almashtirildi"))
+        })
+    }
     function showPlaceMenu(l, n) { placeMenuLoader.active = true; placeMenuLoader.item.show(l, n) }
     function showTimerMenu() { timerMenuLoader.active = true; timerMenuLoader.item.show() }
     function showDeleteMenu() { deleteMenuLoader.active = true; deleteMenuLoader.item.show() }
     function askReport(st) { reportMenuLoader.active = true; reportMenuLoader.item.ask(st) }
     function showTransMenu() { transMenuLoader.active = true; transMenuLoader.item.show() }
     function showSendMenu(origin) { sendMenuLoader.active = true; sendMenuLoader.item.show(origin || "field") }
+    function openEffectPicker() {
+        keyboardDown()
+        effectPickerLoader.active = true
+        effectPickerLoader.item.show()
+    }
     function showLpMenu() { lpMenuLoader.active = true; lpMenuLoader.item.show() }
     function resetComposePreview() {
         lpTimer.stop()
@@ -130,6 +226,7 @@ Page {
         composeLpAbove = false
         composeLpMedia = ""
         composeLpHasOrig = false
+        secretLpPrompt = false
         if (lpMenu)
             lpMenu.visible = false
     }
@@ -144,6 +241,8 @@ Page {
         return raw.replace(/[.,;:!?)\]}]+$/, "")
     }
     function composeLinkPreviewOpts() {
+        if (secret && !store.secretLinkPreviewAllowed)
+            return store.linkPreviewOptions({ is_disabled: true, url: composeLpUrl || "" })
         if (!composeLpUrl)
             return null
         if (composeLpDisabled)
@@ -168,6 +267,17 @@ Page {
             resetComposePreview()
             return
         }
+        if (secret && !store.secretLinkPreviewAllowed) {
+            if (u !== composeLpUrl) {
+                composeLpUrl = u
+                composeLpDisabled = false
+            }
+            composeLp = null
+            composeLpPic = ""
+            secretLpPrompt = !composeLpDisabled
+            return
+        }
+        secretLpPrompt = false
         if (u !== composeLpUrl) {
             composeLpUrl = u
             composeLpDisabled = false
@@ -230,6 +340,13 @@ Page {
         stickerSetLoader.active = true
         stickerSetLoader.item.show(String(setId))
     }
+    function openFolderLink(link) {
+        if (!link)
+            return
+        keyboardDown()
+        folderLinkLoader.active = true
+        folderLinkLoader.item.show(String(link))
+    }
     function showBadgeMenu(kind, btnY) {
         badgeMenuLoader.active = true
         badgeMenuLoader.item.show(kind, btnY)
@@ -237,6 +354,16 @@ Page {
     property Component infoPageMaker: null
     property Component joinPageMaker: null
     property Component scheduledPageMaker: null
+    property Component ivPageMaker: null
+    function openInstantView(url, lpInfo) {
+        if (!url)
+            return
+        keyboardDown()
+        if (!ivPageMaker)
+            ivPageMaker = Qt.createComponent("InstantViewPage.qml")
+        const title = lpInfo ? (lpInfo.site || lpInfo.title || "") : ""
+        nav.push(ivPageMaker, { store: store, nav: nav, url: url, siteTitle: title })
+    }
     function openInfo(id) {
         if (!infoPageMaker)
             infoPageMaker = Qt.createComponent("ChatInfoPage.qml")
@@ -366,6 +493,13 @@ Page {
         if (!chat || channel || outside)
             return ""
         const t = chat.type["@type"]
+        if (t === "chatTypeSecret") {
+            if (secretClosed)
+                return Tr.t("Maxfiy chat bekor qilindi")
+            if (!secretReady)
+                return Tr.f("%1 onlayn bo'lishini kutmoqda", store.secretPartnerName(chat))
+            return ""
+        }
         if (t === "chatTypePrivate") {
             const u = (store.seen, store.users[chat.type.user_id])
             return u && u.type["@type"] === "userTypeDeleted" ? Tr.t("O'chirilgan hisob") : ""
@@ -439,11 +573,13 @@ Page {
     property int askingHidden: 0
     // the field's ⏱: messages here go by themselves after a while (setChatMessageAutoDeleteTime); in a
     // private chat anyone sets it, in a group or channel its owner or an admin who may change its info
-    readonly property int autoDelete: chat ? chat.message_auto_delete_time || 0 : 0
+    property int autoDelete: chat ? (chat.message_auto_delete_time || 0) : 0
     readonly property bool canAutoDelete: {
         if (!chat || thread)
             return false
         const t = chat.type["@type"]
+        if (t === "chatTypeSecret")
+            return secretReady
         if (t === "chatTypePrivate")
             return !store.isSaved(chat)
         const g = (store.seen, store.groups[(t === "chatTypeBasicGroup" ? "b" + chat.type.basic_group_id : "s" + chat.type.supergroup_id)])
@@ -770,6 +906,9 @@ Page {
         if (td.devOpen)
             console.warn("nullgram: chat translatable", chat ? chat.is_translatable : "?", "premium", store.me ? store.me.is_premium : "?")
         store.send({ "@type": "openChat", chat_id: chatId })
+        autoDelete = chat ? (chat.message_auto_delete_time || 0) : 0
+        if (secret && chat.type.secret_chat_id && !secretChat)
+            store.getSecretChat(chat.type.secret_chat_id, null)
         if (chat && chat.type["@type"] === "chatTypeSupergroup") {   // its update may not have the count; a channel's 🎁 & DM
             const g = store.groups["s" + chat.type.supergroup_id]
             if (!g || !g.member_count || channel || isDirectChat)
@@ -810,7 +949,11 @@ Page {
         botCommands = []
         botDescription = ""
         botCmdForced = false
+        savedTags = []
+        activeSavedTag = null
+        savedTagNextId = 0
         loadBotInfo()
+        loadSavedTags()
         syncChatReplyMarkup()
         loadDraft()
         openLog("draft")
@@ -1500,6 +1643,62 @@ Page {
         })
     }
 
+    // Message effect (1.0): fetch messageEffect via getMessageEffect and play its animation once over the row
+    function playMessageEffect(msgId, effectId, rowItem) {
+        const eid = String(effectId || "")
+        if (eid === "" || eid === "0")
+            return
+        store.getMessageEffect(eid, (eff, err) => {
+            if (!page)
+                return
+            if (!eff) {
+                if (err)
+                    page.toast(Tr.t("Effektni yuklab bo'lmadi"))
+                return
+            }
+            const spawn = (fmt, path) => {
+                if (!page)
+                    return
+                let target = rowItem
+                if (!target || !target.moverItem) {
+                    const idx = page.indexOf(msgId)
+                    const sh = idx >= 0 ? list.itemAtIndex(idx) : null
+                    target = sh ? sh.view : null
+                }
+                if (!target || !target.moverItem || target.burstCount >= 3)
+                    return
+                target.burstCount++
+                page.effectPlayCount++
+                page.lastEffectPlayed = eid
+                effectAnimComp.createObject(target.moverItem, {
+                    row: target,
+                    bub: target.face,
+                    animFmt: fmt,
+                    filePath: path || "",
+                    emojiChar: eff.emoji || "✨"
+                })
+            }
+            const et = eff.type || ({})
+            let st = null
+            if (et["@type"] === "messageEffectTypeEmojiReaction") {
+                st = et.effect_animation || et.select_animation || eff.static_icon
+            } else if (et["@type"] === "messageEffectTypePremiumSticker") {
+                const prem = et.sticker && et.sticker.full_type && et.sticker.full_type.premium_animation
+                st = prem ? { "@type": "sticker", format: { "@type": "stickerFormatTgs" }, sticker: prem }
+                          : (et.sticker || eff.static_icon)
+            } else {
+                st = eff.static_icon
+            }
+            const ft = st && st.format ? st.format["@type"] : ""
+            const fmt = ft === "stickerFormatTgs" ? "tgs" : ft === "stickerFormatWebm" ? "webm" : ft === "stickerFormatWebp" ? "webp" : ""
+            if (st && st.sticker && fmt !== "") {
+                store.fetch(st.sticker, 32, (path) => spawn(fmt, path))
+            } else {
+                spawn("", "")
+            }
+        })
+    }
+
     // a tap on a message's media: open, play, or bring it down first (a second tap stops that);
     // a spoiler is taken off first, from under the finger (x, y on the picture; its middle if not given)
     function tapMedia(item, x, y) {
@@ -1684,6 +1883,8 @@ Page {
             const facesW = n ? 4 + 20 + (n - 1) * 10 : 0
             return 8 + 16 + facesW + 4 + chipMetrics.advanceWidth(store.short(r.n)) + 9
         }
+        if (r.ce)
+            return n ? 8 + 18 + 4 + 24 + (n - 1) * 12 + 2 : 8 + 18 + 4 + chipMetrics.advanceWidth(String(r.n)) + 9
         return n ? 8 + chipMetrics.advanceWidth(r.e) + 4 + 24 + (n - 1) * 12 + 2 : chipMetrics.advanceWidth(r.e + " " + r.n) + 16
     }
 
@@ -1736,7 +1937,8 @@ Page {
             lp: JSON.stringify({
                 url: lp.url, site: lp.site, title: lp.title, desc: lp.desc,
                 showLarge: lp.showLarge, mediaAbove: lp.mediaAbove, aboveText: lp.aboveText,
-                isVideo: lp.isVideo, hasMedia: lp.hasMedia, mini: lp.mini, w: lp.w, h: lp.h
+                isVideo: lp.isVideo, hasMedia: lp.hasMedia, mini: lp.mini, w: lp.w, h: lp.h,
+                iv: lp.instantView || 0
             }),
             lpPic: lp.file && lp.file.local && lp.file.local.is_downloading_completed ? lp.file.local.path : ""
         }
@@ -1756,6 +1958,58 @@ Page {
     function ikbPack(rm) {
         const rows = store.inlineKeyboardRows(rm)
         return rows ? JSON.stringify(rows) : ""
+    }
+    function speechPack(content) {
+        const sr = store.speechResultOf(content)
+        return sr ? JSON.stringify(sr) : ""
+    }
+    function speechInfoFor(msgId, rawJson) {
+        void speechTick
+        let st = "", txt = "", err = ""
+        if (rawJson && rawJson !== "") {
+            try {
+                const o = JSON.parse(rawJson)
+                st = o.state || ""
+                txt = o.text || ""
+                err = o.err || ""
+            } catch (e) {}
+        }
+        if (speechPending[msgId] && st !== "text" && st !== "error")
+            st = "pending"
+        return { state: st, text: txt, err: err, open: !!speechOpened[msgId] }
+    }
+    function toggleSpeech(msgId) {
+        const i = indexOf(msgId)
+        const raw = i >= 0 ? messages.get(i).speech : ""
+        const cur = speechInfoFor(msgId, raw)
+        if (cur.state === "text" || cur.state === "pending") {
+            const next = Object.assign({}, speechOpened)
+            next[msgId] = !cur.open
+            speechOpened = next
+            speechTick++
+            return
+        }
+        const o = Object.assign({}, speechOpened)
+        o[msgId] = true
+        speechOpened = o
+        const p = Object.assign({}, speechPending)
+        p[msgId] = true
+        speechPending = p
+        speechTick++
+        store.recognizeSpeech(chatId, msgId, (err) => {
+            if (!page)
+                return
+            if (err) {
+                const p2 = Object.assign({}, page.speechPending)
+                delete p2[msgId]
+                page.speechPending = p2
+                const o2 = Object.assign({}, page.speechOpened)
+                delete o2[msgId]
+                page.speechOpened = o2
+                page.speechTick++
+                page.toast(store.speechErrorText(err))
+            }
+        })
     }
     // --- agy/kartochkalar ---
     function cardPack(m) {
@@ -1943,6 +2197,46 @@ Page {
                 return
             page.botCommands = cmds || []
             page.botDescription = desc || ""
+        })
+    }
+    function loadSavedTags() {
+        if (!isSavedChat || !isPremium) {
+            savedTags = []
+            return
+        }
+        store.getSavedMessagesTags(0, (tags) => {
+            if (page && page.isSavedChat && page.isPremium)
+                page.savedTags = tags || []
+        })
+    }
+    function selectSavedTag(tag) {
+        activeSavedTag = tag || null
+        savedTagNextId = 0
+        if (!tag) {
+            fresh()
+            return
+        }
+        cancelFeed()
+        const gen = feedGen
+        messages.clear()
+        albums = {}
+        more = false
+        loading = true
+        store.searchSavedMessagesByTag(0, tag, 0, 30, (got, nextId, _total, err) => {
+            if (!page || gen !== page.feedGen)
+                return
+            page.loading = false
+            if (err) {
+                page.toast(err)
+                return
+            }
+            page.rememberAll(got)
+            for (const m of got)
+                messages.append(page.row(m))
+            page.regroup()
+            page.savedTagNextId = nextId || 0
+            page.more = page.savedTagNextId > 0
+            list.positionViewAtBeginning()
         })
     }
     function syncChatReplyMarkup() {
@@ -2187,9 +2481,14 @@ Page {
         }
         const badge = page.group && !m.is_outgoing && !root ? rankOf(m) : null
         const lpp = lpPack(m.content, m.id)
+        const ttl = Math.max(Number(m.self_destruct_in || 0), Number(m.auto_delete_in || 0))
+        const expireAt = ttl > 0 ? Math.round(Date.now() / 1000 + ttl) : 0
+        if (expireAt > 0)
+            Qt.callLater(page.syncExpiring)
         return {
             msgId: m.id, out: m.is_outgoing, date: m.date, text: p.emo ? "" : s.text, rich: p.emo ? "" : s.rich, kind: s.kind, said: store.service(m, chat) || "",
             sender: page.group && !m.is_outgoing && !root ? nameOf(m.sender_id) : "",
+            senderEmoji: page.group && !m.is_outgoing && !root ? store.senderEmojiStatusId(m.sender_id) : "",
             senderKey: JSON.stringify(m.sender_id), sending: !!m.sending_state,
             rank: badge ? badge.text : "", rankKind: badge ? badge.kind : 0,
             tint: store.tints[Math.abs(m.sender_id.user_id || m.sender_id.chat_id || 0) % store.tints.length],
@@ -2223,7 +2522,10 @@ Page {
                    ? String(m.media_album_id) : "",
             veiled: p.spoiler && !unveiled[m.id],
             heard: p.heard || page.channel,     // (a channel's post is not marked played)
-            lp: lpp.lp, lpPic: lpp.lpPic, ikb: ikbPack(m.reply_markup), card: thrown ? "" : cardPack(m)
+            lp: lpp.lp, lpPic: lpp.lpPic, ikb: ikbPack(m.reply_markup), card: thrown ? "" : cardPack(m),
+            expireAt: expireAt,
+            speech: speechPack(m.content),
+            effectId: (m.effect_id && String(m.effect_id) !== "0") ? String(m.effect_id) : ""
         }
     }
 
@@ -2541,6 +2843,26 @@ Page {
     function older() {
         if (loading || !more || !messages.count)
             return
+        if (activeSavedTag) {
+            if (!savedTagNextId)
+                return
+            loading = true
+            const gen = feedGen
+            store.searchSavedMessagesByTag(0, activeSavedTag, savedTagNextId, 30, (got, nextId, _total, err) => {
+                if (!page || gen !== page.feedGen)
+                    return
+                page.loading = false
+                if (err)
+                    return
+                page.rememberAll(got)
+                for (const m of got)
+                    messages.append(page.row(m))
+                page.regroup()
+                page.savedTagNextId = nextId || 0
+                page.more = page.savedTagNextId > 0
+            })
+            return
+        }
         loading = true
         const gen = feedGen
         store.history(chatId, messages.get(messages.count - 1).msgId, pageSize, (got, failed) => {
@@ -2863,10 +3185,16 @@ Page {
             Qt.openUrlExternally(url)
             return
         }
+        if (/^(https?:\/\/)?(t\.me|telegram\.me|telegram\.dog)\/addlist\/[A-Za-z0-9_-]+|^tg:\/\/addlist\?slug=[A-Za-z0-9_-]+/i.test(url)) {
+            openFolderLink(url)
+            return
+        }
         store.send({ "@type": "getInternalLinkType", link: url }, (r) => {
             const t = r["@type"]
             if (t === "internalLinkTypePublicChat")
                 store.send({ "@type": "searchPublicChat", username: r.chat_username }, (c) => openChat(c, 0))
+            else if (t === "internalLinkTypeChatFolderInvite")
+                page.openFolderLink(r.invite_link || url)
             else if (t === "internalLinkTypeMessage")
                 store.send({ "@type": "getMessageLinkInfo", url: url }, (info) => {
                     if (info["@type"] !== "messageLinkInfo" || !info.chat_id)
@@ -2926,7 +3254,7 @@ Page {
     function openMenu(item, one) {
         keyboardDown()              // first: over the menu's actions it would stay
         const own = one && one !== item.msgId ? cellOf(one) : null
-        const m = { id: item.msgId, text: item.text, kind: item.kind, out: item.out,
+        const m = { id: item.msgId, one: one || item.msgId, text: item.text, kind: item.kind, out: item.out,
                     name: item.out ? Tr.t("Siz") : item.sender || (chat ? chat.title : ""),
                     ids: item.grouped ? item.group.ids : [item.msgId],      // (an album: all of it)
                     copy: own && (own.text || item.stacked) ? own.text : item.emo || item.text }
@@ -2952,26 +3280,29 @@ Page {
         const acts = []
         if (ok && p.can_be_replied && !page.channel)
             acts.push({ text: Tr.t("Javob yozish"), glyph: "↩", run: () => page.reply(m) })
-        if (m.copy)
+        if (m.copy && !page.secret)
             acts.push({ text: Tr.t("Nusxalash"), glyph: "⧉", run: () => page.copy(m.copy) })
         if (ok && p.can_be_edited && !m.kind && !item.media && !item.rowKind)
             acts.push({ text: Tr.t("Tahrirlash"), glyph: "✎", run: () => page.edit(m) })
-        if (m.text && !page.translating && (Prefs.translateButton || page.originals[m.id] !== undefined))   // single-message translation sheet (and back if translated inline)
+        const canReplace = item.picKind === "photo" || item.picKind === "video" || item.picKind === "gif" || item.rowKind === "file" || item.rowKind === "audio"
+        if (ok && p.can_be_edited && canReplace)
+            acts.push({ text: Tr.t("Mediani almashtirish"), glyph: "⇄", run: () => page.startReplaceMedia(m) })
+        if (m.text && !page.secret && !page.translating && (Prefs.translateButton || page.originals[m.id] !== undefined))   // single-message translation sheet (and back if translated inline)
             acts.push(page.originals[m.id] !== undefined
                       ? { text: Tr.t("Asl nusxasi"), glyph: "🌐", run: () => page.untranslateOne(m.id) }
                       : { text: Tr.t("Tarjima qilish"), glyph: "🌐", run: () => page.openTranslate(m) })
         if (ok && p.can_get_message_thread && !page.thread)     // Telegram-iOS's «View Thread»: the answers around it
             acts.push({ text: Tr.t("Javoblarni ochish"), glyph: "💬", run: () => page.openComments(m.id) })
-        if (ok && p.can_get_link)
+        if (ok && p.can_get_link && !page.secret)
             acts.push({ text: Tr.t("Havolani nusxalash"), glyph: "🔗", run: () => page.copyLink(m.id) })
-        if (ok && p.can_be_forwarded)
+        if (ok && p.can_be_forwarded && !page.secret)
             acts.push({ text: Tr.t("Uzatish"), glyph: "↪", run: () => { page.forwarding = m.ids; page.copying = false; page.openForward() } })
-        if (ok && p.can_be_copied && page.channel)   // (Telegram-iOS's "forward without the author's name")
+        if (ok && p.can_be_copied && page.channel && !page.secret)   // (Telegram-iOS's "forward without the author's name")
             acts.push({ text: Tr.t("Imzosiz forward qilish"), glyph: "↪", run: () => { page.forwarding = m.ids; page.copying = true; page.openForward() } })
-        if (ok && p.can_be_pinned)
+        if (ok && p.can_be_pinned && !page.secret)
             acts.push({ text: item.isPinned ? Tr.t("Qadashni olish") : Tr.t("Qadash"), glyph: "📌",
                         run: () => store.pin(page.chatId, m.id, !item.isPinned) })
-        if (page.mains[m.id] && !item.sending)
+        if (page.mains[m.id] && !item.sending && !page.secret)
             acts.push({ text: item.picKind === "photo" ? Tr.t("Rasmni saqlash") : item.picKind === "video" || item.picKind === "round" ? Tr.t("Videoni saqlash") : Tr.t("Saqlash"),
                         glyph: "↓", run: () => page.save(m.id) })
         if (item.rowKind === "poll" && item.poll) {      // Telegram-iOS's «Retract Vote», «Stop Poll»
@@ -3012,8 +3343,8 @@ Page {
         const shell = i >= 0 ? list.itemAtIndex(i) : null
         const it = shell ? shell.view : null
         page.reacting = item.reactId
-        if (it && acts.length) {
-            ensureMenu().show(it.face, m.out, acts, reactions, it.reactList.filter((r) => r.mine).map((r) => r.e))
+        if (it && it.face && acts.length) {
+            ensureMenu().show(it.face, m.out, acts, reactions, (it.reactList || []).filter((r) => r.mine).map((r) => r.e))
             if (stats)
                 readStats(m.id, p.can_get_read_date, it.face)
         }
@@ -3482,6 +3813,16 @@ Page {
 
     // the back button: the menu first, then a reply or edit being written (Main asks)
     function dismiss() {
+        if (effectPickerLoader.item && effectPickerLoader.item.open) {
+            effectPickerLoader.item.dismiss()
+            return true
+        }
+        if (folderLinkLoader.item && folderLinkLoader.item.open) {
+            folderLinkLoader.item.dismiss()
+            return true
+        }
+        if (savedTagsLoad.item && savedTagsLoad.item.dismissRename())
+            return true
         if (inlineLoader.item && inlineLoader.item.open) {
             inlineLoader.item.close()
             return true
@@ -3524,6 +3865,10 @@ Page {
         }
         if (paidSheet.open) {
             paidSheet.backOne()
+            return true
+        }
+        if (sendMediaSheet && sendMediaSheet.open) {
+            sendMediaSheet.close()
             return true
         }
         if (sheet && sheet.open) {
@@ -3650,6 +3995,7 @@ Page {
                 page.unread = page.chat.unread_count
                 page.muted = page.isMuted()
                 page.blocked = page.isBlocked()
+                page.autoDelete = page.chat ? (page.chat.message_auto_delete_time || 0) : 0
                 page.hasScheduled = !!(page.chat && page.chat.has_scheduled_messages)
                 if (!page.forumTopic) {
                     page.unreadMentions = page.chat ? (page.chat.unread_mention_count || 0) : 0
@@ -3667,6 +4013,11 @@ Page {
                 return
             if (info.name)
                 page.forumTitle = info.name
+            if (info.icon) {
+                const ce = info.icon.custom_emoji_id && String(info.icon.custom_emoji_id) !== "0" ? String(info.icon.custom_emoji_id) : ""
+                page.forumIconEmojiId = ce
+                page.forumIconColor = store.forumColorHex(info.icon.color || 0, page.forumTopic)
+            }
             page.forumClosed = !!info.is_closed
         }
         function onForumTopicUpdated(u) {
@@ -3724,6 +4075,10 @@ Page {
             if (i >= 0)
                 messages.setProperty(i, "heard", true)
         }
+        function onSavedTagsChanged(topicId, tags) {
+            if (page.isSavedChat && page.isPremium && !topicId)
+                page.savedTags = tags || []
+        }
         function onMessageContent(chatId, id, content) {
             if (chatId !== page.chatId)
                 return
@@ -3759,6 +4114,33 @@ Page {
                 const p = page.media(content)
                 messages.setProperty(i, "veiled", p.spoiler && !page.unveiled[id])
                 messages.setProperty(i, "heard", p.heard || page.channel)
+                const sp = page.speechPack(content)
+                if (sp !== messages.get(i).speech) {
+                    messages.setProperty(i, "speech", sp)
+                    if (sp !== "") {
+                        try {
+                            const sr = JSON.parse(sp)
+                            if (sr.state === "text" || sr.state === "error") {
+                                if (page.speechPending[id]) {
+                                    const p2 = Object.assign({}, page.speechPending)
+                                    delete p2[id]
+                                    page.speechPending = p2
+                                }
+                                if (sr.state === "error") {
+                                    const o2 = Object.assign({}, page.speechOpened)
+                                    delete o2[id]
+                                    page.speechOpened = o2
+                                    page.toast(store.speechErrorText(sr.err))
+                                } else {
+                                    const o3 = Object.assign({}, page.speechOpened)
+                                    o3[id] = true
+                                    page.speechOpened = o3
+                                }
+                            }
+                        } catch (e) {}
+                        page.speechTick++
+                    }
+                }
                 if (p.picKind === "map" && content["@type"] === "messageLiveLocation") {     // moved: its map again
                     const was = page.maps[id], now = content.location.location
                     if (!was || was.latitude !== now.latitude || was.longitude !== now.longitude) {
@@ -3769,10 +4151,29 @@ Page {
                     const r = messages.get(i)
                     messages.setProperty(i, "dur", content.location.live_period >= 0x7FFFFFFF ? 0x7FFFFFFF : r.date + content.location.live_period)
                 }
+                if (p.picKind !== messages.get(i).picKind || p.rowKind !== messages.get(i).rowKind
+                    || p.fileName !== messages.get(i).fileName || p.picW !== messages.get(i).picW || p.picH !== messages.get(i).picH) {
+                    messages.setProperty(i, "picKind", p.picKind)
+                    messages.setProperty(i, "picW", p.picW)
+                    messages.setProperty(i, "picH", p.picH)
+                    messages.setProperty(i, "dur", p.dur)
+                    messages.setProperty(i, "mini", p.mini)
+                    messages.setProperty(i, "rowKind", p.rowKind)
+                    messages.setProperty(i, "fileName", p.fileName)
+                    messages.setProperty(i, "fileSize", p.main ? (p.main.size || p.main.expected_size) : 0)
+                    if (p.big)
+                        page.bigFiles[id] = p.big
+                    if (p.main) {
+                        page.own(id, p.main)
+                        messages.setProperty(i, "got", store.progress(p.main))
+                        messages.setProperty(i, "path", p.main.local && p.main.local.is_downloading_completed ? p.main.local.path : "")
+                    }
+                }
                 if (p.file && p.file.id !== (page.files[id] || {}).id) {
                     page.files[id] = p.file
-                    messages.setProperty(i, "pic", "")
-                    page.loadPic(id)
+                    messages.setProperty(i, "pic", p.file.local && p.file.local.is_downloading_completed ? p.file.local.path : "")
+                    if (!p.file.local || !p.file.local.is_downloading_completed)
+                        page.loadPic(id)
                 }
             }
             if (page.quotes[id]) {
@@ -3950,6 +4351,7 @@ Page {
                 required property string rich
                 required property string kind
                 required property string sender
+                required property string senderEmoji
                 required property string senderKey
                 required property string rank       // beside the name, on the right: an admin's title, a signature
                 required property int rankKind      // 0 grey (a signature, a member's tag), 1 an admin's, 2 the owner's
@@ -3998,14 +4400,17 @@ Page {
                 required property string lpPic      // link_preview thumbnail/photo local path
                 required property string ikb        // inline keyboard rows JSON ("" for none)
                 required property string card       // rich card metadata JSON ("" for none)
+                required property int expireAt      // unix timestamp when self-destruct/auto-delete removes this row (0 = none)
+                required property string speech     // speech_recognition_result JSON ("" for none)
+                required property string effectId   // message effect_id int64 string ("" for none)
                 // an album: its main one shows them all (a mosaic), the others are tucked away under it
                 readonly property var group: album !== "" ? (page.albumRev, page.albums[album] || null) : null
                 readonly property bool grouped: group !== null && group.ids.length > 1
                 readonly property bool tucked: grouped && group.main !== msgId
                 readonly property bool media: picKind !== ""
                 readonly property bool simpleText: !tucked && said === "" && picKind === "" && rowKind === "" &&
-                    jumbo === 0 && rich === "" && kind === "" && fwd === "" && viaId === 0 && rank === "" && lp === "" && ikb === "" &&
-                    reacts.length <= 2 && views === 0 && replies === 0 && comments < 0 &&
+                    jumbo === 0 && rich === "" && kind === "" && fwd === "" && viaId === 0 && rank === "" && senderEmoji === "" && lp === "" && ikb === "" &&
+                    expireAt === 0 && effectId === "" && reacts.length <= 2 && views === 0 && replies === 0 && comments < 0 &&
                     !page.channel && !page.picking && page.firstUnread !== msgId
                 readonly property Item view: look.item          // the row as the page asks it things (null: tucked)
                 readonly property bool translated: page.translating
@@ -4274,7 +4679,7 @@ Page {
             visible: page.ready && messages.count === 0 && !(page.showBotStart && page.botDescription !== "")
             anchors.centerIn: parent
             transform: Translate { y: -page.kb / 2 }
-            width: Math.min(parent.width - 80, 240); height: emptyText.height + 32
+            width: Math.min(parent.width - 64, page.secret ? 280 : 240); height: emptyText.height + 32
             radius: 18
             color: Theme.dayPill
             Column {
@@ -4282,18 +4687,28 @@ Page {
                 anchors.centerIn: parent
                 width: parent.width - 32
                 spacing: 6
-                Text {
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    text: Tr.t("Hali xabar yo'q")
+                Icon {
+                    visible: page.secret
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 28; height: 28
+                    name: "lock"
                     color: "white"
-                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
                 }
                 Text {
                     width: parent.width
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
-                    text: page.canPost ? Tr.t("Birinchi xabarni yozing.") : Tr.t("Bu yerga hali hech narsa yuborilmagan.")
+                    text: page.secret ? Tr.f("%1 bilan maxfiy chat", store.secretPartnerName(page.chat)) : Tr.t("Hali xabar yo'q")
+                    color: "white"
+                    font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                }
+                Text {
+                    width: parent.width
+                    horizontalAlignment: page.secret ? Text.AlignLeft : Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: page.secret
+                        ? "• " + Tr.t("Uchdan-uchga shifrlash") + "\n• " + Tr.t("Serverda iz qoldirmaydi") + "\n• " + Tr.t("O'z-o'zidan o'chish taymeri") + "\n• " + Tr.t("Xabarlarni uzatib bo'lmaydi")
+                        : (page.canPost ? Tr.t("Birinchi xabarni yozing.") : Tr.t("Bu yerga hali hech narsa yuborilmagan."))
                     color: "white"
                     font.family: Theme.font; font.pixelSize: 14
                 }
@@ -4355,25 +4770,69 @@ Page {
                 readonly property real rightEdge: dmBarBtn.visible ? bar.width - dmBarBtn.x : bar.width - face.x
                 readonly property real room: bar.width - 2 * (page.selecting ? bar.width - cancelCap.x
                                                                  : Math.max(backCap.x + backCap.width, rightEdge)) - 16
+                readonly property string headerForumIcon: !page.selecting && page.forumTopic > 0 ? page.forumIconEmojiId : ""
+                readonly property string headerStatusEmoji: !page.selecting && !page.thread && !page.forumTopic && store.seen >= 0
+                    ? (page.directTopic && page.directSender ? store.senderEmojiStatusId(page.directSender)
+                                                             : store.chatEmojiStatusId(page.chat)) : ""
+                readonly property real titleExtraW: (headerForumIcon !== "" ? 24 : 0) + (headerStatusEmoji !== "" ? 22 : 0) + (!page.selecting && page.secret ? 18 : 0)
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 8
-                width: Math.min(room, Math.max(titleText.implicitWidth, subText.visible ? subText.implicitWidth : 0) + 40)
+                width: Math.min(room, Math.max(titleMetrics.advanceWidth + 1 + titleExtraW, subText.visible ? subMetrics.advanceWidth + 1 : 0) + 40)
+                TextMetrics { id: titleMetrics; font: titleText.font; text: titleText.text }   // (the title measured apart: its Text's implicitWidth moves as its width does -> a binding loop)
+                TextMetrics { id: subMetrics; font: subText.font; text: subText.text }
                 height: 44
                 opacity: titleHit.pressed ? 0.6 : 1
                 Column {
                     anchors.centerIn: parent
                     width: parent.width - 28
-                    Text {
-                        id: titleText
-                        width: parent.width
-                        horizontalAlignment: Text.AlignHCenter
-                        elide: Text.ElideRight
-                        text: page.selecting ? (page.pickedIds.length ? Tr.n("%1 ta tanlandi", page.pickedIds.length) : Tr.t("Xabarlarni tanlang"))
-                            : page.directTopic && page.directSender ? (store.seen, store.senderName(page.directSender, false) || store.title(page.chat))
-                            : page.forumTopic ? (page.forumTitle || (page.forumGeneral ? Tr.t("Umumiy") : store.title(page.chat)))
-                            : page.thread ? Tr.t("Izohlar") : store.title(page.chat)
-                        color: Theme.text
-                        font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                    Row {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        spacing: 4
+                        Icon {
+                            visible: !page.selecting && page.secret
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: visible ? 14 : 0; height: 14
+                            name: "lock"
+                            color: page.secretGreen
+                        }
+                        Loader {
+                            active: titleCap.headerForumIcon !== ""
+                            visible: active
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: active ? 20 : 0; height: 20
+                            sourceComponent: CustomEmoji {
+                                store: page.store
+                                emojiId: titleCap.headerForumIcon
+                                size: 20
+                                running: page.cePageActive
+                                tintColor: page.forumIconColor || Theme.accent
+                            }
+                        }
+                        Text {
+                            id: titleText
+                            width: Math.min(titleMetrics.advanceWidth + 1, Math.max(24, titleCap.width - 28 - titleCap.titleExtraW))
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                            text: page.selecting ? (page.pickedIds.length ? Tr.n("%1 ta tanlandi", page.pickedIds.length) : Tr.t("Xabarlarni tanlang"))
+                                : page.directTopic && page.directSender ? (store.seen, store.senderName(page.directSender, false) || store.title(page.chat))
+                                : page.forumTopic ? (page.forumTitle || (page.forumGeneral ? Tr.t("Umumiy") : store.title(page.chat)))
+                                : page.thread ? Tr.t("Izohlar") : store.title(page.chat)
+                            color: !page.selecting && page.secret ? page.secretGreen : Theme.text
+                            font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
+                        }
+                        Loader {
+                            active: titleCap.headerStatusEmoji !== ""
+                            visible: active
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: active ? 18 : 0; height: 18
+                            sourceComponent: CustomEmoji {
+                                store: page.store
+                                emojiId: titleCap.headerStatusEmoji
+                                size: 18
+                                running: page.cePageActive
+                                tintColor: Theme.accent
+                            }
+                        }
                     }
                     Text {
                         id: subText
@@ -4382,7 +4841,7 @@ Page {
                         elide: Text.ElideRight
                         text: page.directTopic ? store.title(page.chat) + " · " + Tr.t("Kanalga xabarlar")
                             : page.forumTopic ? (store.title(page.chat) + (page.forumClosed ? " · " + Tr.t("Yopiq") : ""))
-                            : page.thread ? page.threadOf : (store.seen, store.acting, page.now, store.status(page.chat, page.now))     // (re-read when either changes)
+                            : page.thread ? page.threadOf : store.secretSeen >= 0 ? (store.seen, store.acting, page.now, store.status(page.chat, page.now)) : ""     // (re-read when either changes)
                         visible: text !== "" && !page.selecting
                         color: text === Tr.t("onlayn") || text.endsWith("...") ? Theme.accent : Theme.grey
                         font.family: Theme.font; font.pixelSize: 12
@@ -4567,9 +5026,10 @@ Page {
             visible: height > 0
             Glass {
                 id: panel
+                readonly property bool showSavedTags: page.isSavedChat && page.isPremium && page.savedTags.length > 0
                 x: 10; y: 2
                 width: parent.width - 20
-                height: miniRow.height + (page.askingShown ? 48 : 0) + (page.pinned ? 48 : 0) + (page.translatable ? 48 : 0)
+                height: miniRow.height + (page.askingShown ? 48 : 0) + (page.pinned ? 48 : 0) + (page.translatable ? 48 : 0) + (showSavedTags ? 46 : 0)
                 radius: 20
                 clip: true
                 MiniPlayer {    // the sound playing, first (iOS 26: the media accessory over the pinned message)
@@ -4676,6 +5136,28 @@ Page {
                             Repeater { model: 3; Rectangle { width: 3; height: 3; radius: 1.5; color: Theme.text } }
                         }
                         MouseArea { id: moreHit; anchors.fill: parent; anchors.margins: -10; onClicked: page.showTransMenu() }
+                    }
+                }
+                Loader {
+                    id: savedTagsLoad
+                    active: panel.showSavedTags
+                    visible: active
+                    y: miniRow.height + askRow.height + pinRow.height + transRow.height
+                    width: parent.width
+                    height: active ? 46 : 0
+                    sourceComponent: SavedTagsBar {
+                        store: page.store
+                        tags: page.savedTags
+                        activeKey: page.activeSavedTag ? page.store.reactionKey(page.activeSavedTag) : ""
+                        overlayParent: page
+                        bottomInset: Math.max(osk.h, safe.bottom)
+                        onPicked: (tagObj) => page.selectSavedTag(tagObj)
+                        onLabelSaved: page.toast(Tr.t("Teg nomi saqlandi"))
+                        onErrorSaid: (msg) => page.toast(msg)
+                        Rectangle {
+                            visible: miniRow.visible || askRow.visible || pinRow.visible || transRow.visible
+                            x: 14; y: 0; width: parent.width - 28; height: 0.5; color: Theme.separator
+                        }
                     }
                 }
                 Item {          // the pinned message: a tap goes to it
@@ -4823,7 +5305,7 @@ Page {
                 }
                 Glass {
                     anchors.centerIn: parent
-                    visible: page.pickedText !== ""
+                    visible: !page.secret && page.pickedText !== ""
                     width: copyPickText.implicitWidth + 44; height: 44
                     opacity: copyPickHit.pressed ? 0.7 : 1
                     Text {
@@ -4847,7 +5329,7 @@ Page {
                     anchors.right: parent.right; anchors.rightMargin: 10
                     anchors.verticalCenter: parent.verticalCenter
                     width: 44; height: 44
-                    readonly property bool can: page.pickedCan("can_be_forwarded")
+                    readonly property bool can: !page.secret && page.pickedCan("can_be_forwarded")
                     opacity: !can ? 0.4 : fwdPickHit.pressed ? 0.7 : 1
                     Icon { anchors.centerIn: parent; name: "forward"; color: Theme.text }
                     MouseArea { id: fwdPickHit; anchors.fill: parent; enabled: parent.can; onClicked: page.forwardPicked() }
@@ -5051,27 +5533,16 @@ Page {
                         MouseArea { anchors.fill: parent; anchors.margins: -12; onClicked: page.cancelCompose() }
                     }
                 }
-                Loader {         // link preview bar above the field (loaded only when a link preview is active)
+                Loader {         // link preview bar above the field (or secret-chat consent prompt; lazy)
                     id: lpBarWrap
                     y: compose.height
                     width: parent.width
-                    active: page.composeLp !== null && !page.composeLpDisabled && !page.textBarred
+                    readonly property bool showPrompt: page.secretLpPrompt && !page.composeLpDisabled && !page.textBarred
+                    readonly property bool showPreview: page.composeLp !== null && !page.composeLpDisabled && !page.textBarred
+                    active: showPreview || showPrompt
                     visible: active
                     height: active ? 46 : 0
-                    sourceComponent: LinkPreviewBar {
-                        width: parent.width
-                        info: page.composeLp
-                        picPath: page.composeLpPic
-                        showSeparator: compose.height > 0
-                        onOptionsRequested: page.showLpMenu()
-                        onDismissed: {
-                            page.composeLpDisabled = true
-                            page.composeLp = null
-                            page.composeLpPic = ""
-                            if (page.lpMenu)
-                                page.lpMenu.visible = false
-                        }
-                    }
+                    sourceComponent: showPreview ? lpPreviewBarComp : secretLpPromptComp
                 }
                 TextEdit {
                     id: field
@@ -5800,6 +6271,8 @@ Page {
                 return it && it.media ? it.picFace : null
             }
             onPaged: (id) => page.unveil(id)        // (seen there, a spoiler is off here too, as on iOS)
+            onEnterPip: (info) => { if (page.nav && page.nav.videoPip) page.nav.videoPip.open(info) }
+            onVideoOpened: { if (page.nav && page.nav.videoPip && page.nav.videoPip.active) page.nav.videoPip.close() }
             onSave: {
                 const s = viewerItem.current
                 if (s && s.file)
@@ -5890,24 +6363,43 @@ Page {
             onPickPoll: page.openPollCreate()
             onPickLocation: page.openLocationPick()
             onPickContact: page.openContactPick()
+            onReplacePicked: (file, asFiles) => page.finishReplaceMedia(file, asFiles)
             onOpenChanged: if (!open) Qt.callLater(() => { page.pendingAttachMode = "" })
             onSend: (picked, asFiles, apart) => {
                 const mode = page.pendingAttachMode
                 page.pendingAttachMode = ""
-                const cap = page.textBarred ? null : page.fieldWords()
-                const replyId = page.replying ? page.replying.id : 0
-                if (mode === "schedule") {
-                    page.openScheduleSheet({ kind: "files", picked: picked, asFiles: asFiles, apart: apart, caption: cap, replyId: replyId })
-                    return
-                }
-                const isSilent = mode === "silent" ? true : page.silent
-                const sched = mode === "online" ? store.scheduleOnline() : null
-                page.sendFilesWith(picked, cap, replyId, asFiles, apart, isSilent, sched)
+                page.openSendMedia(picked, asFiles, apart, mode)
             }
         }
     }
 
-    function sendFieldWith(silentFlag, scheduleState) {
+    Loader {
+        id: sendMediaLoader
+        z: 16
+        active: false
+        anchors.fill: parent
+        sourceComponent: SendMediaSheet {
+            rights: page.rights
+            textBarred: page.textBarred
+            isPrivate: !!page.chat && page.chat.type["@type"] === "chatTypePrivate" && !store.isSaved(page.chat) && !page.bot
+            canOnline: !page.thread && !page.directTopic && store.canScheduleOnline(page.chat)
+            onRefused: (text) => page.toast(text)
+            onSendBatch: (picked, cap, opts) => {
+                const mode = opts && opts.mode ? opts.mode : ""
+                const replyId = page.replying ? page.replying.id : 0
+                if (mode === "schedule") {
+                    page.openScheduleSheet({ kind: "files", picked: picked, asFiles: !!opts.asFiles, apart: !!opts.apart,
+                                             viewOnce: !!opts.viewOnce, caption: cap, replyId: replyId })
+                    return
+                }
+                const isSilent = mode === "silent" ? true : page.silent
+                const sched = mode === "online" ? store.scheduleOnline() : null
+                page.sendFilesWith(picked, cap, replyId, !!opts.asFiles, !!opts.apart, isSilent, sched, !!opts.viewOnce)
+            }
+        }
+    }
+
+    function sendFieldWith(silentFlag, scheduleState, effectId) {
         if (page.preview) {
             const p = page.preview
             page.dropPreview()
@@ -5971,8 +6463,12 @@ Page {
                 const at = field.mapToItem(page, 0, 0)
                 page.flying = { text: t, x: at.x, y: at.y }
             }
-            store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, silentFlag,
-                           w.marks, page.directTopic, page.paidMessageStars, scheduleState, lpo, page.forumTopic)
+            if (effectId && String(effectId) !== "0")
+                store.sendTextWithEffect(page.chatId, t, String(effectId), page.replying ? page.replying.id : 0, page.thread, silentFlag,
+                                         w.marks, page.directTopic, page.paidMessageStars, scheduleState, lpo, page.forumTopic)
+            else
+                store.sendText(page.chatId, t, page.replying ? page.replying.id : 0, page.thread, silentFlag,
+                               w.marks, page.directTopic, page.paidMessageStars, scheduleState, lpo, page.forumTopic)
             store.recordHashtags(page.chatId, t)
             page.replying = null
             page.botForceReply = null
@@ -5994,12 +6490,14 @@ Page {
             doSend()
     }
 
-    function sendFilesWith(picked, caption, replyId, asFiles, apart, silentFlag, scheduleState) {
+    function sendFilesWith(picked, caption, replyId, asFiles, apart, silentFlag, scheduleState, viewOnceFlag) {
         const doSend = () => {
             if (!scheduleState && page.gap)
                 page.fresh()
-            store.sendFiles(page.chatId, picked, caption, replyId, asFiles, page.thread, silentFlag, apart,
-                            page.directTopic, page.paidMessageStars, scheduleState, page.forumTopic)
+            store.sendMediaBatch(page.chatId, picked, caption, replyId,
+                                 { asFiles: !!asFiles, apart: !!apart, viewOnce: !!viewOnceFlag,
+                                   silent: !!silentFlag, schedule: scheduleState || null },
+                                 page.thread, page.directTopic, page.paidMessageStars, page.forumTopic)
             page.resetComposePreview()
             field.text = ""
             page.replying = null
@@ -6640,11 +7138,13 @@ Page {
             property string origin: "field"
             property bool canOnline: false
             readonly property var items: {
-                const a = [
-                    { key: "silent", text: Tr.t("Ovozsiz yuborish"), icon: "belloff" },
-                    { key: "schedule", text: Tr.t("Rejalashtirish"), icon: "timer" }
-                ]
-                if (canOnline)
+                const a = []
+                if (origin === "field" && page.canEffect && store.availableEffectIds.length > 0)
+                    a.push({ key: "effect", text: Tr.t("Effekt bilan"), icon: "sparkle" })
+                a.push({ key: "silent", text: Tr.t("Ovozsiz yuborish"), icon: "belloff" })
+                if (!page.secret)
+                    a.push({ key: "schedule", text: Tr.t("Rejalashtirish"), icon: "timer" })
+                if (canOnline && !page.secret)
                     a.push({ key: "online", text: Tr.t("Onlayn bo'lganda yuborish"), icon: "person" })
                 return a
             }
@@ -6707,7 +7207,9 @@ Page {
                                         page.openAttach()
                                         return
                                     }
-                                    if (k === "silent") {
+                                    if (k === "effect") {
+                                        page.openEffectPicker()
+                                    } else if (k === "silent") {
                                         page.sendFieldWith(true, null)
                                     } else if (k === "online") {
                                         page.sendFieldWith(page.silent, store.scheduleOnline())
@@ -6873,7 +7375,7 @@ Page {
                 if (!payload)
                     return
                 if (payload.kind === "files")
-                    page.sendFilesWith(payload.picked, payload.caption, payload.replyId, payload.asFiles, payload.apart, page.silent, st)
+                    page.sendFilesWith(payload.picked, payload.caption, payload.replyId, payload.asFiles, payload.apart, page.silent, st, !!payload.viewOnce)
                 else
                     page.sendFieldWith(page.silent, st)
             }
@@ -6995,6 +7497,33 @@ Page {
         }
     }
 
+    Loader {             // message effect picker (private chats only, lazy)
+        id: effectPickerLoader
+        z: 32
+        active: false
+        anchors.fill: parent
+        sourceComponent: EffectPicker {
+            store: page.store
+            isPremium: page.isPremium
+            safeBottom: safe.bottom
+            onPicked: (effectId) => page.sendFieldWith(page.silent, null, effectId)
+            onPremiumNeeded: page.toast(Tr.t("Bu effekt uchun Telegram Premium kerak"))
+        }
+    }
+
+    Loader {             // folder invite link sheet (t.me/addlist/<slug>, lazy)
+        id: folderLinkLoader
+        z: 32
+        active: false
+        anchors.fill: parent
+        sourceComponent: FolderLinkSheet {
+            store: page.store
+            safeBottom: safe.bottom
+            onAdded: (name) => page.toast(Tr.f("«%1» papkasi qo'shildi", name))
+            onErrorSaid: (msg) => page.toast(msg)
+        }
+    }
+
     Loader {             // ⏱'s choices, over the field as Telegram-iOS's context menu
         id: timerMenuLoader
         z: 30
@@ -7014,16 +7543,23 @@ Page {
                 id: card
                 anchors.right: parent.right; anchors.rightMargin: 16
                 anchors.bottom: parent.bottom; anchors.bottomMargin: page.foot + 8
-                width: 230; height: choices.height
+                width: 230; height: Math.min(choices.implicitHeight, Math.round(page.height * 0.55))
                 radius: 16
                 color: Theme.menu
+                clip: true
                 transformOrigin: Item.BottomRight
-                layer.enabled: true
                 ScaleAnimator { id: grow; target: card; from: 0.01; to: 1; duration: 420
                                 easing.type: Easing.BezierSpline; easing.bezierCurve: page.menuSpring }
+                Flickable {
+                    anchors.fill: parent
+                    clip: true
+                    contentWidth: width
+                    contentHeight: choices.implicitHeight
+                    interactive: contentHeight > height
+                    boundsBehavior: Flickable.StopAtBounds
                 Column {
                     id: choices
-                    width: parent.width
+                    width: card.width
                     Text {
                         x: 16; width: parent.width - 32
                         topPadding: 10; bottomPadding: 6
@@ -7033,7 +7569,7 @@ Page {
                         font.family: Theme.font; font.pixelSize: 13
                     }
                     Repeater {
-                        model: [0, 86400, 604800, 2678400]
+                        model: page.secret ? [0, 1, 2, 3, 5, 10, 15, 30, 60, 3600, 86400, 604800] : [0, 86400, 604800, 2678400]
                         Rectangle {
                             required property int modelData
                             width: choices.width; height: 44
@@ -7063,6 +7599,7 @@ Page {
                             }
                         }
                     }
+                }
                 }
             }
         }
@@ -7341,6 +7878,78 @@ Page {
         return d > 4 ? Math.round(d) : 0
     }
 
+    Component {
+        id: lpPreviewBarComp
+        LinkPreviewBar {
+            width: parent ? parent.width : 0
+            info: page.composeLp
+            picPath: page.composeLpPic
+            showSeparator: compose.height > 0
+            onOptionsRequested: page.showLpMenu()
+            onDismissed: {
+                page.composeLpDisabled = true
+                page.composeLp = null
+                page.composeLpPic = ""
+                if (page.lpMenu)
+                    page.lpMenu.visible = false
+            }
+        }
+    }
+    Component {
+        id: secretLpPromptComp
+        Item {
+            width: parent ? parent.width : 0
+            height: 46
+            Rectangle {
+                visible: compose.height > 0
+                x: 14; y: 0; width: parent.width - 28; height: 0.5; color: Theme.separator
+            }
+            Icon {
+                x: 14; anchors.verticalCenter: parent.verticalCenter
+                width: 16; height: 16; name: "lock"; color: page.secretGreen
+            }
+            Text {
+                x: 36; anchors.verticalCenter: parent.verticalCenter
+                width: Math.max(20, enableBtn.x - x - 8)
+                elide: Text.ElideRight
+                text: Tr.t("Havola ko'rinishi?")
+                color: Theme.grey
+                font.family: Theme.font; font.pixelSize: 13
+            }
+            Text {
+                id: enableBtn
+                anchors.right: dismissPrompt.left; anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                text: Tr.t("Yoqish")
+                color: Theme.accent
+                font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold
+                MouseArea {
+                    anchors.fill: parent; anchors.margins: -10
+                    onClicked: {
+                        store.secretLinkPreviewAllowed = true
+                        page.secretLpPrompt = false
+                        page.fetchComposePreview()
+                    }
+                }
+            }
+            Text {
+                id: dismissPrompt
+                anchors.right: parent.right; anchors.rightMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: "✕"
+                color: Theme.grey
+                font.family: Theme.font; font.pixelSize: 16
+                MouseArea {
+                    anchors.fill: parent; anchors.margins: -10
+                    onClicked: {
+                        page.composeLpDisabled = true
+                        page.secretLpPrompt = false
+                    }
+                }
+            }
+        }
+    }
+
     // Shared page-level components for message rows (instantiated once per page instead of per row)
     Component {
         id: dayPillComp
@@ -7394,6 +8003,20 @@ Page {
         }
     }
     Component {
+        id: senderStatusComp
+        CustomEmoji {
+            required property Item targetText
+            required property Item msg
+            store: page.store
+            emojiId: msg && msg.shell ? msg.shell.senderEmoji : ""
+            size: 15
+            x: targetText ? targetText.x + targetText.width + 4 : 0
+            y: targetText ? targetText.y + Math.floor((targetText.height - 15) / 2) : 0
+            running: !!msg && msg.onScreen && !page.listMoving && page.cePageActive
+            tintColor: msg && msg.shell ? msg.shell.tint : Theme.accent
+        }
+    }
+    Component {
         id: headNameComp
         Text {
             readonly property Item host: parent
@@ -7406,16 +8029,51 @@ Page {
         }
     }
     Component {
+        id: headStatusComp
+        Text {
+            id: headStT
+            readonly property Item host: parent
+            readonly property real wants: implicitWidth + 19
+            width: Math.min(implicitWidth, Math.max(20, host.room - 19))
+            elide: Text.ElideRight
+            text: host.msg.shell.sender
+            color: host.msg.shell.tint
+            font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+            CustomEmoji {
+                store: page.store
+                emojiId: headStT.host.msg.shell.senderEmoji
+                size: 15
+                x: headStT.width + 4
+                y: Math.floor((headStT.height - 15) / 2)
+                running: headStT.host.msg.onScreen && !page.listMoving && page.cePageActive
+                tintColor: headStT.host.msg.shell.tint
+            }
+        }
+    }
+    Component {
         id: headRankComp
         Item {
+            id: headRankI
             readonly property Item host: parent
             readonly property Item sh: host.msg.shell
-            readonly property real wants: whoT.implicitWidth + rankT.implicitWidth + 11
+            readonly property bool hasSt: sh.senderEmoji !== ""
+            readonly property real wants: whoT.implicitWidth + (hasSt ? 19 : 0) + rankT.implicitWidth + 11
+            property Item stItem: null
+            function syncSt() {
+                if (hasSt) {
+                    if (!stItem)
+                        stItem = senderStatusComp.createObject(headRankI, { targetText: whoT, msg: host.msg })
+                } else if (stItem) {
+                    stItem.destroy()
+                    stItem = null
+                }
+            }
+            onHasStChanged: syncSt()
             width: host.bubW - 24
             height: whoT.height
             Text {
                 id: whoT
-                width: Math.min(implicitWidth, parent.host.room - (rankT.implicitWidth + 11))
+                width: Math.min(implicitWidth, Math.max(20, parent.host.room - (rankT.implicitWidth + 11) - (headRankI.hasSt ? 19 : 0)))
                 elide: Text.ElideRight
                 text: parent.sh.sender
                 color: parent.sh.tint
@@ -7595,6 +8253,7 @@ Page {
             width: Math.max(80, msg.bubbleWidth - 20)
             y: msg.lpY
             onOpened: (url) => page.follow(url, msg.msgId)
+            onInstantView: (url) => page.openInstantView(url, msg.lpData)
             onTouched: (down) => msg.touchBubble(down)
             onHeld: page.openMenu(msg, 0)
         }
@@ -7610,6 +8269,35 @@ Page {
             y: msg.bubbleY + msg.bubbleHeight + 4
             width: msg.bubbleWidth
             onButtonTapped: (btn, key) => page.tapInlineButton(msg.msgId, sh.senderKey, btn, key)
+        }
+    }
+    Component {
+        id: chipCustomComp
+        Item {
+            required property Item chipItem
+            required property Item msgItem
+            anchors.fill: parent
+            CustomEmoji {
+                id: ceImg
+                store: page.store
+                emojiId: chipItem && chipItem.modelData ? (chipItem.modelData.ce || "") : ""
+                size: 18
+                x: 8; anchors.verticalCenter: parent.verticalCenter
+                running: !!msgItem && msgItem.onScreen && !page.listMoving && page.cePageActive
+                tintColor: chipItem && chipItem.modelData && chipItem.modelData.mine
+                    ? (msgItem && msgItem.bare ? "#1c1c1e" : Theme.dark && msgItem && msgItem.out ? Theme.bubbleOut : "white")
+                    : (chipItem ? chipItem.ink : Theme.accent)
+            }
+            Text {
+                visible: !!chipItem && !chipItem.who.length
+                x: ceImg.x + ceImg.width + 4
+                anchors.verticalCenter: parent.verticalCenter
+                text: chipItem && chipItem.modelData ? String(chipItem.modelData.n) : ""
+                color: chipItem && chipItem.modelData && chipItem.modelData.mine
+                    ? (msgItem && msgItem.bare ? "#1c1c1e" : Theme.dark && msgItem && msgItem.out ? Theme.bubbleOut : "white")
+                    : (chipItem ? chipItem.ink : Theme.accent)
+                font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
+            }
         }
     }
     Component {
@@ -7636,7 +8324,19 @@ Page {
                         id: chip
                         required property var modelData
                         readonly property bool isPaid: !!modelData.paid
+                        readonly property bool isCustom: !!modelData.ce
                         readonly property var who: modelData.who || []
+                        property Item ceItem: null
+                        function syncCeChip() {
+                            if (isCustom) {
+                                if (!ceItem)
+                                    ceItem = chipCustomComp.createObject(chip, { chipItem: chip, msgItem: reactWrap.item })
+                            } else if (ceItem) {
+                                ceItem.destroy()
+                                ceItem = null
+                            }
+                        }
+                        onIsCustomChanged: syncCeChip()
                         width: page.chipWidth(modelData); height: 28; radius: 14
                         readonly property color ink: reactWrap.item.bare ? "white" : reactWrap.item.out ? Theme.check : Theme.accent
                         readonly property color goldInk: Theme.dark ? "#ffc337" : "#c87000"
@@ -7656,7 +8356,7 @@ Page {
                         }
                         Text {
                             id: chipText
-                            visible: !chip.isPaid
+                            visible: !chip.isPaid && !chip.isCustom
                             anchors.centerIn: chip.who.length ? undefined : parent
                             x: 8; anchors.verticalCenter: parent.verticalCenter
                             text: chip.who.length ? chip.modelData.e : chip.modelData.e + " " + chip.modelData.n
@@ -7671,7 +8371,7 @@ Page {
                                 required property int index
                                 readonly property int sz: chip.isPaid ? 20 : 24
                                 readonly property int step: chip.isPaid ? 10 : 12
-                                x: (chip.isPaid ? starGlyph.x + starGlyph.width + 4 : chipText.x + chipText.implicitWidth + 4) + index * step - 1.5
+                                x: (chip.isPaid ? starGlyph.x + starGlyph.width + 4 : chip.isCustom ? 8 + 18 + 4 : chipText.x + chipText.implicitWidth + 4) + index * step - 1.5
                                 anchors.verticalCenter: parent.verticalCenter
                                 z: chip.who.length - index      // (over the chip: below 0 it went under its colour)
                                 width: sz + 3; height: sz + 3; radius: width / 2
@@ -7705,6 +8405,8 @@ Page {
                         return
                     if (c.modelData.paid)
                         paidSheet.show(reactWrap.item.reactId, c.modelData.reactors || [], !!c.modelData.mine)
+                    else if (c.modelData.ce)
+                        store.reactCustomEmoji(page.chatId, reactWrap.item.reactId, c.modelData.ce, !c.modelData.mine)
                     else
                         store.react(page.chatId, reactWrap.item.reactId, c.modelData.e, !c.modelData.mine)
                 }
@@ -7974,6 +8676,133 @@ Page {
             }
             onEnded: done()
             onFailedChanged: if (failed) done()
+        }
+    }
+    Component {
+        id: effectBadgeComp
+        Item {
+            id: eb
+            required property Item msg
+            readonly property string eid: msg && msg.shell ? msg.shell.effectId : ""
+            readonly property var eff: (store.msgEffectsRev >= 0 && eid !== "") ? store.cachedMessageEffect(eid) : null
+            x: msg ? (msg.out ? Math.max(4, msg.bubbleX - 32) : Math.min(msg.width - 30, msg.bubbleX + msg.bubbleWidth + 6)) : 0
+            y: msg ? (msg.bubbleY + msg.bubbleHeight - 28) : 0
+            width: 26; height: 26
+            z: 3
+            Component.onCompleted: if (eid !== "" && !eff) store.getMessageEffect(eid, null)
+            Rectangle {
+                anchors.fill: parent
+                radius: 13
+                color: Theme.dark ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(0, 0, 0, 0.08)
+                scale: ebHit.pressed ? 0.9 : 1
+                Behavior on scale { NumberAnimation { duration: 100 } }
+                Text {
+                    anchors.centerIn: parent
+                    text: eb.eff && eb.eff.emoji ? eb.eff.emoji : "✨"
+                    font.family: Theme.font; font.pixelSize: 13
+                }
+            }
+            MouseArea {
+                id: ebHit
+                anchors.fill: parent; anchors.margins: -4
+                onClicked: if (eb.msg) page.playMessageEffect(eb.msg.msgId, eb.eid, eb.msg)
+            }
+        }
+    }
+    Component {
+        id: effectAnimComp
+        Item {
+            id: ea
+            required property Item row
+            required property Item bub
+            required property string animFmt
+            required property string filePath
+            required property string emojiChar
+            property bool finished: false
+            property bool fallbackActive: animFmt === "" || filePath === "" || animFmt === "webp" || !Prefs.fx
+            z: 12
+            width: 168; height: 168
+            x: bub ? Math.max(0, Math.min(parent ? parent.width - width : 200, bub.x + (bub.width - width) / 2)) : 0
+            y: bub ? Math.max(-40, bub.y + (bub.height - height) / 2 - 20) : 0
+
+            function done() {
+                if (finished)
+                    return
+                finished = true
+                if (row)
+                    row.burstCount = Math.max(0, row.burstCount - 1)
+                destroy()
+            }
+
+            Timer {
+                interval: 3500
+                running: true
+                onTriggered: ea.done()
+            }
+
+            Loader {
+                anchors.fill: parent
+                active: !ea.fallbackActive && ea.animFmt === "tgs" && ea.filePath !== ""
+                sourceComponent: Lottie {
+                    anchors.fill: parent
+                    path: ea.filePath
+                    once: true
+                    most: 512
+                    running: page.visible
+                    onEnded: ea.done()
+                    onFailedChanged: if (failed) ea.fallbackActive = true
+                }
+            }
+
+            Loader {
+                anchors.fill: parent
+                active: !ea.fallbackActive && ea.animFmt === "webm" && ea.filePath !== ""
+                sourceComponent: InlineVideo {
+                    anchors.fill: parent
+                    path: ea.filePath
+                    running: page.visible
+                    sound: false
+                    loop: false
+                }
+            }
+
+            // One-shot burst animation for static WebP or emoji fallback (also when libtlottie is absent in offscreen desk)
+            Item {
+                id: burstFallback
+                anchors.fill: parent
+                visible: ea.fallbackActive
+                opacity: 0
+                scale: 0.45
+                Image {
+                    visible: ea.animFmt === "webp" && ea.filePath !== "" && status === Image.Ready
+                    anchors.centerIn: parent
+                    width: 112; height: 112
+                    source: ea.animFmt === "webp" && ea.filePath !== "" ? "file://" + ea.filePath : ""
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    smooth: true
+                }
+                Text {
+                    visible: !(ea.animFmt === "webp" && ea.filePath !== "")
+                    anchors.centerIn: parent
+                    text: ea.emojiChar || "✨"
+                    font.family: Theme.font; font.pixelSize: 72
+                }
+                SequentialAnimation {
+                    running: ea.fallbackActive
+                    ParallelAnimation {
+                        NumberAnimation { target: burstFallback; property: "opacity"; from: 0; to: 1; duration: 160 }
+                        NumberAnimation { target: burstFallback; property: "scale"; from: 0.45; to: 1.25; duration: 280; easing.type: Easing.OutBack }
+                    }
+                    NumberAnimation { target: burstFallback; property: "scale"; to: 1.0; duration: 220; easing.type: Easing.OutCubic }
+                    PauseAnimation { duration: 260 }
+                    ParallelAnimation {
+                        NumberAnimation { target: burstFallback; property: "opacity"; to: 0; duration: 260 }
+                        NumberAnimation { target: burstFallback; property: "scale"; to: 1.4; duration: 260; easing.type: Easing.InQuad }
+                    }
+                    ScriptAction { script: ea.done() }
+                }
+            }
         }
     }
     Component {
@@ -8370,6 +9199,7 @@ Page {
         AudioRow {
             dpr: page.dpr
             readonly property Item sh: parent.msg.shell
+            readonly property var sp: page.speechInfoFor(sh.msgId, sh.speech)
             kind: sh.rowKind === "audio" ? "audio" : "voice"
             out: sh.out
             wave: sh.wave
@@ -8382,6 +9212,73 @@ Page {
             playing: current && page.player.playing
             at: current ? page.player.position : 0
             fresh: !sh.heard
+            speechState: sp.state
+            speechText: sp.text
+            speechOpen: sp.open
+            onTranscribeTapped: page.toggleSpeech(sh.msgId)
+        }
+    }
+    Component {
+        id: roundSpeechComp
+        Item {
+            id: rsWrap
+            required property Item msg
+            readonly property Item sh: msg.shell
+            readonly property var sp: page.speechInfoFor(sh.msgId, sh.speech)
+            readonly property bool cardOpen: sp.open && (sp.state === "pending" || sp.text !== "")
+            readonly property real cardHeight: cardOpen ? (rsCard.implicitHeight + 6) : 0
+            x: 0; y: 0
+            width: msg.pw
+            height: msg.ph + cardHeight
+            z: 3
+            Rectangle {
+                id: rsBtn
+                x: rsWrap.msg.pw - width - 6
+                y: 6
+                width: 32; height: 22; radius: 11
+                color: Qt.rgba(0, 0, 0, rsHit.pressed ? 0.72 : 0.52)
+                border.width: Theme.dark ? 0.5 : 0
+                border.color: Qt.rgba(1, 1, 1, 0.22)
+                Text {
+                    anchors.centerIn: parent
+                    text: rsWrap.sp.state === "pending" ? "…"
+                        : (rsWrap.sp.state === "text" && rsWrap.sp.open ? "⌃" : "→A")
+                    color: "white"
+                    font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold
+                }
+                MouseArea {
+                    id: rsHit
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    onClicked: page.toggleSpeech(rsWrap.sh.msgId)
+                }
+            }
+            Rectangle {
+                id: rsCard
+                visible: rsWrap.cardOpen
+                x: rsWrap.msg.out ? rsWrap.msg.pw - width : 0
+                y: rsWrap.msg.ph + 6
+                width: Math.max(rsWrap.msg.pw, Math.min(rsWrap.msg.most, 240))
+                implicitHeight: rsTxt.implicitHeight + 16
+                height: implicitHeight
+                radius: 14
+                color: rsWrap.msg.out ? Theme.bubbleOut : Theme.bubbleIn
+                border.width: Theme.dark ? 0.5 : 0
+                border.color: Theme.separator
+                Text {
+                    id: rsTxt
+                    x: 12; y: 8
+                    width: parent.width - 24
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    text: rsWrap.sp.state === "pending"
+                        ? (rsWrap.sp.text !== "" ? (/[…\.]$/.test(rsWrap.sp.text) ? rsWrap.sp.text : rsWrap.sp.text + " …") : Tr.t("Matnga o'girilmoqda…"))
+                        : rsWrap.sp.text
+                    color: rsWrap.msg.out ? Theme.outText : Theme.inText
+                    opacity: rsWrap.sp.state === "pending" && rsWrap.sp.text === "" ? 0.68 : 1
+                    font.family: Theme.font; font.pixelSize: 14
+                }
+            }
         }
     }
     Component {
@@ -8539,6 +9436,7 @@ Page {
                         room: files.item.most - 24
                         size: Prefs.chatSize
                         live: files.item.onScreen
+                        moving: page.listMoving
                         text: member.worded ? member.cell.text : ""
                         parts: member.worded ? member.cell.rich : ""
                         ink: files.item.out ? Theme.outText : Theme.inText
@@ -8904,6 +9802,7 @@ Page {
             // place, rich text's spoiler dust): a binding that stops at `watched` reads no y, so a plain
             // row is not asked again every step of a flick (~11600 times in one run through a group)
             readonly property bool watched: media || rowKind !== "" || grouped || shell.rich !== ""
+                                          || shell.senderEmoji !== "" || shell.reacts.indexOf("\"ce\":") >= 0
             readonly property bool inSight: watched && shell.y + height > list.seen - 300 && shell.y < list.seen + list.height + 300
             readonly property bool onScreen: watched && shell.y + height > list.seen - 100 && shell.y < list.seen + list.height + 100
             readonly property real aspect: shell.picH / shell.picW
@@ -8973,12 +9872,38 @@ Page {
                 }
             }
             onHasLpChanged: syncLp()
+            property Item roundSpeechItem: null
+            readonly property real roundSpeechH: roundSpeechItem ? roundSpeechItem.cardHeight : 0
+            function syncRoundSpeech() {
+                if (picKind === "round") {
+                    if (!roundSpeechItem)
+                        roundSpeechItem = roundSpeechComp.createObject(bubble, { msg: item })
+                } else if (roundSpeechItem) {
+                    roundSpeechItem.destroy()
+                    roundSpeechItem = null
+                }
+            }
+            onPicKindChanged: syncRoundSpeech()
+            property Item effectBadgeItem: null
+            readonly property bool hasEffect: shell.effectId !== "" && !shell.tucked
+            function syncEffectBadge() {
+                if (hasEffect) {
+                    if (!effectBadgeItem)
+                        effectBadgeItem = effectBadgeComp.createObject(mover, { msg: item })
+                } else if (effectBadgeItem) {
+                    effectBadgeItem.destroy()
+                    effectBadgeItem = null
+                }
+            }
+            onHasEffectChanged: syncEffectBadge()
             function initRow() {
                 if (roundBig) { roundK = 1; page.roundSeen = roundShown }
                 syncFlash()
                 syncStampBg()
                 syncLp()
                 syncIkb()
+                syncRoundSpeech()
+                syncEffectBadge()
             }
             Component.onDestruction: cleanup()      // (as the plain text row's)
             function cleanup() {
@@ -9088,7 +10013,7 @@ Page {
                                                         item.reacted ? reactRow.wants + stamp.implicitWidth + 6 : 0,
                                                         stampUnder || lpBelow ? stamp.implicitWidth : item.lastLine + stampRoom, tail ? 196 : 0) + 24)
                     height: tail + (item.shell.jumbo ? body.y + body.height + 26
-                          : item.overlaid ? picture.y + item.ph + (item.bare ? 0 : 3)
+                          : item.overlaid ? picture.y + item.ph + (item.bare ? 0 : 3) + item.roundSpeechH
                           : item.reacted ? reactRow.y + reactRow.height + 6
                           : lpBelow ? (item.lpItem ? item.lpItem.y + lpH : body.y + body.height) + 22
                           : body.y + body.height + (stampUnder ? 24 : 8))
@@ -9186,6 +10111,7 @@ Page {
                         sourceComponent: bubble.hasFwd ? headFwdComp
                                        : bubble.hasVia ? headViaComp
                                        : item.shell.rank !== "" ? headRankComp
+                                       : item.shell.senderEmoji !== "" ? headStatusComp
                                        : headNameComp
                     }
                     Loader {        // what it answers: a bar, the name, a line of the text; a tap goes there
@@ -9241,6 +10167,7 @@ Page {
                         width: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.attW, Math.min(implicitWidth, item.most - 24))
                              : Math.min(implicitWidth, item.most - 24)
                         live: item.onScreen
+                        moving: page.listMoving
                         room: item.media ? bubble.width - 24 : attach.visible ? Math.max(attach.attW, item.most - 24) : item.most - 24
                         text: item.stacked ? "" : (item.kind ? "[" + item.kind + "] " : "") + item.text     // (a stack has each caption under its file)
                         parts: item.kind || item.stacked ? "" : item.shell.rich
@@ -9259,7 +10186,7 @@ Page {
                         active: item.reacted        // (made only when there are; its height is the Flow's)
                         visible: active
                         x: item.bare ? 0 : 10
-                        y: (bubble.lpBelow && item.lpItem ? item.lpItem.y + bubble.lpH : body.y + body.height) + (body.height || bubble.lpBelow ? 6 : 4)
+                        y: (bubble.lpBelow && item.lpItem ? item.lpItem.y + bubble.lpH : body.y + body.height) + item.roundSpeechH + (body.height || bubble.lpBelow ? 6 : 4)
                         readonly property real wants: item.reacted ? item.reactList.reduce((w, r, k) =>
                             w + page.chipWidth(r) + (k ? 4 : 0), 0) : 0
                         width: Math.min(wants + 1, bubble.width - x - 10)
@@ -9272,7 +10199,7 @@ Page {
                         id: stamp
                         z: 1
                         anchors.right: parent.right; anchors.rightMargin: item.overlaid || item.shell.jumbo ? (item.bare ? 8 : 12) : 10
-                        anchors.bottom: parent.bottom; anchors.bottomMargin: bubble.tail + (item.overlaid || item.shell.jumbo ? (item.bare ? 6 : 10) : 6)
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: bubble.tail + item.roundSpeechH + (item.overlaid || item.shell.jumbo ? (item.bare ? 6 : 10) : 6)
                         spacing: 2
                         readonly property color ink: item.overlaid || item.shell.jumbo || item.bare ? "white" : item.out ? Theme.outMeta : Theme.inMeta
                         Loader {        // (made only when there are any)
@@ -9285,7 +10212,8 @@ Page {
                         }
                         Text {
                             textFormat: item.out && !item.sending ? Text.StyledText : Text.PlainText
-                            text: (item.shell.isPinned ? "📌 " : "") + (item.shell.edited ? Tr.t("tahrirlandi") + " " : "") + item.shell.time +
+                            text: (item.shell.expireAt > 0 ? "⏱ " + page.expireLeft(item.shell.expireAt) + " " : "") +
+                                  (item.shell.isPinned ? "📌 " : "") + (item.shell.edited ? Tr.t("tahrirlandi") + " " : "") + item.shell.time +
                                   (item.out ? (item.sending ? " ◷" : " <font color='" + (item.overlaid || item.shell.jumbo ? "white" : Theme.check) + "'>" + (item.msgId <= page.readUpTo ? "✓✓" : "✓") + "</font>") : "")
                             color: stamp.ink
                             font.family: Theme.font; font.pixelSize: 12
@@ -9481,6 +10409,145 @@ Page {
         }
     }
     Component {
+        id: wordsCeProberComp
+        TextEdit {
+            property real textWidth: 0
+            property int textWrap: TextEdit.Wrap
+            property font textFont
+            property string richText: ""
+            visible: false
+            readOnly: true
+            width: textWidth
+            wrapMode: textWrap
+            textFormat: TextEdit.RichText
+            font: textFont
+            text: richText
+            leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0
+        }
+    }
+    Component {
+        id: wordsCeOverlayComp
+        Item {
+            id: ceOv
+            required property Item partItem
+            readonly property Item words: partItem ? partItem.words : null
+            readonly property Item txt: partItem ? partItem.textItem : null
+            readonly property var ceList: partItem && partItem.modelData ? (partItem.modelData.ce || []) : []
+            readonly property int rev: page.store ? page.store.customEmojiRev : 0
+            readonly property real txtW: txt ? txt.width : 0
+            readonly property int txtSz: words ? words.size : 16
+            property var spots: []
+            property bool _scheduled: false
+            anchors.fill: parent
+            z: 2
+
+            function scheduleMeasure() {
+                if (_scheduled)
+                    return
+                _scheduled = true
+                Qt.callLater(measure)
+            }
+
+            function measure() {
+                _scheduled = false
+                if (!page || !page.store)       // (called later: its row may be gone by then)
+                    return
+                if (!partItem || !txt || !words || !ceList.length || txt.width <= 0) {
+                    if (partItem) {
+                        partItem.ceBlankSet = null
+                        partItem.hasCeAnim = false
+                    }
+                    spots = []
+                    return
+                }
+                const anims = []
+                const blankMap = {}
+                for (let i = 0; i < ceList.length && anims.length < Emo.maxCustomAnim; i++) {
+                    const info = ceList[i]
+                    const entry = page.store.customEmoji(info.id)
+                    if (entry && (entry.format === "tgs" || entry.format === "webm") && entry.filePath !== "") {
+                        anims.push({ idx: i, id: info.id, alt: info.alt, px: info.px })
+                        blankMap[i] = true
+                    }
+                }
+                if (!anims.length) {
+                    partItem.ceBlankSet = null
+                    partItem.hasCeAnim = false
+                    spots = []
+                    return
+                }
+                const resolved = page.store.resolveCustomEmojiHtml(partItem.modelData.h, words.size, rev, blankMap)
+                const probeRich = resolved
+                    .replace(/<a href="spoiler"/g, "<a style='color:" + (words.shown ? words.ink : "transparent") + ";text-decoration:none' href=\"spoiler\"")
+                    .replace(/<a href=/g, "<a style='color:" + words.tint + ";text-decoration:none' href=")
+                // Match each blankPixel <img> ordinal in probeRich to its 0xFFFC character in TextEdit
+                const blankImgOrds = []
+                const imgRe = /<img\s+([^>]+)>/g
+                let imgOrd = 0, im
+                while ((im = imgRe.exec(probeRich)) !== null) {
+                    if (im[1].indexOf(Emo.blankPixel) >= 0)
+                        blankImgOrds.push(imgOrd)
+                    imgOrd++
+                }
+                const probe = wordsCeProberComp.createObject(ceOv, {
+                    textWidth: txt.width, textWrap: txt.wrapMode, textFont: txt.font, richText: probeRich
+                })
+                const out = []
+                if (probe) {
+                    const plain = probe.getText(0, probe.length)
+                    const fffc = []
+                    for (let k = 0; k < plain.length; k++)
+                        if (plain.charCodeAt(k) === 0xFFFC)
+                            fffc.push(k)
+                    const n = Math.min(anims.length, blankImgOrds.length)
+                    for (let j = 0; j < n; j++) {
+                        const pos = fffc[blankImgOrds[j]]
+                        if (pos === undefined)
+                            continue
+                        const r = probe.positionToRectangle(pos)
+                        const a = anims[j]
+                        out.push({
+                            id: a.id, alt: a.alt, px: a.px,
+                            x: Math.round(r.x),
+                            y: Math.round(r.y + Math.max(0, (r.height - a.px) / 2 - 2))
+                        })
+                    }
+                    probe.destroy()
+                }
+                if (out.length > 0) {
+                    partItem.hasCeAnim = true
+                    partItem.ceBlankSet = blankMap
+                    spots = out
+                } else {
+                    partItem.ceBlankSet = null
+                    partItem.hasCeAnim = false
+                    spots = []
+                }
+            }
+
+            onRevChanged: scheduleMeasure()
+            onCeListChanged: scheduleMeasure()
+            onTxtWChanged: scheduleMeasure()
+            onTxtSzChanged: scheduleMeasure()
+            Component.onCompleted: scheduleMeasure()
+
+            Repeater {
+                model: ceOv.spots
+                CustomEmoji {
+                    required property var modelData
+                    store: page.store
+                    emojiId: modelData.id
+                    fallback: modelData.alt
+                    size: modelData.px
+                    x: (ceOv.txt ? ceOv.txt.x : 0) + modelData.x
+                    y: (ceOv.txt ? ceOv.txt.y : 0) + modelData.y
+                    running: !!ceOv.words && ceOv.words.live && !ceOv.words.moving && page.cePageActive
+                    tintColor: ceOv.words ? ceOv.words.ink : Theme.text
+                }
+            }
+        }
+    }
+    Component {
         id: wordsRichComp
         Item {
             id: richWrap
@@ -9536,6 +10603,25 @@ Page {
                         readonly property Item textItem: t
                         readonly property string q: modelData.q
                         readonly property bool block: q !== ""
+                        readonly property bool hasCe: !!modelData.ce && modelData.ce.length > 0
+                        property var ceBlankSet: null
+                        property bool hasCeAnim: false
+                        property Item ceLayer: null
+                        function syncCe() {
+                            if (hasCe) {
+                                if (!ceLayer)
+                                    ceLayer = wordsCeOverlayComp.createObject(part, { partItem: part })
+                            } else if (ceLayer) {
+                                ceLayer.destroy()
+                                ceLayer = null
+                                ceBlankSet = null
+                                hasCeAnim = false
+                            }
+                        }
+                        onHasCeChanged: syncCe()
+                        readonly property string rawH: hasCe
+                            ? page.store.resolveCustomEmojiHtml(modelData.h, words ? words.size : 16, page.store.customEmojiRev, ceBlankSet)
+                            : modelData.h
                         readonly property bool folds: q === "fold" && (words && words.open ? true : t.truncated)
                         readonly property real padL: block ? 10 : 0
                         readonly property real padR: q === "pre" ? 8 : block ? 22 : 0
@@ -9544,7 +10630,7 @@ Page {
                         readonly property real last: block ? width : t.last
                         width: words ? words.width : 0
                         height: t.height + (block ? 8 : 0)
-                        readonly property string rich: words ? modelData.h
+                        readonly property string rich: words ? rawH
                             .replace(/<a href="spoiler"/g, "<a style='color:" + (words.shown ? words.ink : "transparent") + ";text-decoration:none' href=\"spoiler\"")
                             .replace(/<a href=/g, "<a style='color:" + words.tint + ";text-decoration:none' href=") : ""
                         function hit(x, y) {
@@ -9573,14 +10659,14 @@ Page {
                             wrapMode: part.q === "pre" ? Text.WrapAnywhere : Text.Wrap
                             maximumLineCount: part.q === "fold" && !(part.words && part.words.open) ? 3 : 100000
                             elide: Text.ElideRight
-                            readonly property bool fancy: part.modelData.h.indexOf("monospace") >= 0
+                            readonly property bool fancy: part.modelData.h.indexOf("monospace") >= 0 || part.hasCeAnim
                             textFormat: fancy ? Text.RichText : Text.StyledText
                             property real laid: 0
                             readonly property real last: !fancy ? laid : twin.item ? twin.item.laid : width
                             onLineLaidOut: (line) => { if (line.isLast) laid = line.implicitWidth }
                             text: !part.words ? "" : fancy ? part.rich
-                                : part.modelData.h.replace(/<a href="spoiler">/g, "<font color='" + (part.words.shown ? part.words.ink : "transparent") + "'>")
-                                                  .replace(/<a href="[^"]*">/g, "<font color='" + part.words.tint + "'>").replace(/<\/a>/g, "</font>")
+                                : part.rawH.replace(/<a href="spoiler">/g, "<font color='" + (part.words.shown ? part.words.ink : "transparent") + "'>")
+                                           .replace(/<a href="[^"]*">/g, "<font color='" + part.words.tint + "'>").replace(/<\/a>/g, "</font>")
                             color: part.words ? part.words.ink : Theme.text
                             linkColor: part.words ? part.words.tint : Theme.accent
                             font.family: part.q === "pre" ? "monospace" : Theme.font

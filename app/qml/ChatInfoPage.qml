@@ -15,7 +15,11 @@ SubPage {
     property int changed: 0             // the chat changed (TDLib changes it in place)
     readonly property var chat: (changed, store.seen, store.chats[chatId])
     readonly property string kind: chat ? chat.type["@type"] : ""
-    readonly property var user: kind === "chatTypePrivate" ? (store.seen, store.users[chat.type.user_id]) : null
+    readonly property bool isSecret: kind === "chatTypeSecret"
+    readonly property var secretChat: store.secretSeen >= 0 && isSecret ? store.secretChatOf(chat) : null
+    readonly property string secretState: store.secretSeen >= 0 && isSecret ? store.secretState(chat) : ""
+    readonly property color secretGreen: Theme.dark ? "#34c759" : "#00a650"
+    readonly property var user: (kind === "chatTypePrivate" || kind === "chatTypeSecret") ? (store.seen, store.users[chat.type.user_id]) : null
     readonly property var group: !chat ? null
         : kind === "chatTypeSupergroup" ? store.groups["s" + chat.type.supergroup_id]
         : kind === "chatTypeBasicGroup" ? store.groups["b" + chat.type.basic_group_id] : null
@@ -36,6 +40,25 @@ SubPage {
     Connections {
         target: store
         function onChatChanged(id) { if (id === page.chatId) page.changed++ }
+        function onChatBoostChanged(id) { if (id === page.chatId && page.isChannel) page.loadBoostStatus() }
+    }
+
+    property var boostStatus: null
+    property Item boostSheet: null
+    function loadBoostStatus() {
+        if (!isChannel || !chatId)
+            return
+        store.getChatBoostStatus(chatId, (st, err) => {
+            if (page && st)
+                page.boostStatus = st
+        })
+    }
+    function showBoost() {
+        if (!isChannel)
+            return
+        if (!boostSheet)
+            boostSheet = boostMaker.createObject(page.nav || page)
+        boostSheet.show(chatId, chat ? store.title(chat) : "", boostStatus)
     }
 
     Component.onCompleted: {
@@ -44,7 +67,11 @@ SubPage {
         const big = chat.photo && chat.photo.big
         if (big)
             store.fetch(big, 8, (path) => page.photo = path)
+        if (isSecret && chat.type.secret_chat_id && !secretChat)
+            store.getSecretChat(chat.type.secret_chat_id, null)
         loadFull()
+        if (isChannel)
+            loadBoostStatus()
         for (const t of tabs)
             if (t.filter)
                 count(t)
@@ -109,12 +136,24 @@ SubPage {
     // chat), Share Contact, Send a Gift, Enable/Adjust Auto-Delete, Clear Messages, Block User (Secret Chat: not here)
     function moreMenu() {
         const out = []
+        if (isSecret) {
+            out.push({ t: Tr.t("Shifrlash kaliti"), run: () => page.openSecretKey() })
+            if (secretState !== "closed")
+                out.push({ t: autoDelete ? Tr.f("Avto-o'chirishni sozlash (%1)", store.lasting(autoDelete)) : Tr.t("Avto-o'chirishni yoqish"),
+                           run: () => page.autoDeleteMenu() })
+            out.push({ t: Tr.t("Xabarlarni tozalash"), run: () => page.askClear() })
+            out.push({ t: Tr.t("Maxfiy chatni o'chirish"), red: true, run: () => page.askDeleteSecret() })
+            overlay.ask("", out)
+            return
+        }
         if (!deleted)
             out.push({ t: Tr.t("Fon rasmini o'zgartirish"), run: () => page.openPage("WallpaperPage.qml", { home: page }) })
         if (contact && user.phone_number && !bot)
             out.push({ t: Tr.t("Kontaktni ulashish"), run: () => page.overlay.forward.show() })
         if (giftable)
             out.push({ t: Tr.t("Hadya yuborish"), run: () => page.overlay.gift.show() })
+        if (other && !bot && !deleted)
+            out.push({ t: Tr.t("Maxfiy chat boshlash"), run: () => page.askStartSecret() })
         if (!deleted)
             out.push({ t: autoDelete ? Tr.f("Avto-o'chirishni sozlash (%1)", store.lasting(autoDelete)) : Tr.t("Avto-o'chirishni yoqish"),
                        run: () => page.autoDeleteMenu() })
@@ -123,11 +162,55 @@ SubPage {
                    red: !blocked, run: () => blocked ? page.block(false) : page.askBlock() })
         overlay.ask("", out)
     }
-    // its second level (iOS pushes it in the same menu): 1 day, 1 week, 1 month; Disable when on
+    function openSecretKey() {
+        openPage("SecretKeyPage.qml", { secretChatId: chat && chat.type ? (chat.type.secret_chat_id || 0) : 0, partnerName: firstName || store.title(chat) })
+    }
+    function askStartSecret() {
+        if (!user)
+            return
+        const go = () => {
+            page.overlay.ask(Tr.f("%1 bilan maxfiy chat boshlansinmi?", page.firstName || store.title(page.chat)),
+                             [{ t: Tr.t("Maxfiy chat boshlash"), run: () => {
+                                 store.startSecretChat(page.user.id, (cid, err) => {
+                                     if (!page)
+                                         return
+                                     if (cid)
+                                         page.nav.openCreatedChat(cid)
+                                     else if (err)
+                                         page.overlay.say(err)
+                                 })
+                             } }])
+        }
+        if (overlay.sheet.open)
+            Qt.callLater(go)
+        else
+            go()
+    }
+    function askDeleteSecret() {
+        const go = () => {
+            page.overlay.ask(Tr.t("Maxfiy chatni o'chirmoqchimisiz? Bu qurilmadagi barcha xabarlar o'chib ketadi."),
+                             [{ t: Tr.t("Maxfiy chatni o'chirish"), red: true, run: () => {
+                                 store.deleteSecretChat(page.chatId, (r) => {
+                                     if (!page)
+                                         return
+                                     if (r && r["@type"] === "error")
+                                         return page.overlay.say(Tr.f("Bo'lmadi: %1", r.message))
+                                     page.nav.say(Tr.t("Maxfiy chat o'chirildi"))
+                                     page.nav.popHome()
+                                 })
+                             } }])
+        }
+        if (overlay.sheet.open)
+            Qt.callLater(go)
+        else
+            go()
+    }
+    // its second level (iOS pushes it in the same menu): 1 day, 1 week, 1 month (secret chats: 1 s .. 1 week); Disable when on
     function autoDeleteMenu() {
         Qt.callLater(() => {
-            const out = [86400, 604800, 2678400].map((secs) => ({ t: store.lasting(secs) + (secs === page.autoDelete ? "  ✓" : ""),
-                                                                 run: () => page.setAutoDelete(secs) }))
+            const presets = page.isSecret ? [1, 2, 3, 5, 10, 15, 30, 60, 3600, 86400, 604800] : [86400, 604800, 2678400]
+            const out = presets.map((secs) => ({ t: store.lasting(secs) + (secs === page.autoDelete ? "  ✓" : ""),
+                                                 run: () => page.setAutoDelete(secs) }))
             if (page.autoDelete)
                 out.push({ t: Tr.t("O'chirib qo'yish"), red: true, run: () => page.setAutoDelete(0) })
             page.overlay.ask(Tr.t("Bu chatda yuborilgan xabarlarni ma'lum vaqtdan keyin avtomatik o'chirish."), out)
@@ -221,7 +304,20 @@ SubPage {
         qr.photo = page.photo || (chat ? store.photoPath(chat) : "")
         qr.show()
     }
-    Component.onDestruction: if (qr) qr.destroy()
+    Component.onDestruction: {
+        if (qr) qr.destroy()
+        if (boostSheet) boostSheet.destroy()
+    }
+    Component {
+        id: boostMaker
+        BoostSheet {
+            z: 100
+            store: page.store
+            safeBottom: safe.bottom
+            onSaid: (text) => page.overlay.say(text)
+            onBoosted: page.loadBoostStatus()
+        }
+    }
     Component {
         id: qrMaker
         QrSheet {
@@ -540,6 +636,8 @@ SubPage {
     }
     // the shell's back: the viewer closes first
     function dismiss() {
+        if (boostSheet && boostSheet.dismiss())
+            return true
         if (qr && qr.open) {
             qr.hide()
             return true
@@ -640,13 +738,19 @@ SubPage {
                         easing.bezierCurve: [0.0744, 0.0298, 0.1307, 0.7931, 0.3680, 0.9301, 0.4409, 0.9722, 0.4273, 0.9999, 1.0, 1.0] } }
                     spacing: 8
                     Rectangle {
-                        width: parent.width; height: choiceCol.height
+                        width: parent.width; height: Math.min(choiceCol.implicitHeight, Math.round(page.height * 0.65))
                         radius: 14
                         color: Theme.menu
                         clip: true
+                        Flickable {
+                            anchors.fill: parent
+                            contentWidth: width
+                            contentHeight: choiceCol.implicitHeight
+                            interactive: contentHeight > height
+                            boundsBehavior: Flickable.StopAtBounds
                         Column {
                             id: choiceCol
-                            width: parent.width
+                            width: cards.width
                             Text {
                                 visible: sheet.title !== ""
                                 x: 16; width: parent.width - 32
@@ -685,6 +789,7 @@ SubPage {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                     Rectangle {
@@ -964,15 +1069,22 @@ SubPage {
                 onDoubleClicked: (m) => tap(m)      // (quick taps: Qt makes the second a double one, not a click)
             }
         }
+        Icon {
+            visible: page.isSecret
+            x: name.x - 22; anchors.verticalCenter: name.verticalCenter
+            width: 18; height: 18
+            name: "lock"
+            color: name.color
+        }
         Text {
             id: name
-            readonly property real free: head.width - 40
+            readonly property real free: head.width - (page.isSecret ? 64 : 40)
             width: Math.min(implicitWidth, free)
-            x: page.lerp((head.width - width) / 2, 16, page.ex)
+            x: page.lerp((head.width - width) / 2 + (page.isSecret ? 11 : 0), page.isSecret ? 38 : 16, page.ex)
             y: page.lerp(112, head.bigH - 141 - head.top0, page.ex)
             elide: Text.ElideRight
             text: (page.changed, store.title(page.chat))       // (renamed in place: the same chat object)
-            color: page.mix(Theme.text, Qt.rgba(1, 1, 1, 1), page.ex)
+            color: page.mix(page.isSecret ? page.secretGreen : Theme.text, Qt.rgba(1, 1, 1, 1), page.ex)
             font.family: Theme.font; font.pixelSize: 23; font.weight: Font.DemiBold
         }
         Text {
@@ -984,7 +1096,7 @@ SubPage {
             // (a group's full info counts its members better than the group itself)
             text: (store.acting, page.saved) ? "" : page.full && page.full.member_count && !store.activity(page.chat)
                   ? Tr.n(page.chat.type.is_channel ? "%1 obunachi" : "%1 a'zo", page.full.member_count, store.count(page.full.member_count))
-                  : (store.seen, store.status(page.chat, page.now))
+                  : store.secretSeen >= 0 ? (store.seen, store.status(page.chat, page.now)) : ""
             readonly property bool online: text === Tr.t("onlayn")
             color: page.mix(online ? Theme.accent : Theme.grey, Qt.rgba(1, 1, 1, page.ex > 0 && !online ? 0.75 : 1), page.ex)
             font.family: Theme.font; font.pixelSize: 15
@@ -1201,6 +1313,44 @@ SubPage {
                     onClicked: page.showQr(fact.modelData.qr)
                 }
             }
+        }
+    }
+
+    // ---- secret chat controls: encryption key, self-destruct timer, delete secret chat ----
+    SettingsGroup {
+        visible: page.isSecret
+        SettingsRow {
+            icon: "lock"; tint: "#34c759"
+            text: Tr.t("Shifrlash kaliti")
+            value: page.secretChat && page.secretChat.key_hash ? store.secretKeyEmojis(page.secretChat.key_hash).join("") : ""
+            onClicked: page.openSecretKey()
+        }
+        SettingsRow {
+            visible: page.secretState !== "closed"
+            icon: "timer"; tint: "#ff9500"
+            text: Tr.t("Avto-o'chirish taymeri")
+            value: page.autoDelete ? store.lasting(page.autoDelete) : Tr.t("O'chiq")
+            onClicked: page.autoDeleteMenu()
+        }
+        SettingsRow {
+            text: Tr.t("Maxfiy chatni o'chirish")
+            danger: true; chevron: false; last: true
+            onClicked: page.askDeleteSecret()
+        }
+    }
+
+    // ---- channel boosts (1.0): level, progress, boost_url copy, boostChat with confirmation ----
+    SettingsGroup {
+        visible: page.isChannel
+        SettingsRow {
+            icon: "sparkle"; tint: "#af52de"
+            last: true
+            text: Tr.t("Boostlar")
+            value: page.boostStatus
+                ? Tr.f("%1-daraja", page.boostStatus.level || 0)
+                  + (page.boostStatus.boost_count > 0 ? " · " + page.boostStatus.boost_count : "")
+                : ""
+            onClicked: page.showBoost()
         }
     }
 

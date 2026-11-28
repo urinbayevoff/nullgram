@@ -66,8 +66,7 @@ Page {
     }
 
     function userPhotoNow(u) {
-        const f = u && u.profile_photo && u.profile_photo.small
-        return f && f.local && f.local.is_downloading_completed ? f.local.path : ""
+        return store.userPhotoNow(u)
     }
 
     function rebuildChips() {
@@ -81,6 +80,7 @@ Page {
                 photo: userPhotoNow(u), letters: store.letters(full),
                 tint: store.tints[Math.abs(uid) % store.tints.length]
             })
+            store.askUserPhoto(u, chips, "userId")
         }
     }
 
@@ -96,6 +96,7 @@ Page {
                 photo: userPhotoNow(u), letters: store.letters(full),
                 tint: store.tints[Math.abs(u.id) % store.tints.length]
             })
+            store.askUserPhoto(u, contactRows, "userId")
         }
     }
 

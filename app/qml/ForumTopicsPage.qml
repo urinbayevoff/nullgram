@@ -124,6 +124,9 @@ Page {
         const name = info.name || (isGen ? Tr.t("Umumiy") : "")
         const icon = info.icon || {}
         const colorInt = icon.color || 0
+        const iconEmojiId = icon.custom_emoji_id && String(icon.custom_emoji_id) !== "0" ? String(icon.custom_emoji_id) : ""
+        if (iconEmojiId)
+            store.requestCustomEmoji(iconEmojiId)
         const m = t.last_message || null
         const draftText = t.draft_message && t.draft_message.content && t.draft_message.content.text
                           ? t.draft_message.content.text.text : ""
@@ -152,6 +155,7 @@ Page {
             letter: topicLetter(name, isGen),
             colorHex: store.forumColorHex(colorInt, tid),
             colorInt: colorInt,
+            iconEmojiId: iconEmojiId,
             isGeneral: isGen,
             isClosed: !!info.is_closed,
             isPinned: !!t.is_pinned,
@@ -226,12 +230,16 @@ Page {
         const info = t && t.info ? t.info : {}
         searchField.focus = false
         osk.hide()
+        const icon = info.icon || {}
+        const iconEmojiId = icon.custom_emoji_id && String(icon.custom_emoji_id) !== "0" ? String(icon.custom_emoji_id) : ""
         openTimer.pending = {
             chatId: page.chatId,
             forumTopic: tid,
             forumGeneral: !!info.is_general,
             forumTitle: info.name || (info.is_general ? Tr.t("Umumiy") : ""),
-            forumClosed: !!info.is_closed
+            forumClosed: !!info.is_closed,
+            forumIconEmojiId: iconEmojiId,
+            forumIconColor: store.forumColorHex(icon.color || 0, tid)
         }
         openTimer.restart()
     }
@@ -414,6 +422,7 @@ Page {
             required property string name
             required property string letter
             required property string colorHex
+            required property string iconEmojiId
             required property bool isGeneral
             required property bool isClosed
             required property bool isPinned
@@ -430,8 +439,9 @@ Page {
             width: list.width; height: 74
             color: hit.pressed ? Theme.highlight : Theme.bg
 
-            // Topic icon: # for General, colored circle + first letter otherwise
+            // Topic icon: custom emoji if set, otherwise # for General or colored circle + first letter
             Rectangle {
+                visible: row.iconEmojiId === ""
                 x: 12; y: 13
                 width: 48; height: 48; radius: 24
                 color: row.isGeneral ? (Theme.dark ? "#2c2c2e" : "#e5e5ea") : row.colorHex
@@ -440,6 +450,18 @@ Page {
                     text: row.letter
                     color: row.isGeneral ? Theme.grey : "white"
                     font.family: Theme.font; font.pixelSize: 20; font.weight: Font.Bold
+                }
+            }
+            Loader {
+                x: 16; y: 17
+                width: 40; height: 40
+                active: row.iconEmojiId !== ""
+                sourceComponent: CustomEmoji {
+                    store: page.store
+                    emojiId: row.iconEmojiId
+                    size: 40
+                    running: page.visible && (!page.nav || page.nav.topPage === page) && !list.moving
+                    tintColor: row.colorHex
                 }
             }
 

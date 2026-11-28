@@ -98,7 +98,7 @@ SubPage {
                 y: 14
                 spacing: 28
                 Repeater {
-                    model: [{ tabs: true, t: "Yorliqlar" }, { tabs: false, t: "Ro'yxat" }]
+                    model: [{ tabs: true, t: Tr.t("Yorliqlar") }, { tabs: false, t: Tr.t("Ro'yxat") }]
                     Column {
                         id: look
                         required property var modelData
@@ -149,7 +149,7 @@ SubPage {
                             Text {
                                 id: pick
                                 anchors.centerIn: parent
-                                text: Tr.t(look.modelData.t)
+                                text: look.modelData.t
                                 color: look.chosen ? "white" : Theme.text
                                 font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold
                             }

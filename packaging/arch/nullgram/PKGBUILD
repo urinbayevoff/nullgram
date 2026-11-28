@@ -4,7 +4,7 @@
 # its user for one (Settings › Ma'lumotlar va xotira › API kaliti). Apple emoji are not in it (Apple's): the user
 # downloads them at their own wish in the app (Ko'rinish › Emoji; emoji_get.py, also usable by hand).
 pkgname=nullgram
-pkgver=0.9.7
+pkgver=0.9.9
 pkgrel=1
 pkgdesc="Telegram client for ztOS phones (unofficial), Qt Quick + TDLib"
 arch=('any')
@@ -18,11 +18,11 @@ package() {
 	local d="$pkgdir/usr/share/nullgram"
 	install -d "$d"
 	cp -r "$_src/app/qml" "$d/"
-	install -m644 "$_src/app/nullgram.py" "$_src/app/nullgram_app.py" "$_src/app/emoji_get.py" "$d/"
+	install -m644 "$_src/app/nullgram.py" "$_src/app/nullgram_app.py" "$_src/app/emoji_get.py" "$_src/app/media_edit.py" "$d/"
 	find "$d" -name __pycache__ -prune -exec rm -rf {} +
 	# the app's compiled copy, read at each start (/usr/share is not the user's: Python could not write it there
 	# and would compile the 2000 lines anew every time, ~200 ms)
-	python -m compileall -q -d /usr/share/nullgram "$d/nullgram_app.py" "$d/emoji_get.py"
+	python -m compileall -q -d /usr/share/nullgram "$d/nullgram_app.py" "$d/emoji_get.py" "$d/media_edit.py"
 	rm -rf "$d/qml/emoji" "$d/emoji"
 	install -Dm755 "$_src/packaging/nullgram" "$pkgdir/usr/bin/nullgram"
 	install -Dm644 "$_src/packaging/nullgram.desktop" "$pkgdir/usr/share/applications/nullgram.desktop"

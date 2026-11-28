@@ -1,7 +1,7 @@
-// Statistics (Telegram-iOS's ChannelStatsController, the short way): OVERVIEW tiles (a channel: subscribers, notifications
-// on, views and shares per post, reactions per post; a group: members, messages, viewers, senders) with the change
-// against the period before; the subscribers' (members') curve; a channel's recent posts with views and shares.
-// getChatStatistics; a graph that comes as statisticalGraphAsync is left out (asking for it: not yet).
+// Statistics (Telegram-iOS's ChannelStatsController): OVERVIEW tiles (channel or supergroup)
+// with growth against the prior period; all inline and async (statisticalGraphAsync via
+// getStatisticalGraph) statistical graphs rendered via StatsChart (QtQuick.Shapes, viewport-lazy);
+// and a channel's recent posts with views, shares and reactions.
 import QtQuick
 
 SubPage {
@@ -12,20 +12,27 @@ SubPage {
     property string error: ""
     property var posts: ({})            // message id -> message
     title: Tr.t("Statistika")
-    Component.onCompleted: store.send({ "@type": "getChatStatistics", chat_id: chatId, is_dark: Theme.dark }, (r) => {
-        if (r["@type"] === "error")
-            return page.error = r.message
-        page.stats = r
-        for (const i of (r.recent_interactions || []))
-            if (i.object_type["@type"] === "chatStatisticsObjectTypeMessage")
-                store.send({ "@type": "getMessage", chat_id: page.chatId, message_id: i.object_type.message_id }, (m) => {
-                    if (m["@type"] === "message") {
-                        const o = Object.assign({}, page.posts)
-                        o[m.id] = m
-                        page.posts = o
-                    }
-                })
-    })
+    Component.onCompleted: loadStats()
+    function loadStats() {
+        page.error = ""
+        page.stats = null
+        store.send({ "@type": "getChatStatistics", chat_id: chatId, is_dark: Theme.dark }, (r) => {
+            if (!page)
+                return
+            if (r["@type"] === "error")
+                return page.error = r.message
+            page.stats = r
+            for (const i of (r.recent_interactions || []))
+                if (i.object_type && i.object_type["@type"] === "chatStatisticsObjectTypeMessage")
+                    store.send({ "@type": "getMessage", chat_id: page.chatId, message_id: i.object_type.message_id }, (m) => {
+                        if (page && m["@type"] === "message") {
+                            const o = Object.assign({}, page.posts)
+                            o[m.id] = m
+                            page.posts = o
+                        }
+                    })
+        })
+    }
     readonly property bool channel: !!stats && stats["@type"] === "chatStatisticsChannel"
     readonly property var tiles: {
         const s = stats
@@ -44,15 +51,39 @@ SubPage {
         n = Math.round(n)
         return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "K" : String(n)
     }
-    readonly property var curve: {          // [[x...], [y...]] of the members' graph, if it came whole
-        const g = stats ? stats.member_count_graph : null
-        if (!g || g["@type"] !== "statisticalGraphData")
-            return null
-        try {
-            const d = JSON.parse(g.json_data)
-            const x = d.columns.find((c) => c[0] === "x"), y = d.columns.find((c) => c[0] !== "x")
-            return x && y ? [x.slice(1), y.slice(1)] : null
-        } catch (e) { return null }
+    readonly property var graphDefs: {
+        const s = stats
+        if (!s)
+            return []
+        const defs = channel ? [
+            { key: "member_count_graph", title: Tr.t("Obunachilar o'sishi") },
+            { key: "join_graph", title: Tr.t("Obunachilar") },
+            { key: "mute_graph", title: Tr.t("Bildirishnomalar") },
+            { key: "view_count_by_hour_graph", title: Tr.t("Soatlar bo'yicha ko'rishlar") },
+            { key: "view_count_by_source_graph", title: Tr.t("Ko'rish manbalari") },
+            { key: "join_by_source_graph", title: Tr.t("Obunachilar manbalari") },
+            { key: "language_graph", title: Tr.t("Tillar") },
+            { key: "message_interaction_graph", title: Tr.t("Postlar bilan muloqot") },
+            { key: "message_reaction_graph", title: Tr.t("Post reaksiyalari") },
+            { key: "story_interaction_graph", title: Tr.t("Hikoyalar bilan muloqot") },
+            { key: "story_reaction_graph", title: Tr.t("Hikoya reaksiyalari") },
+            { key: "instant_view_interaction_graph", title: Tr.t("Tezkor ko'rish muloqoti") }
+        ] : [
+            { key: "member_count_graph", title: Tr.t("A'zolar o'sishi") },
+            { key: "join_graph", title: Tr.t("A'zolar") },
+            { key: "join_by_source_graph", title: Tr.t("A'zolar manbalari") },
+            { key: "language_graph", title: Tr.t("Tillar") },
+            { key: "message_content_graph", title: Tr.t("Xabar turlari") },
+            { key: "action_graph", title: Tr.t("Amallar") },
+            { key: "day_graph", title: Tr.t("Kunlar bo'yicha faollik") },
+            { key: "week_graph", title: Tr.t("Soatlar bo'yicha faollik") }
+        ]
+        const out = []
+        for (const d of defs) {
+            if (s[d.key])
+                out.push({ key: d.key, title: d.title, graph: s[d.key] })
+        }
+        return out
     }
 
     Text {
@@ -109,35 +140,21 @@ SubPage {
             }
         }
     }
-    SettingsGroup {
-        visible: !!page.curve
-        title: Tr.t(page.channel ? "Obunachilar o'sishi" : "A'zolar o'sishi")
-        Canvas {
-            id: plot
-            width: parent.width; height: 180
-            onPaint: {
-                const c = getContext("2d"), cv = page.curve
-                c.reset()
-                if (!cv || cv[1].length < 2)
-                    return
-                const ys = cv[1], lo = Math.min(...ys), hi = Math.max(...ys), pad = 16
-                const X = (i) => pad + (width - 2 * pad) * i / (ys.length - 1)
-                const Y = (v) => height - pad - (height - 2 * pad) * (hi === lo ? 0.5 : (v - lo) / (hi - lo))
-                c.strokeStyle = Theme.separator; c.lineWidth = 0.5
-                for (let k = 0; k < 4; k++) {
-                    const y = pad + (height - 2 * pad) * k / 3
-                    c.beginPath(); c.moveTo(pad, y); c.lineTo(width - pad, y); c.stroke()
-                }
-                c.strokeStyle = Theme.accent; c.lineWidth = 2; c.lineJoin = "round"
-                c.beginPath()
-                ys.forEach((v, i) => i ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)))
-                c.stroke()
-                c.fillStyle = Theme.grey; c.font = "11px sans-serif"
-                c.fillText(page.big(hi), pad, pad - 4)
-                c.fillText(page.big(lo), pad, height - 3)
+    Repeater {
+        id: graphsRep
+        model: page.graphDefs
+        SettingsGroup {
+            id: grp
+            required property var modelData
+            title: grp.modelData.title
+            StatsChart {
+                width: parent.width
+                store: page.store
+                chatId: page.chatId
+                graph: grp.modelData.graph
+                flick: page.flick
+                chartTitle: grp.modelData.title
             }
-            Connections { target: page; function onCurveChanged() { plot.requestPaint() } }
-            Connections { target: Theme; function onDarkChanged() { plot.requestPaint() } }
         }
     }
     SettingsGroup {

@@ -19,6 +19,8 @@ Item {
     property bool shown: false      // the spoilers tapped: their dust blows off, then link("spoiler")
     onPartsChanged: shown = false
     property bool live: true        // on the screen (a spoiler's dust moves only then)
+    property bool moving: false     // list is scrolling (pauses animated custom emojis)
+    readonly property bool hasCe: parts.indexOf("ce://") >= 0
     property Component richComponent: null
     property var richCol: null
     signal link(string url)
@@ -35,10 +37,23 @@ Item {
         if (!parts)
             return []
         const l = JSON.parse(parts)
+        const px = size !== 16 ? Math.round(size * (size > 30 ? 1 : 1.25)) : 20
         if (size !== 16) {
-            const px = Math.round(size * (size > 30 ? 1 : 1.25))
             for (const p of l)
                 p.h = p.h.replace(/ width="20" height="20"/g, " width=\"" + px + "\" height=\"" + px + "\"")
+        }
+        if (hasCe) {
+            const re = /<img src="ce:\/\/(\d+)" alt="([^"]*)" width="(\d+)" height="(\d+)">/g
+            for (const p of l) {
+                if (p.h.indexOf("ce://") >= 0) {
+                    const ce = []
+                    let m
+                    re.lastIndex = 0
+                    while ((m = re.exec(p.h)) !== null)
+                        ce.push({ id: m[1], alt: m[2].replace(/&quot;/g, "\""), px: Number(m[3]) || px })
+                    p.ce = ce
+                }
+            }
         }
         return l
     }

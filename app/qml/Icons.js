@@ -102,7 +102,9 @@ var lines = {
     sort: "M4 7h16 M7 12h10 M10 17h4",
     drag: "M5 8h14 M5 12h14 M5 16h14",
     // the chat list's compose (iOS square.and.pencil, drawn by hand): a box open at its corner, a pencil over it
-    compose: "M11.2 4.6H6.6A2.1 2.1 0 0 0 4.5 6.7v10.7A2.1 2.1 0 0 0 6.6 19.5h10.7a2.1 2.1 0 0 0 2.1-2.1v-4.6 M17.5 3.9a1.65 1.65 0 0 1 2.35 2.35l-7.3 7.3l-3.15 0.8l0.8-3.15Z"
+    compose: "M11.2 4.6H6.6A2.1 2.1 0 0 0 4.5 6.7v10.7A2.1 2.1 0 0 0 6.6 19.5h10.7a2.1 2.1 0 0 0 2.1-2.1v-4.6 M17.5 3.9a1.65 1.65 0 0 1 2.35 2.35l-7.3 7.3l-3.15 0.8l0.8-3.15Z",
+    rotate: "M18.5 12a6.5 6.5 0 1 1-2.1-4.8 M16.8 4.2v3.3h-3.3",
+    crop: "M7 3.5v13.5h13.5 M3.5 7h13.5v13.5"
 }
 
 // an icon as an SVG picture, `colour` (a QML color) filled and stroked as Icon.qml drew it with

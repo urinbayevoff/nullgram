@@ -23,7 +23,7 @@ Item {
         const f = chat && chat.photo ? chat.photo.small : user && user.profile_photo ? user.profile_photo.small : null
         path = ""
         if (f)
-            store.fetch(f, 1, (p) => sa.path = p)
+            store.fetch(f, 1, (p) => { if (sa) sa.path = p })     // (it may be gone by the time it comes)
     }
     onChatChanged: look()
     Component.onCompleted: look()

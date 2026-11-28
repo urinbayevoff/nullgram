@@ -18,7 +18,9 @@ Item {
     property var rights: null           // ChatPage's (null: anything may be sent)
     property bool allowPoll: true       // groups, channels, saved messages, bots
     property var veiled: ({})           // path -> true: to go as a spoiler
+    property bool replaceMode: false    // single-pick mode for editMessageMedia
     signal send(var picked, bool asFiles, bool apart)   // asFiles: from Fayllar -- as they are, not compressed; apart: not as an album
+    signal replacePicked(var file, bool asFiles)
     signal refused(string text)         // a kind the group bars, tapped
     signal pickLocation()
     signal pickPoll()
@@ -44,11 +46,33 @@ Item {
     function show() {
         if (open)
             return
+        replaceMode = false
         files = td.recent()
         chosen = []
         veiled = {}
         menu.visible = false
         tab = !mayPhotos && !mayVideos ? "files" : media.length || !others.length ? "media" : "files"
+        fall.stop()
+        rise.stop()
+        open = true
+        visible = true
+        panel.y = height
+        rise.to = height - panel.height
+        rise.restart()
+        shade.restart()
+    }
+
+    function showReplace() {
+        if (open)
+            return
+        replaceMode = true
+        files = td.recent()
+        chosen = []
+        veiled = {}
+        menu.visible = false
+        tab = media.length ? "media" : "files"
+        fall.stop()
+        rise.stop()
         open = true
         visible = true
         panel.y = height
@@ -78,14 +102,24 @@ Item {
 
     function toggle(path) {
         const k = chosen.indexOf(path)
-        chosen = k >= 0 ? chosen.filter((p) => p !== path) : chosen.concat([path])
+        if (replaceMode)
+            chosen = k >= 0 ? [] : [path]
+        else
+            chosen = k >= 0 ? chosen.filter((p) => p !== path) : chosen.concat([path])
     }
 
     // the picked, as they go (each with its spoiler)
     function go(asFiles, apart) {
         const picked = chosen.map((p) => files.find((f) => f.path === p)).filter((f) => f)
                              .map((f) => Object.assign({ spoiler: !asFiles && !!veiled[f.path] }, f))
-        close()
+        const isRep = replaceMode
+        if (isRep) {
+            close()
+            if (picked.length)
+                replacePicked(picked[0], asFiles)
+            return
+        }
+        closeNow()
         send(picked, asFiles, apart)
     }
 
@@ -157,7 +191,7 @@ Item {
             anchors.right: parent.right; anchors.rightMargin: 16
             y: 22
             width: 22; height: 22
-            visible: sheet.tab === "media" && sheet.chosen.length > 0
+            visible: sheet.tab === "media" && sheet.chosen.length > 0 && !sheet.replaceMode
             opacity: dots.pressed ? 0.5 : 1
             Row {
                 anchors.centerIn: parent
@@ -294,7 +328,7 @@ Item {
             color: Theme.accent
             Text {
                 anchors.centerIn: parent
-                text: Tr.f("Yuborish (%1)", sheet.chosen.length)
+                text: sheet.replaceMode ? Tr.t("Almashtirish") : Tr.f("Yuborish (%1)", sheet.chosen.length)
                 color: "white"
                 font.family: Theme.font; font.pixelSize: 17; font.weight: Font.DemiBold
             }
@@ -306,7 +340,7 @@ Item {
 
         Rectangle {          // Telegram-iOS attachment dock: Location, Poll, Contact (shown when nothing is picked)
             id: kindDock
-            visible: sheet.chosen.length === 0
+            visible: sheet.chosen.length === 0 && !sheet.replaceMode
             anchors.left: parent.left; anchors.right: parent.right
             anchors.bottom: parent.bottom
             height: 78 + safe.bottom

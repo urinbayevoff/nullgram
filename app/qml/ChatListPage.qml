@@ -305,6 +305,18 @@ Page {
             return
         const name = store.title(c)
         const ty = c.type["@type"]
+        if (ty === "chatTypeSecret") {
+            alert.show(Tr.t("Maxfiy chatni o'chirish"),
+                       Tr.f("«%1» bilan maxfiy chatni o'chirmoqchimisiz? Bu qurilmadagi barcha xabarlar o'chib ketadi.", name), [
+                { t: Tr.t("Bekor qilish") },
+                { t: Tr.t("O'chirish"), red: true, run: () => store.deleteSecretChat(chatId, (r) => {
+                    if (r && r["@type"] === "error")
+                        return page.nav.say(Tr.f("Bo'lmadi: %1", r.message))
+                    page.nav.say(Tr.t("Maxfiy chat o'chirildi"))
+                }) }
+            ], false)
+            return
+        }
         if (ty === "chatTypePrivate") {
             const delBoth = () => store.deleteChat(chatId, (r) => {
                 if (r["@type"] === "error")
@@ -386,11 +398,11 @@ Page {
             acts.push({ text: Tr.t("Papkaga qo'shish"), icon: "folder", run: () => page.openFolderPicker(chatId) })
         acts.push({ text: Tr.t("Tanlash"), icon: "select", run: () => page.enterEdit(chatId) })
         let needGap = true
-        if (ty === "chatTypePrivate" || ty === "chatTypeBasicGroup") {
+        if (ty === "chatTypePrivate" || ty === "chatTypeSecret" || ty === "chatTypeBasicGroup") {
             acts.push({ text: Tr.t("Tarixni tozalash"), icon: "trash", danger: true, gap: needGap, run: () => page.askClearHistory(chatId) })
             needGap = false
         }
-        acts.push({ text: Tr.t(isChan ? "Kanaldan chiqish" : isGroup ? "Guruhdan chiqish" : "Chatni o'chirish"),
+        acts.push({ text: Tr.t(ty === "chatTypeSecret" ? "Maxfiy chatni o'chirish" : isChan ? "Kanaldan chiqish" : isGroup ? "Guruhdan chiqish" : "Chatni o'chirish"),
                     icon: "trash", danger: true, gap: needGap, run: () => page.askDeleteChat(chatId) })
         chatMenu.show(chatId, acts)
     }
@@ -444,7 +456,9 @@ Page {
                     const c = store.chats[id]
                     if (!c)
                         continue
-                    if (c.type["@type"] === "chatTypePrivate")
+                    if (c.type["@type"] === "chatTypeSecret")
+                        store.deleteSecretChat(id)
+                    else if (c.type["@type"] === "chatTypePrivate")
                         store.clearChatHistory(id, false, true)
                     else
                         store.leaveChat(id)
@@ -1542,7 +1556,7 @@ Page {
             readonly property var r: parent ? parent.r : null
             readonly property var t: parent ? parent.t : null
             readonly property real directW: width
-            x: t ? 80 + (r ? r.editOff : 0) + t.width + 6 : 80
+            x: t ? 80 + (r ? r.editOff : 0) + t.width + (r && r.hasStatusEmoji ? 25 : 6) : 80
             y: t ? 9 + Math.floor((t.height - height) / 2) : 9
             width: directLbl.implicitWidth + 10; height: 17; radius: 5
             color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
@@ -1553,6 +1567,20 @@ Page {
                 color: Theme.accent
                 font.family: Theme.font; font.pixelSize: 10; font.weight: Font.Bold
             }
+        }
+    }
+    Component {
+        id: statusEmojiComp
+        CustomEmoji {
+            readonly property var r: parent ? parent.r : null
+            readonly property var t: parent ? parent.t : null
+            store: page.store
+            emojiId: r ? r.statusEmoji : ""
+            size: 17
+            x: t ? 80 + (r ? r.editOff : 0) + t.width + 4 : 80
+            y: t ? 9 + Math.floor((t.height - 17) / 2) : 9
+            running: page.visible && (!page.nav || (page.archiveMode ? page.nav.topPage === page.parent : page.nav.pages.length <= 1)) && !(page.list && page.list.moving)
+            tintColor: Theme.accent
         }
     }
     Component {
@@ -1652,6 +1680,16 @@ Page {
         }
     }
     Component {
+        id: secretLockComp
+        Icon {
+            readonly property var r: parent ? parent.r : null
+            x: 80 + (r ? r.editOff : 0); y: 12
+            width: 14; height: 14
+            name: "lock"
+            color: Theme.dark ? "#34c759" : "#00a650"
+        }
+    }
+    Component {
         id: multiExtrasComp
         Item {
             id: multi
@@ -1659,6 +1697,23 @@ Page {
             readonly property var t: parent ? parent.t : null
             readonly property real pillW: mPill.item ? mPill.item.width : 22
             readonly property real directW: mDirect.item ? mDirect.item.width : 0
+            property Item stEmoji: null
+            readonly property bool needSt: !!r && r.hasStatusEmoji
+            function syncSt() {
+                if (needSt) {
+                    if (!stEmoji)
+                        stEmoji = statusEmojiComp.createObject(multi)
+                } else if (stEmoji) {
+                    stEmoji.destroy()
+                    stEmoji = null
+                }
+            }
+            onNeedStChanged: syncSt()
+            Loader {
+                readonly property var r: multi.r
+                active: !!multi.r && multi.r.secret
+                sourceComponent: active ? secretLockComp : null
+            }
             Loader {
                 readonly property var r: multi.r
                 active: !!multi.r && multi.r.storied
@@ -1697,10 +1752,27 @@ Page {
             readonly property var t: parent ? parent.t : null
             readonly property real pillW: mePill.item ? mePill.item.width : 22
             readonly property real directW: meDirect.item ? meDirect.item.width : 0
+            property Item stEmoji: null
+            readonly property bool needSt: !!r && r.hasStatusEmoji
+            function syncSt() {
+                if (needSt) {
+                    if (!stEmoji)
+                        stEmoji = statusEmojiComp.createObject(multiE)
+                } else if (stEmoji) {
+                    stEmoji.destroy()
+                    stEmoji = null
+                }
+            }
+            onNeedStChanged: syncSt()
             Loader {
                 readonly property var r: multiE.r
                 active: page.editing
                 sourceComponent: active ? editCheckComp : null
+            }
+            Loader {
+                readonly property var r: multiE.r
+                active: !!multiE.r && multiE.r.secret
+                sourceComponent: active ? secretLockComp : null
             }
             Loader {
                 readonly property var r: multiE.r
@@ -1742,10 +1814,13 @@ Page {
             required property string title
             required property bool saved
             required property bool direct
+            required property bool secret
             required property string who
             required property bool draft
             required property string glyph
             required property string preview
+            required property string previewRich
+            required property string statusEmoji
             required property string time
             required property int unread
             required property bool markedUnread
@@ -1778,11 +1853,11 @@ Page {
             }
             Text {
                 id: titleText
-                x: 80 + row.editOff; y: 9
-                width: Math.min(implicitWidth, row.width - 100 - row.editOff - stamp.width - (row.direct ? row.directW + 6 : 0))
+                x: 80 + row.editOff + (row.secret ? 18 : 0); y: 9
+                width: Math.min(implicitWidth, row.width - 100 - row.editOff - (row.secret ? 18 : 0) - stamp.width - (row.direct ? row.directW + 6 : 0) - (row.hasStatusEmoji ? 21 : 0))
                 text: row.title
                 elide: Text.ElideRight
-                color: Theme.text
+                color: row.secret ? (Theme.dark ? "#34c759" : "#00a650") : Theme.text
                 font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold
             }
             Text {
@@ -1802,21 +1877,25 @@ Page {
             // hidden under a chat, and every row of every folder was laid out again as it hid and showed)
             readonly property bool hasPill: row.unread > 0 || row.markedUnread || row.pinned
             readonly property bool hasGlyph: row.glyph !== "" && row.busy === ""
+            readonly property bool hasStatusEmoji: row.statusEmoji !== ""
             readonly property int extraMask: (row.author ? 1 : 0) | (row.hasPill ? 2 : 0) | (row.hasGlyph ? 4 : 0)
                                            | (row.direct ? 8 : 0) | (row.storied ? (row.fresh ? 32 : 16) : 0)
-                                           | (page.editing ? 64 : 0)
+                                           | (page.editing ? 64 : 0) | (row.hasStatusEmoji ? 128 : 0) | (row.secret ? 256 : 0)
             readonly property real pillW: row.hasPill && extras.item && extras.item.pillW ? extras.item.pillW : 22
             readonly property real directW: row.direct && extras.item && extras.item.directW ? extras.item.directW : 0
             readonly property real textWidth: width - 80 - row.editOff - (hasPill ? pillW + 22 : 14)
             Text {
+                readonly property bool hasRichPreview: row.busy === "" && row.previewRich !== ""
                 x: (row.hasGlyph ? 100 : 80) + row.editOff; y: row.author ? 50 : 31
                 width: row.textWidth - (x - 80 - row.editOff)
                 height: row.author || row.hasGlyph ? 20 : 40
                 maximumLineCount: row.author || row.hasGlyph ? 1 : 2
                 wrapMode: Text.Wrap
                 elide: Text.ElideRight
-                textFormat: Text.PlainText
-                text: row.busy || row.preview
+                textFormat: hasRichPreview ? Text.StyledText : Text.PlainText
+                text: row.busy ? row.busy
+                    : hasRichPreview ? store.resolveCustomEmojiHtml(row.previewRich, 16, store.customEmojiRev, null)
+                    : row.preview
                 color: row.busy ? Theme.accent : Theme.grey
                 font.family: Theme.font; font.pixelSize: 15
                 lineHeight: 0.95
@@ -1835,6 +1914,8 @@ Page {
                                : row.extraMask === 16 ? storySeenComp
                                : row.extraMask === 32 ? storyFreshComp
                                : row.extraMask === 64 ? editCheckComp
+                               : row.extraMask === 128 ? statusEmojiComp
+                               : row.extraMask === 256 ? secretLockComp
                                : (row.extraMask & 64) ? multiEditExtrasComp
                                : multiExtrasComp
             }

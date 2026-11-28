@@ -62,7 +62,7 @@ EMOJI_DIRS = [os.path.join(HERE, "emoji"), os.path.expanduser("~/.cache/nullgram
 EMOJI_DEST = os.path.expanduser("~/.cache/nullgram-emoji")
 EMOJI_GET = os.path.join(HERE, "emoji_get.py")
 EMOJI_STATUS = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "nullgram-emoji.json")
-VERSION = "0.9.7"
+VERSION = "0.9.9"
 CLIENT_ID = re.compile(r'"@client_id":(\d+)')
 VENDOR = os.path.join(HERE, "vendor")	# qrcode (install.sh)
 if os.path.isdir(VENDOR):
@@ -1120,7 +1120,7 @@ class AccountList(QObject):
 		d = Accounts.dir(n)
 		return {"@type": "setTdlibParameters", "use_test_dc": TEST, "database_directory": d + "/db",
 		        "files_directory": d + "/files", "use_file_database": True, "use_chat_info_database": True,
-		        "use_message_database": True, "api_id": td._id, "api_hash": td._hash,
+		        "use_message_database": True, "use_secret_chats": True, "api_id": td._id, "api_hash": td._hash,
 		        "system_language_code": self._lang, "device_model": td._device, "system_version": td._system,
 		        "application_version": VERSION}
 
@@ -1555,6 +1555,10 @@ class Ink(QObject):
 			mark("inkms", round((time.perf_counter() - t) * 1000))
 		else:
 			p.rehighlight()
+
+	@Slot(str, int, float, float, float, float, result="QVariantMap")
+	def editPhoto(self, path, rot, cx, cy, cw, ch):
+		import media_edit; return media_edit.edit_photo(path, rot, cx, cy, cw, ch)
 
 
 class Imager:

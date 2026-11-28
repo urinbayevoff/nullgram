@@ -24,7 +24,7 @@ QtObject {
             return              // (not read yet: the first load() will)
         map = null
         ready = false
-        cache = ({}); cacheN = 0
+        cache = ({}); memo.n = 0
         load()
     }
     // a cheap pre-test: does the text hold a char that could begin an emoji (so plain text skips the walk)
@@ -82,13 +82,13 @@ QtObject {
         if (hit !== undefined)
             return hit
         const res = walk(s, size)
-        if (cacheN >= 3000) { cache = ({}); cacheN = 0 }     // a crude cap: start over rather than grow for ever
+        if (memo.n >= 3000) { cache = ({}); memo.n = 0 }     // a crude cap: start over rather than grow for ever
         cache[ck] = res
-        cacheN++
+        memo.n++
         return res
     }
     property var cache: ({})
-    property int cacheN: 0
+    readonly property var memo: ({ n: 0 })   // the cache's size: a plain field, so emojify() in a binding neither depends on it nor loops
     function walk(s, size) {
         const cp = [], src = []
         for (let k = 0; k < s.length;) {
@@ -128,6 +128,45 @@ QtObject {
             }
         }
         return out
+    }
+
+    // ---- Custom emoji global animation budget (<= 12 simultaneous animations, battery-friendly) ----
+    readonly property int maxCustomAnim: 12
+    property int customAnimCount: 0
+    property int customAnimRev: 0
+    property var _ceSlots: ({})
+    property int _ceNextToken: 1
+    property bool _ceRevQueued: false
+    readonly property string blankPixel: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+
+    function nextCeToken() {
+        const t = _ceNextToken
+        _ceNextToken = t + 1
+        return t
+    }
+    function acquireCeSlot(token) {
+        if (!token)
+            return false
+        if (_ceSlots[token])
+            return true
+        if (customAnimCount >= maxCustomAnim)
+            return false
+        _ceSlots[token] = true
+        customAnimCount++
+        return true
+    }
+    function releaseCeSlot(token) {
+        if (!token || !_ceSlots[token])
+            return
+        delete _ceSlots[token]
+        customAnimCount = Math.max(0, customAnimCount - 1)
+        if (!_ceRevQueued) {
+            _ceRevQueued = true
+            Qt.callLater(() => {
+                emo._ceRevQueued = false
+                emo.customAnimRev++
+            })
+        }
     }
 
     Component.onCompleted: load()
